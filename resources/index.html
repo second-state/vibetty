@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="silk">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Web Vibetty</title>
+
+    <link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css" />
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <link href="https://cdn.jsdelivr.net/npm/daisyui@5/themes.css" rel="stylesheet" type="text/css" />
+
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+
+    <!-- 添加 VAD-Web 依赖 -->
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.29/dist/bundle.min.js"></script>
+
+</head>
+
+<body class="bg-base-200 min-h-screen">
+    <div class="container mx-auto p-4 h-screen flex flex-col">
+        <!-- Header -->
+        <div class="navbar bg-base-100 rounded-lg shadow-lg mb-4">
+            <div class="navbar-start">
+                <!-- VAD Button -->
+                <button class="btn btn-ghost btn-circle mr-2" id="vad-btn" title="Voice Activity Detection">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24"
+                        stroke="currentColor" id="vad-icon">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                            d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+                    </svg>
+                </button>
+
+                <!-- Theme Dropdown -->
+                <div class="dropdown">
+                    <div tabindex="0" role="button" class="btn btn-ghost btn-circle">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24"
+                            stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                d="M7 21a4 4 0 01-4-4V5a2 2 0 012-2h4a2 2 0 012 2v12a4 4 0 01-4 4zm0 0h12a2 2 0 002-2v-4a2 2 0 00-2-2h-2.343M11 7.343l1.657-1.657a2 2 0 012.828 0l2.829 2.829a2 2 0 010 2.828l-8.486 8.485M7 17h.01" />
+                        </svg>
+                    </div>
+                    <ul tabindex="0"
+                        class="menu menu-sm dropdown-content bg-base-100 rounded-box z-[1] mt-3 w-52 p-2 shadow">
+                        <li><a class="theme-controller" data-theme="light">Light</a></li>
+                        <li><a class="theme-controller" data-theme="dark">Dark</a></li>
+                        <li><a class="theme-controller" data-theme="cyberpunk">Cyberpunk</a></li>
+                        <li><a class="theme-controller" data-theme="synthwave">Synthwave</a></li>
+                    </ul>
+                </div>
+            </div>
+            <div class="navbar-center">
+                <div class="text-lg font-bold header-title">Web Vibetty</div>
+            </div>
+            <div class="navbar-end">
+                <div class="flex gap-2">
+                    <button class="btn btn-circle btn-sm btn-warning control-button minimize">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24"
+                            stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 12H4" />
+                        </svg>
+                    </button>
+                    <button class="btn btn-circle btn-sm btn-success control-button maximize">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24"
+                            stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                d="M4 8V6a2 2 0 012-2h2M4 16v2a2 2 0 002 2h2m8-16h2a2 2 0 012 2v2m-4 12h2a2 2 0 002-2v-2" />
+                        </svg>
+                    </button>
+                    <button class="btn btn-circle btn-sm btn-error control-button close">
+                        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24"
+                            stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Terminal Container -->
+        <div class="card bg-base-100 shadow-xl flex-1 overflow-hidden">
+            <div class="card-body p-2 h-full">
+                <div id="terminal" class="terminal-container h-full"></div>
+            </div>
+        </div>
+
+        <!-- Status Bar -->
+        <div class="bg-base-100 rounded-lg shadow-lg mt-4 p-2">
+            <div class="flex justify-between items-center text-sm">
+                <div class="flex items-center gap-4">
+                    <!-- Connection Status -->
+                    <div id="connection-status" class="badge badge-success gap-2">
+                        <div class="w-2 h-2 rounded-full bg-success animate-pulse"></div>
+                        Connected
+                    </div>
+
+                    <!-- Pending Input Preview -->
+                    <div id="pending-input" class="bg-warning/10 border border-warning/20 rounded px-2 py-1 hidden">
+                        <div class="flex items-center gap-2">
+                            <span class="text-warning font-semibold text-xs">Pending:</span>
+                            <span id="pending-text" class="text-xs font-mono"></span>
+                            <button id="clear-pending" class="btn btn-ghost btn-xs ml-1">
+                                <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3" fill="none" viewBox="0 0 24 24"
+                                    stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                        d="M6 18L18 6M6 6l12 12" />
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Input Prompt Display -->
+                    <div id="input-prompt" class="hidden flex items-center gap-2 text-xs">
+                        <span class="text-info font-semibold">Prompt:</span>
+                        <span id="input-prompt-text" class="font-mono"></span>
+                    </div>
+
+                    <!-- VAD Status -->
+                    <div id="vad-status" class="text-xs opacity-60 hidden">
+                        <span class="loading loading-dots loading-sm mr-1"></span>
+                        <span>Listening...</span>
+                    </div>
+                </div>
+
+                <div class="flex items-center gap-2">
+                    <kbd class="kbd kbd-sm">Ctrl</kbd>
+                    <span>+</span>
+                    <kbd class="kbd kbd-sm">C</kbd>
+                    <span class="text-xs opacity-60">Interrupt</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Reconnect Dialog -->
+    <dialog id="reconnect_modal" class="modal">
+        <div class="modal-box">
+            <h3 class="text-lg font-bold">Connection Lost</h3>
+            <p class="py-4">The connection to the terminal server has been lost. Would you like to reconnect?</p>
+            <div class="modal-action">
+                <button class="btn btn-outline"
+                    onclick="document.getElementById('reconnect_modal').close()">Cancel</button>
+                <button class="btn btn-primary" id="reconnect-btn">Reconnect</button>
+            </div>
+        </div>
+        <form method="dialog" class="modal-backdrop">
+            <button>close</button>
+        </form>
+    </dialog>
+
+    <!-- No UUID Warning Modal -->
+    <dialog id="no_uuid_modal" class="modal">
+        <div class="modal-box">
+            <h3 class="text-lg font-bold text-warning">No Session UUID</h3>
+            <p class="py-4">Please provide a session UUID using <code>?id=&lt;uuid&gt;</code> in the URL.</p>
+            <div class="modal-action">
+                <button class="btn btn-primary" onclick="document.getElementById('no_uuid_modal').close()">OK</button>
+            </div>
+        </div>
+        <form method="dialog" class="modal-backdrop">
+            <button>close</button>
+        </form>
+    </dialog>
+
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+    <script crossorigin src="https://unpkg.com/@msgpack/msgpack"></script>
+    <script src="app.js"></script>
+</body>
+
+</html>
