@@ -24,8 +24,7 @@ tower-http = { version = "0.5", features = ["fs"] }
 tokio = { version = "1", features = ["full"] }
 
 
-# echokit_terminal = { git = "https://github.com/second-state/echokit_pty.git", branch = "main" }
-echokit_terminal = { path = "/home/csh/my_workspace/speak_term/" }
+echokit_terminal = { git = "https://github.com/second-state/echokit_pty.git", branch = "main" }
 futures-util = "0.3.32"
 
 reqwest = { version = "0.13", features = ["multipart", "json", "stream"] }

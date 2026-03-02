@@ -443,6 +443,7 @@ checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 [[package]]
 name = "echokit_terminal"
 version = "0.2.0"
+source = "git+https://github.com/second-state/echokit_pty.git?branch=main#8eac766ba80c4ae23810a8bd054b1192c70e13b5"
 dependencies = [
  "anyhow",
  "axum",
