@@ -267,7 +267,7 @@ impl ServerMessage {
 impl ClientMessage {
     /// 序列化为 MessagePack 字节
     pub fn to_msgpack(&self) -> Result<Vec<u8>, rmp_serde::encode::Error> {
-        rmp_serde::to_vec(self)
+        rmp_serde::to_vec_named(self)
     }
 
     /// 从 MessagePack 字节反序列化
@@ -368,6 +368,19 @@ mod tests {
         let json = msg.to_json().unwrap();
         println!("JSON: {}", json);
         let decoded = ClientMessage::from_json(&json).unwrap();
+        match decoded {
+            ClientMessage::Choice { index } => {
+                assert_eq!(index, 2);
+            }
+            _ => panic!("Wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_client_choice_msgpack() {
+        let msg = ClientMessage::choice(2);
+        let bytes = msg.to_msgpack().unwrap();
+        let decoded = ClientMessage::from_msgpack(&bytes).unwrap();
         match decoded {
             ClientMessage::Choice { index } => {
                 assert_eq!(index, 2);

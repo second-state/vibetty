@@ -7,13 +7,73 @@ use axum::{
     },
     response::IntoResponse,
 };
-use echokit_terminal::terminal::claude::ClaudeCodeResult;
+use echokit_terminal::terminal::claude::{ClaudeCodeResult, UseTool};
+use serde::Deserialize;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::{
     config::AsrConfig,
     protocol::{ChoicesData, ClientMessage, ServerMessage, VoiceInputStart},
 };
+
+/// AskUserQuestion 工具输入结构
+#[derive(Debug, Clone, Deserialize)]
+struct AskUserQuestionInput {
+    questions: Vec<Question>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct Question {
+    question: String,
+    #[serde(rename = "header")]
+    _header: Option<String>,
+    #[serde(rename = "multiSelect")]
+    _multi_select: Option<bool>,
+    options: Vec<QuestionOption>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct QuestionOption {
+    label: String,
+    #[serde(rename = "description")]
+    _description: Option<String>,
+}
+
+/// 将 UseTool 转换为 ChoicesData
+fn use_tool_to_choices(tool: &UseTool) -> ChoicesData {
+    // 检测 AskUserQuestion 并转换成 choices
+    if tool.name == "AskUserQuestion" {
+        if let Ok(input) = serde_json::from_value::<AskUserQuestionInput>(tool.input.clone()) {
+            if let Some(first_q) = input.questions.first() {
+                let options: Vec<String> =
+                    first_q.options.iter().map(|o| o.label.clone()).collect();
+
+                return ChoicesData {
+                    title: first_q.question.clone(),
+                    options,
+                };
+            }
+        }
+    }
+
+    // 其他工具，显示基本信息
+    let title = match serde_json::from_value::<HashMap<String, String>>(tool.input.clone()) {
+        Ok(map) => {
+            let mut title_str = vec![format!("Tool: {}", tool.name)];
+            for (k, v) in map {
+                title_str.push(format!("{}: {}", k, v));
+            }
+            title_str.join("\n\n")
+        }
+        Err(_) => serde_json::to_string_pretty(&tool.input)
+            .unwrap_or(format!("Tool call: {:?}", tool.name)),
+    };
+
+    ChoicesData {
+        title,
+        options: vec![],
+    }
+}
 
 type ServerTx = broadcast::Sender<ServerMessage>;
 
@@ -79,12 +139,20 @@ pub async fn run_command(
             },
         };
 
-        if !matches!(
+        if matches!(
             event,
-            TerminalEvent::ClaudeResult(ClaudeCodeResult::WaitForUserInput)
+            TerminalEvent::ClaudeResult(ClaudeCodeResult::ClaudeLog(
+                echokit_terminal::types::claude::ClaudeCodeLog::UserMessage(..)
+            ))
         ) {
             input_received = false;
         }
+
+        log::info!(
+            "[{}] input_received: {}",
+            terminal.session_id(),
+            input_received
+        );
 
         match event {
             TerminalEvent::ClaudeResult(ClaudeCodeResult::PtyOutput(output)) => {
@@ -138,27 +206,7 @@ pub async fn run_command(
                                         r
                                     );
 
-                                    let title = match serde_json::from_value::<
-                                        HashMap<String, String>,
-                                    >(
-                                        r.input.clone()
-                                    ) {
-                                        Ok(map) => {
-                                            let mut title_str = vec![format!("Tool: {}", r.name)];
-                                            for (k, v) in map {
-                                                title_str.push(format!("{}: {}", k, v));
-                                            }
-                                            title_str.join(", ")
-                                        }
-                                        Err(_) => serde_json::to_string_pretty(&r.input)
-                                            .unwrap_or(format!("Tool call: {:?}", r.name)),
-                                    };
-
-                                    let choice_data = ChoicesData {
-                                        title,
-                                        options: vec![],
-                                    };
-
+                                    let choice_data = use_tool_to_choices(&r);
                                     let _ = tx.send(ServerMessage::Choices(choice_data));
                                     break;
                                 }
@@ -219,6 +267,8 @@ pub async fn run_command(
                 log::info!("Sending text input to terminal: {:?}", text);
                 terminal.send_text(&text).await?;
                 input_received = true;
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                terminal.send_enter().await?;
             }
             TerminalEvent::Input(ClientMessage::Choice { index }) => {
                 log::info!("Sending choice input to terminal: {:?}", index);
@@ -238,6 +288,7 @@ pub async fn run_command(
             TerminalEvent::Input(ClientMessage::VoiceInputStart(VoiceInputStart {
                 sample_rate,
             })) => {
+                log::info!("Voice input started with sample rate: {:?}", sample_rate);
                 wav_buffer.clear();
                 wav_sample_rate = sample_rate.unwrap_or(16000);
             }

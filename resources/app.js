@@ -1043,8 +1043,10 @@ class WebTerminal {
         // 显示 toast 通知
         this.showToast(`ASR: ${text}`, 'info');
 
-        // 自动发送到终端
-        this.sendPtyInput(text + '\n');
+        // 只在 VAD 开启时自动发送到终端
+        if (this.isVadActive) {
+            this.sendPtyInput(text + '\n');
+        }
     }
 
     /**
