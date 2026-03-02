@@ -142,7 +142,6 @@ fn state_to_message(
         echokit_terminal::terminal::claude::ClaudeCodeState::Idle => Some(
             ServerMessage::get_input("Claude is waiting for user input...".to_string()),
         ),
-        _ => None,
     }
 }
 

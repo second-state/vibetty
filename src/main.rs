@@ -1,6 +1,8 @@
 use axum::{
     Router,
-    routing::{get, get_service},
+    body::Body,
+    response::{IntoResponse, Response},
+    routing::get,
 };
 use clap::Parser;
 
@@ -11,6 +13,24 @@ mod util;
 mod ws;
 
 use config::Args;
+
+// 嵌入静态资源
+const INDEX_HTML: &str = include_str!("../resources/index.html");
+const APP_JS: &str = include_str!("../resources/app.js");
+
+async fn index_handler() -> impl IntoResponse {
+    Response::builder()
+        .header("content-type", "text/html")
+        .body(Body::from(INDEX_HTML))
+        .unwrap()
+}
+
+async fn app_js_handler() -> impl IntoResponse {
+    Response::builder()
+        .header("content-type", "application/javascript")
+        .body(Body::from(APP_JS))
+        .unwrap()
+}
 
 #[tokio::main]
 async fn main() {
@@ -42,16 +62,17 @@ async fn main() {
         let r = ws::run_command(args.command, asr_config, cli_rx, tx).await;
         if let Err(e) = r {
             log::error!("Error in command execution: {}", e);
+            std::process::exit(1);
         } else {
             log::info!("Command execution finished");
+            std::process::exit(0);
         }
     });
 
     let app = Router::new()
+        .route("/", get(index_handler))
+        .route("/app.js", get(app_js_handler))
         .route("/ws", get(ws::ws_handler))
-        .fallback_service(get_service(tower_http::services::ServeDir::new(
-            "resources",
-        )))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&args.bind_addr)
