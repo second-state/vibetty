@@ -8,6 +8,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ClientMessage {
+    /// Sync
+    #[serde(rename = "sync")]
+    Sync,
+
     /// PTY 输入（键盘输入发送到终端）
     #[serde(rename = "pty_in")]
     PtyInput(Vec<u8>),
@@ -39,6 +43,7 @@ pub enum ClientMessage {
 impl Debug for ClientMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            ClientMessage::Sync => f.debug_tuple("Sync").finish(),
             ClientMessage::PtyInput(data) => f
                 .debug_tuple("PtyInput")
                 .field(&format!("[{} bytes]", data.len()))

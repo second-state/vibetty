@@ -75,6 +75,77 @@ fn use_tool_to_choices(tool: &UseTool) -> ChoicesData {
     }
 }
 
+/// 根据终端状态生成要发送的消息
+fn state_to_message(
+    state: &echokit_terminal::terminal::claude::ClaudeCodeState,
+    session_id: &str,
+) -> Option<ServerMessage> {
+    match state {
+        echokit_terminal::terminal::claude::ClaudeCodeState::PreUseTool {
+            request,
+            is_pending,
+            ..
+        } => {
+            if *is_pending {
+                for r in request {
+                    if r.done {
+                        continue;
+                    }
+
+                    log::info!(
+                        "[{}] Claude is requesting to use a tool: {:?}",
+                        session_id,
+                        r
+                    );
+
+                    let choice_data = use_tool_to_choices(r);
+                    return Some(ServerMessage::Choices(choice_data));
+                }
+            }
+            None
+        }
+        echokit_terminal::terminal::claude::ClaudeCodeState::Output {
+            output,
+            is_thinking,
+        } => {
+            if *is_thinking {
+                log::info!("[{}] Claude is thinking...", session_id);
+                Some(ServerMessage::notification(
+                    crate::protocol::NotificationLevel::Info,
+                    format!("Claude is thinking...\n {output}",),
+                ))
+            } else {
+                Some(ServerMessage::screen_text(output.clone()))
+            }
+        }
+        echokit_terminal::terminal::claude::ClaudeCodeState::StopUseTool { is_error } => {
+            if *is_error {
+                log::error!("[{}] Tool execution error", session_id);
+                Some(ServerMessage::notification(
+                    crate::protocol::NotificationLevel::Error,
+                    "Tool execution failed. Please try again.".to_string(),
+                ))
+            } else {
+                log::info!("[{}] Tool execution completed", session_id);
+                Some(ServerMessage::notification(
+                    crate::protocol::NotificationLevel::Info,
+                    "Tool execution completed successfully.".to_string(),
+                ))
+            }
+        }
+        echokit_terminal::terminal::claude::ClaudeCodeState::Working { prompt } => {
+            Some(ServerMessage::notification(
+                crate::protocol::NotificationLevel::Success,
+                prompt.clone(),
+            ))
+        }
+        echokit_terminal::terminal::claude::ClaudeCodeState::Idle => Some(
+            ServerMessage::get_input("Claude is waiting for user input...".to_string()),
+        ),
+        _ => None,
+    }
+}
+
 type ServerTx = broadcast::Sender<ServerMessage>;
 
 type ClientTx = mpsc::Sender<ClientMessage>;
@@ -118,10 +189,32 @@ pub async fn run_command(
     let mut input_received = false;
     let mut wav_buffer = Vec::new();
     let mut wav_sample_rate = 16000;
+    let mut no_ws_client = true;
+
+    struct NeverReady;
+    impl std::future::Future for NeverReady {
+        type Output = ();
+
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Self::Output> {
+            std::task::Poll::Pending
+        }
+    }
 
     loop {
+        let terminal_read_event = async {
+            if no_ws_client {
+                NeverReady.await;
+                unreachable!();
+            } else {
+                terminal.read_pty_output_and_history_line().await
+            }
+        };
+
         let event = tokio::select! {
-            result = terminal.read_pty_output_and_history_line() => {
+            result = terminal_read_event => {
                 match result {
                     Ok(r) => TerminalEvent::ClaudeResult(r),
                     Err(e) => {
@@ -148,12 +241,6 @@ pub async fn run_command(
             input_received = false;
         }
 
-        log::info!(
-            "[{}] input_received: {}",
-            terminal.session_id(),
-            input_received
-        );
-
         match event {
             TerminalEvent::ClaudeResult(ClaudeCodeResult::PtyOutput(output)) => {
                 log::info!("[{}] PTY output: {}", terminal.session_id(), output.len());
@@ -172,9 +259,12 @@ pub async fn run_command(
 
                 terminal.update_state(&ClaudeCodeResult::WaitForUserInput);
 
-                let _ = tx.send(ServerMessage::get_input(
+                if let Err(_e) = tx.send(ServerMessage::get_input(
                     "Claude is waiting for user input...".to_string(),
-                ));
+                )) {
+                    log::error!("[{}] No client waiting for data", terminal.session_id());
+                    no_ws_client = true;
+                }
 
                 if input_received {
                     terminal.send_enter().await?;
@@ -188,72 +278,28 @@ pub async fn run_command(
                         terminal.session_id(),
                         terminal.state()
                     );
-                    match terminal.state() {
-                        echokit_terminal::terminal::claude::ClaudeCodeState::PreUseTool {
-                            request,
-                            is_pending,
-                            ..
-                        } => {
-                            if *is_pending {
-                                for r in request {
-                                    if r.done {
-                                        continue;
-                                    }
-
-                                    log::info!(
-                                        "[{}] Claude is requesting to use a tool: {:?}",
-                                        terminal.session_id(),
-                                        r
-                                    );
-
-                                    let choice_data = use_tool_to_choices(&r);
-                                    let _ = tx.send(ServerMessage::Choices(choice_data));
-                                    break;
-                                }
-                            }
-                        }
-                        echokit_terminal::terminal::claude::ClaudeCodeState::Output {
-                            output,
-                            is_thinking,
-                        } => {
-                            if *is_thinking {
-                                log::info!("[{}] Claude is thinking...", terminal.session_id());
-                                let _ = tx.send(ServerMessage::notification(
-                                    crate::protocol::NotificationLevel::Info,
-                                    "Claude is thinking...".to_string(),
-                                ));
-                            } else {
-                                let _ = tx.send(ServerMessage::screen_text(output.clone()));
-                            }
-                        }
-                        echokit_terminal::terminal::claude::ClaudeCodeState::StopUseTool {
-                            is_error,
-                        } => {
-                            if *is_error {
-                                log::error!("[{}] Tool execution error", terminal.session_id());
-                                let _ = tx.send(ServerMessage::notification(
-                                    crate::protocol::NotificationLevel::Error,
-                                    "Tool execution failed. Please try again.".to_string(),
-                                ));
-                            } else {
-                                log::info!("[{}] Tool execution completed", terminal.session_id());
-                                let _ = tx.send(ServerMessage::notification(
-                                    crate::protocol::NotificationLevel::Info,
-                                    "Tool execution completed successfully.".to_string(),
-                                ));
-                            }
-                        }
-                        echokit_terminal::terminal::claude::ClaudeCodeState::Idle => {
-                            let _ = tx.send(ServerMessage::get_input(
-                                "Claude is waiting for user input...".to_string(),
-                            ));
-
-                            if input_received {
-                                terminal.send_enter().await?;
-                            }
+                    if let Some(msg) =
+                        state_to_message(terminal.state(), &terminal.session_id().to_string())
+                    {
+                        if let Err(_e) = tx.send(msg) {
+                            log::error!("[{}] No client waiting for data", terminal.session_id());
+                            no_ws_client = true;
                         }
                     }
+
+                    // Handle Idle state input_received separately
+                    if matches!(
+                        terminal.state(),
+                        echokit_terminal::terminal::claude::ClaudeCodeState::Idle
+                    ) && input_received
+                    {
+                        terminal.send_enter().await?;
+                    }
                 }
+            }
+            TerminalEvent::Input(ClientMessage::Sync) => {
+                log::info!("Received Sync message from client");
+                no_ws_client = false;
             }
             TerminalEvent::Input(ClientMessage::PtyInput(input)) => {
                 log::info!(
@@ -320,7 +366,10 @@ pub async fn run_command(
 
                 let asr_result = t2s(r.join("\n"));
 
-                let _ = tx.send(ServerMessage::asr_result(asr_result));
+                if let Err(_e) = tx.send(ServerMessage::asr_result(asr_result)) {
+                    log::error!("[{}] No client waiting for data", terminal.session_id());
+                    no_ws_client = true;
+                }
             }
             TerminalEvent::InputClosed | TerminalEvent::Error => {
                 log::error!("Input channel closed or error occurred, terminating terminal loop");
@@ -338,9 +387,27 @@ pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> 
 
 async fn handle_socket(mut socket: WebSocket, state: AppState) {
     let mut server_rx = state.tx.subscribe();
+    if let Err(_) = state.cli_tx.send(ClientMessage::Sync).await {
+        log::error!("Failed to send Sync message to cli_tx");
+        return;
+    }
+
+    let mut wait_pong = false;
+    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(30));
 
     loop {
         tokio::select! {
+            _ = ticker.tick() => {
+                if wait_pong {
+                    log::error!("No pong received, closing WebSocket connection");
+                    break;
+                }
+                wait_pong = true;
+                if socket.send(Message::Ping(bytes::Bytes::new())).await.is_err() {
+                    log::error!("Failed to send ping message");
+                    break;
+                }
+            }
             // 接收来自服务器的消息（广播），发送到 WebSocket 客户端
             result = server_rx.recv() => {
                 match result {
@@ -398,6 +465,10 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                         Message::Close(_) => {
                             log::info!("Client disconnected");
                             break;
+                        }
+                        Message::Pong(_) => {
+                            wait_pong = false;
+                            log::debug!("Received pong from client");
                         }
                         _ => {}
                     },
