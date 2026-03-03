@@ -38,6 +38,10 @@ pub enum ClientMessage {
         /// 选项索引（choices 数组的索引）
         index: i32,
     },
+
+    /// 切换工作目录
+    #[serde(rename = "change_dir")]
+    ChangeDir(String),
 }
 
 impl Debug for ClientMessage {
@@ -59,6 +63,9 @@ impl Debug for ClientMessage {
             ClientMessage::Input(text) => f.debug_tuple("Input").field(text).finish(),
             ClientMessage::Choice { index } => {
                 f.debug_struct("Choice").field("index", index).finish()
+            }
+            ClientMessage::ChangeDir(path) => {
+                f.debug_tuple("ChangeDir").field(path).finish()
             }
         }
     }
@@ -152,6 +159,10 @@ pub struct GetInputData {
 /// 提供选择项数据
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChoicesData {
+    /// 工具调用 ID（用于识别是否是同一个 tool 请求）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+
     /// 标题/问题
     pub title: String,
 
@@ -217,6 +228,11 @@ impl ClientMessage {
     pub fn input(text: impl Into<String>) -> Self {
         Self::Input(text.into())
     }
+
+    /// 创建切换目录消息
+    pub fn change_dir(path: impl Into<String>) -> Self {
+        Self::ChangeDir(path.into())
+    }
 }
 
 // ========== 服务器消息构造 ==========
@@ -256,6 +272,16 @@ impl ServerMessage {
     /// 创建提供选择项消息
     pub fn choices(title: impl Into<String>, options: Vec<String>) -> Self {
         Self::Choices(ChoicesData {
+            id: None,
+            title: title.into(),
+            options,
+        })
+    }
+
+    /// 创建提供选择项消息（带 ID）
+    pub fn choices_with_id(id: impl Into<String>, title: impl Into<String>, options: Vec<String>) -> Self {
+        Self::Choices(ChoicesData {
+            id: Some(id.into()),
             title: title.into(),
             options,
         })

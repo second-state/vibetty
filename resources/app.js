@@ -43,6 +43,7 @@ class WebTerminal {
     setupTerminal() {
         this.terminal = new Terminal({
             cursorBlink: true,
+            allowProposedApi: true,
             theme: {
                 background: '#1e1e1e',
                 foreground: '#ffffff',
@@ -928,6 +929,7 @@ class WebTerminal {
                         const uint8Array = new Uint8Array(message.data);
                         const text = new TextDecoder('utf-8', { fatal: false }).decode(uint8Array);
                         this.terminal.write(text);
+                        this.terminal.scrollToBottom();
                     }
                     break;
 
