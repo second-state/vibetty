@@ -928,6 +928,7 @@ class WebTerminal {
                         const uint8Array = new Uint8Array(message.data);
                         const text = new TextDecoder('utf-8', { fatal: false }).decode(uint8Array);
                         this.terminal.write(text);
+                        this.terminal.scrollToBottom();
                     }
                     break;
 
