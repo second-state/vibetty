@@ -41,6 +41,8 @@ struct QuestionOption {
 
 /// 将 UseTool 转换为 ChoicesData
 fn use_tool_to_choices(tool: &UseTool) -> ChoicesData {
+    let tool_id = if !tool.id.is_empty() { Some(tool.id.clone()) } else { None };
+
     // 检测 AskUserQuestion 并转换成 choices
     if tool.name == "AskUserQuestion" {
         if let Ok(input) = serde_json::from_value::<AskUserQuestionInput>(tool.input.clone()) {
@@ -49,6 +51,7 @@ fn use_tool_to_choices(tool: &UseTool) -> ChoicesData {
                     first_q.options.iter().map(|o| o.label.clone()).collect();
 
                 return ChoicesData {
+                    id: tool_id,
                     title: first_q.question.clone(),
                     options,
                 };
@@ -59,9 +62,11 @@ fn use_tool_to_choices(tool: &UseTool) -> ChoicesData {
     // 其他工具，显示基本信息
     let title = match serde_json::from_value::<HashMap<String, String>>(tool.input.clone()) {
         Ok(map) => {
+            let mut keys: Vec<_> = map.keys().collect();
+            keys.sort(); // 排序 key 确保顺序固定
             let mut title_str = vec![format!("Tool: {}", tool.name)];
-            for (k, v) in map {
-                title_str.push(format!("{}: {}", k, v));
+            for k in keys {
+                title_str.push(format!("{}: {}", k, map.get(k).unwrap()));
             }
             title_str.join("\n\n")
         }
@@ -70,6 +75,7 @@ fn use_tool_to_choices(tool: &UseTool) -> ChoicesData {
     };
 
     ChoicesData {
+        id: tool_id,
         title,
         options: vec![],
     }
@@ -161,12 +167,29 @@ fn t2s<S: AsRef<str>>(s: S) -> String {
     s.replace("什幺", "什么")
 }
 
+pub enum RunCommandResult {
+    Done,
+    ChangeDir(String, ClientRx),
+}
+
 pub async fn run_command(
     command: Vec<String>,
     asr_config: AsrConfig,
     mut rx: ClientRx,
     tx: ServerTx,
-) -> anyhow::Result<()> {
+    current_dir: Option<std::path::PathBuf>,
+) -> anyhow::Result<RunCommandResult> {
+    // 广播当前工作目录
+    let dir_path = current_dir
+        .as_ref()
+        .and_then(|p| p.to_str())
+        .unwrap_or(".")
+        .to_string();
+    let _ = tx.send(ServerMessage::notification(
+        crate::protocol::NotificationLevel::Info,
+        format!("Working in: {}", dir_path),
+    ));
+
     enum TerminalEvent {
         Input(crate::protocol::ClientMessage),
         InputClosed,
@@ -182,6 +205,7 @@ pub async fn run_command(
         command.first().unwrap().as_str(),
         &command[1..],
         (24, 80),
+        current_dir,
     )
     .await?;
 
@@ -243,6 +267,13 @@ pub async fn run_command(
         match event {
             TerminalEvent::ClaudeResult(ClaudeCodeResult::PtyOutput(output)) => {
                 log::info!("[{}] PTY output: {}", terminal.session_id(), output.len());
+                if output.contains("accept edits on") {
+                    log::info!("[{}] Detected 'accept edits on'", terminal.session_id());
+                } else if output.contains("plan mode on") {
+                    log::info!("[{}] Detected 'plan mode on'", terminal.session_id());
+                } else if output.contains("? for shortcuts") {
+                    log::info!("[{}] Detected 'normal mode on'", terminal.session_id());
+                }
 
                 if tx
                     .send(ServerMessage::PtyOutput(output.into_bytes()))
@@ -255,6 +286,9 @@ pub async fn run_command(
 
             TerminalEvent::ClaudeResult(ClaudeCodeResult::WaitForUserInput) => {
                 log::info!("[{}] Waiting for user input", terminal.session_id());
+                // let _ = terminal.write_all(b"\x1b[O").await;
+                // tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                // let _ = terminal.write_all(b"\x1b[I").await;
 
                 terminal.update_state(&ClaudeCodeResult::WaitForUserInput);
 
@@ -330,6 +364,16 @@ pub async fn run_command(
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 terminal.send_enter().await?;
             }
+            TerminalEvent::Input(ClientMessage::ChangeDir(path)) => {
+                log::info!("Change directory requested: {}", path);
+                // 发送确认消息给客户端
+                let _ = tx.send(ServerMessage::notification(
+                    crate::protocol::NotificationLevel::Info,
+                    format!("Changing directory to: {}", path),
+                ));
+                // 返回新路径和 rx，让 main.rs 重新执行命令
+                return Ok(RunCommandResult::ChangeDir(path, rx));
+            }
             TerminalEvent::Input(ClientMessage::VoiceInputStart(VoiceInputStart {
                 sample_rate,
             })) => {
@@ -377,7 +421,7 @@ pub async fn run_command(
         }
     }
 
-    Ok(())
+    Ok(RunCommandResult::Done)
 }
 
 pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {

@@ -1,10 +1,14 @@
 use axum::{
-    Router,
+    Json, Router,
     body::Body,
+    extract::{ConnectInfo, State},
+    http::StatusCode,
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
+use std::net::SocketAddr;
 use clap::Parser;
+use serde::Deserialize;
 
 mod asr;
 mod config;
@@ -30,6 +34,44 @@ async fn app_js_handler() -> impl IntoResponse {
         .header("content-type", "application/javascript")
         .body(Body::from(APP_JS))
         .unwrap()
+}
+
+#[derive(Deserialize)]
+struct ChangeDirRequest {
+    path: String,
+}
+
+async fn change_dir_handler(
+    State(state): State<ws::AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(req): Json<ChangeDirRequest>,
+) -> impl IntoResponse {
+    // 检查是否来自 localhost
+    let ip = addr.ip();
+    let is_localhost = ip.is_loopback();
+
+    if !is_localhost {
+        log::warn!("Change directory request from non-localhost: {}", ip);
+        return (StatusCode::FORBIDDEN, "Only localhost access allowed").into_response();
+    }
+
+    log::info!("Change directory request from {}: {}", ip, req.path);
+
+    // 发送 ChangeDir 消息到 cli_tx
+    if let Err(e) = state
+        .cli_tx
+        .send(crate::protocol::ClientMessage::ChangeDir(req.path.clone()))
+        .await
+    {
+        log::error!("Failed to send ChangeDir message: {}", e);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to send change directory command: {}", e),
+        )
+            .into_response();
+    }
+
+    (StatusCode::OK, format!("Changing to: {}", req.path)).into_response()
 }
 
 #[tokio::main]
@@ -59,13 +101,35 @@ async fn main() {
     log::info!("ASR Config: {:?}", asr_config);
 
     tokio::spawn(async move {
-        let r = ws::run_command(args.command, asr_config, cli_rx, tx).await;
-        if let Err(e) = r {
-            log::error!("Error in command execution: {}", e);
-            std::process::exit(1);
-        } else {
-            log::info!("Command execution finished");
-            std::process::exit(0);
+        let command = args.command;
+        let mut cli_rx = cli_rx;
+        let mut current_dir: Option<std::path::PathBuf> = None;
+
+        loop {
+            let r = ws::run_command(
+                command.clone(),
+                asr_config.clone(),
+                cli_rx,
+                tx.clone(),
+                current_dir,
+            )
+            .await;
+            match r {
+                Ok(ws::RunCommandResult::ChangeDir(new_path, returned_rx)) => {
+                    log::info!("Changing directory to: {}", new_path);
+
+                    current_dir = Some(new_path.into());
+                    cli_rx = returned_rx;
+                }
+                Ok(ws::RunCommandResult::Done) => {
+                    log::info!("Command execution finished");
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    log::error!("Error in command execution: {}", e);
+                    std::process::exit(1);
+                }
+            }
         }
     });
 
@@ -73,6 +137,7 @@ async fn main() {
         .route("/", get(index_handler))
         .route("/app.js", get(app_js_handler))
         .route("/ws", get(ws::ws_handler))
+        .route("/api/change-dir", post(change_dir_handler))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&args.bind_addr)
@@ -81,5 +146,5 @@ async fn main() {
 
     log::info!("WebSocket server listening on ws://{}/ws", args.bind_addr);
 
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
 }
