@@ -43,6 +43,7 @@ class WebTerminal {
     setupTerminal() {
         this.terminal = new Terminal({
             cursorBlink: true,
+            allowProposedApi: true,
             theme: {
                 background: '#1e1e1e',
                 foreground: '#ffffff',
