@@ -64,9 +64,7 @@ impl Debug for ClientMessage {
             ClientMessage::Choice { index } => {
                 f.debug_struct("Choice").field("index", index).finish()
             }
-            ClientMessage::ChangeDir(path) => {
-                f.debug_tuple("ChangeDir").field(path).finish()
-            }
+            ClientMessage::ChangeDir(path) => f.debug_tuple("ChangeDir").field(path).finish(),
         }
     }
 }
@@ -193,6 +191,7 @@ pub enum NotificationLevel {
 
 // ========== 客户端消息构造 ==========
 
+#[allow(dead_code)]
 impl ClientMessage {
     /// 创建 PTY 输入消息
     pub fn pty_input(data: Vec<u8>) -> Self {
@@ -237,6 +236,7 @@ impl ClientMessage {
 
 // ========== 服务器消息构造 ==========
 
+#[allow(dead_code)]
 impl ServerMessage {
     /// 创建 PTY 输出消息
     pub fn pty_output(data: Vec<u8>) -> Self {
@@ -279,7 +279,11 @@ impl ServerMessage {
     }
 
     /// 创建提供选择项消息（带 ID）
-    pub fn choices_with_id(id: impl Into<String>, title: impl Into<String>, options: Vec<String>) -> Self {
+    pub fn choices_with_id(
+        id: impl Into<String>,
+        title: impl Into<String>,
+        options: Vec<String>,
+    ) -> Self {
         Self::Choices(ChoicesData {
             id: Some(id.into()),
             title: title.into(),
@@ -295,6 +299,7 @@ impl ServerMessage {
 
 // ========== MessagePack 序列化 ==========
 
+#[allow(dead_code)]
 impl ClientMessage {
     /// 序列化为 MessagePack 字节
     pub fn to_msgpack(&self) -> Result<Vec<u8>, rmp_serde::encode::Error> {
@@ -317,6 +322,7 @@ impl ClientMessage {
     }
 }
 
+#[allow(dead_code)]
 impl ServerMessage {
     /// 序列化为 MessagePack 字节
     pub fn to_msgpack(&self) -> Result<Vec<u8>, rmp_serde::encode::Error> {
