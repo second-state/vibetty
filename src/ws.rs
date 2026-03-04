@@ -41,22 +41,24 @@ struct QuestionOption {
 
 /// 将 UseTool 转换为 ChoicesData
 fn use_tool_to_choices(tool: &UseTool) -> ChoicesData {
-    let tool_id = if !tool.id.is_empty() { Some(tool.id.clone()) } else { None };
+    let tool_id = if !tool.id.is_empty() {
+        Some(tool.id.clone())
+    } else {
+        None
+    };
 
     // 检测 AskUserQuestion 并转换成 choices
-    if tool.name == "AskUserQuestion" {
-        if let Ok(input) = serde_json::from_value::<AskUserQuestionInput>(tool.input.clone()) {
-            if let Some(first_q) = input.questions.first() {
-                let options: Vec<String> =
-                    first_q.options.iter().map(|o| o.label.clone()).collect();
+    if tool.name == "AskUserQuestion"
+        && let Ok(input) = serde_json::from_value::<AskUserQuestionInput>(tool.input.clone())
+        && let Some(first_q) = input.questions.first()
+    {
+        let options: Vec<String> = first_q.options.iter().map(|o| o.label.clone()).collect();
 
-                return ChoicesData {
-                    id: tool_id,
-                    title: first_q.question.clone(),
-                    options,
-                };
-            }
-        }
+        return ChoicesData {
+            id: tool_id,
+            title: first_q.question.clone(),
+            options,
+        };
     }
 
     // 其他工具，显示基本信息
@@ -194,7 +196,7 @@ pub async fn run_command(
         Input(crate::protocol::ClientMessage),
         InputClosed,
 
-        ClaudeResult(ClaudeCodeResult),
+        ClaudeResult(Box<ClaudeCodeResult>),
 
         Error,
     }
@@ -239,7 +241,7 @@ pub async fn run_command(
         let event = tokio::select! {
             result = terminal_read_event => {
                 match result {
-                    Ok(r) => TerminalEvent::ClaudeResult(r),
+                    Ok(r) => TerminalEvent::ClaudeResult(Box::new(r)),
                     Err(e) => {
                         log::error!("[{}] Error reading PTY output: {:?}", terminal.session_id(), e);
                         TerminalEvent::Error
@@ -255,17 +257,24 @@ pub async fn run_command(
             },
         };
 
-        if matches!(
-            event,
-            TerminalEvent::ClaudeResult(ClaudeCodeResult::ClaudeLog(
-                echokit_terminal::types::claude::ClaudeCodeLog::UserMessage(..)
-            ))
-        ) {
+        if let TerminalEvent::ClaudeResult(ref r) = event
+            && matches!(
+                r.as_ref(),
+                ClaudeCodeResult::ClaudeLog(
+                    echokit_terminal::types::claude::ClaudeCodeLog::UserMessage(..)
+                )
+            )
+        {
             input_received = false;
         }
 
         match event {
-            TerminalEvent::ClaudeResult(ClaudeCodeResult::PtyOutput(output)) => {
+            TerminalEvent::ClaudeResult(r)
+                if matches!(r.as_ref(), ClaudeCodeResult::PtyOutput(_)) =>
+            {
+                let ClaudeCodeResult::PtyOutput(output) = *r else {
+                    unreachable!()
+                };
                 log::info!("[{}] PTY output: {}", terminal.session_id(), output.len());
                 if output.contains("accept edits on") {
                     log::info!("[{}] Detected 'accept edits on'", terminal.session_id());
@@ -284,13 +293,12 @@ pub async fn run_command(
                 }
             }
 
-            TerminalEvent::ClaudeResult(ClaudeCodeResult::WaitForUserInput) => {
+            TerminalEvent::ClaudeResult(r)
+                if matches!(r.as_ref(), ClaudeCodeResult::WaitForUserInput) =>
+            {
                 log::info!("[{}] Waiting for user input", terminal.session_id());
-                // let _ = terminal.write_all(b"\x1b[O").await;
-                // tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                // let _ = terminal.write_all(b"\x1b[I").await;
 
-                terminal.update_state(&ClaudeCodeResult::WaitForUserInput);
+                terminal.update_state(&r);
 
                 if let Err(_e) = tx.send(ServerMessage::get_input(
                     "Claude is waiting for user input...".to_string(),
@@ -313,11 +321,10 @@ pub async fn run_command(
                     );
                     if let Some(msg) =
                         state_to_message(terminal.state(), &terminal.session_id().to_string())
+                        && let Err(_e) = tx.send(msg)
                     {
-                        if let Err(_e) = tx.send(msg) {
-                            log::error!("[{}] No client waiting for data", terminal.session_id());
-                            no_ws_client = true;
-                        }
+                        log::error!("[{}] No client waiting for data", terminal.session_id());
+                        no_ws_client = true;
                     }
 
                     // Handle Idle state input_received separately
@@ -430,7 +437,7 @@ pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> 
 
 async fn handle_socket(mut socket: WebSocket, state: AppState) {
     let mut server_rx = state.tx.subscribe();
-    if let Err(_) = state.cli_tx.send(ClientMessage::Sync).await {
+    if state.cli_tx.send(ClientMessage::Sync).await.is_err() {
         log::error!("Failed to send Sync message to cli_tx");
         return;
     }
@@ -529,6 +536,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn retry_whisper(
     client: &reqwest::Client,
     url: &str,

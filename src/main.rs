@@ -6,9 +6,9 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use std::net::SocketAddr;
 use clap::Parser;
 use serde::Deserialize;
+use std::net::SocketAddr;
 
 mod asr;
 mod config;
@@ -146,5 +146,10 @@ async fn main() {
 
     log::info!("WebSocket server listening on ws://{}/ws", args.bind_addr);
 
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .unwrap();
 }

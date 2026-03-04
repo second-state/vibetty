@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 pub mod realtime_asr {
     use bytes::Bytes;
     use futures_util::{SinkExt, StreamExt};

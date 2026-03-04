@@ -40,10 +40,10 @@ impl Args {
     pub fn asr_config(&self) -> AsrConfig {
         // 如果指定了配置文件，从文件读取
         if let Some(path) = &self.asr_config_path {
-            if let Ok(content) = std::fs::read_to_string(path) {
-                if let Ok(config) = serde_json::from_str::<WhisperASRConfig>(&content) {
-                    return AsrConfig::Whisper(config);
-                }
+            if let Ok(content) = std::fs::read_to_string(path)
+                && let Ok(config) = serde_json::from_str::<WhisperASRConfig>(&content)
+            {
+                return AsrConfig::Whisper(config);
             }
             log::warn!(
                 "Failed to parse ASR config from {}, falling back to env",
