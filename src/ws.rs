@@ -257,17 +257,6 @@ pub async fn run_command(
             },
         };
 
-        if let TerminalEvent::ClaudeResult(ref r) = event
-            && matches!(
-                r.as_ref(),
-                ClaudeCodeResult::ClaudeLog(
-                    echokit_terminal::types::claude::ClaudeCodeLog::UserMessage(..)
-                )
-            )
-        {
-            input_received = false;
-        }
-
         match event {
             TerminalEvent::ClaudeResult(r)
                 if matches!(r.as_ref(), ClaudeCodeResult::PtyOutput(_)) =>
@@ -328,12 +317,16 @@ pub async fn run_command(
                     }
 
                     // Handle Idle state input_received separately
-                    if matches!(
-                        terminal.state(),
-                        echokit_terminal::terminal::claude::ClaudeCodeState::Idle
-                    ) && input_received
-                    {
-                        terminal.send_enter().await?;
+                    match terminal.state() {
+                        echokit_terminal::terminal::claude::ClaudeCodeState::Idle => {
+                            if input_received {
+                                terminal.send_enter().await?;
+                            }
+                        }
+                        echokit_terminal::terminal::claude::ClaudeCodeState::Working { .. } => {
+                            input_received = false;
+                        }
+                        _ => {}
                     }
                 }
             }
