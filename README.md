@@ -18,10 +18,11 @@ WebSocket terminal server with voice input support and Claude AI intelligent int
 Create a `.env` file and configure the Whisper API (Groq recommended):
 
 ```bash
-# Use Groq's Whisper API (recommended, fast)
-WHISPER_API_KEY=your_groq_api_key_here
-WHISPER_API_URL=https://api.groq.com/openai/v1/audio/transcriptions
-WHISPER_MODEL=whisper-large-v3
+ASR_API_KEY=your_api_key_here
+ASR_URL=https://api.groq.com/openai/v1/audio/transcriptions
+ASR_MODEL=whisper-large-v3
+ASR_LANG=en
+ASR_PROMPT=
 ```
 
 ### 2. Start the Service
@@ -32,7 +33,7 @@ cargo run -- -- claude
 
 # Or build and run
 cargo build --release
-./target/release/vibetty -- --claude
+./target/release/vibetty -- claude
 ```
 
 For more options, use `--help`:
