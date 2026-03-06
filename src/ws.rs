@@ -180,6 +180,7 @@ pub async fn run_command(
     mut rx: ClientRx,
     tx: ServerTx,
     current_dir: Option<std::path::PathBuf>,
+    listen_port: u16,
 ) -> anyhow::Result<RunCommandResult> {
     // 广播当前工作目录
     let dir_path = current_dir
@@ -206,6 +207,7 @@ pub async fn run_command(
     let mut terminal = echokit_terminal::terminal::claude::new_with_command(
         command.first().unwrap().as_str(),
         &command[1..],
+        &[("VIBETTY_PORT".to_string(), listen_port.to_string())],
         (24, 80),
         current_dir,
     )

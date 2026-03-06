@@ -100,6 +100,12 @@ async fn main() {
     let asr_config = args.asr_config();
     log::info!("ASR Config: {:?}", asr_config);
 
+    let listener = tokio::net::TcpListener::bind(&args.bind_addr)
+        .await
+        .expect("Failed to bind to address");
+
+    let listen_port = listener.local_addr().unwrap().port();
+
     tokio::spawn(async move {
         let command = args.command;
         let mut cli_rx = cli_rx;
@@ -112,6 +118,7 @@ async fn main() {
                 cli_rx,
                 tx.clone(),
                 current_dir,
+                listen_port,
             )
             .await;
             match r {
@@ -140,11 +147,8 @@ async fn main() {
         .route("/api/change-dir", post(change_dir_handler))
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind(&args.bind_addr)
-        .await
-        .unwrap();
-
     log::info!("WebSocket server listening on ws://{}/ws", args.bind_addr);
+    log::info!("HTTP server listening on http://{}", args.bind_addr);
 
     axum::serve(
         listener,
