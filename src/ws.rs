@@ -120,10 +120,13 @@ fn state_to_message(
                 log::info!("[{}] Claude is thinking...", session_id);
                 Some(ServerMessage::notification(
                     crate::protocol::NotificationLevel::Info,
-                    format!("Claude is thinking...\n {output}",),
+                    format!("\x1b[33mClaude is thinking...\n\x1b[0m\n {output}",),
                 ))
             } else {
-                Some(ServerMessage::screen_text(output.clone()))
+                Some(ServerMessage::notification(
+                    crate::protocol::NotificationLevel::Success,
+                    output.clone(),
+                ))
             }
         }
         echokit_terminal::terminal::claude::ClaudeCodeState::StopUseTool { is_error } => {
@@ -266,7 +269,7 @@ pub async fn run_command(
                 let ClaudeCodeResult::PtyOutput(output) = *r else {
                     unreachable!()
                 };
-                log::info!("[{}] PTY output: {}", terminal.session_id(), output.len());
+                log::trace!("[{}] PTY output: {}", terminal.session_id(), output.len());
                 if output.contains("accept edits on") {
                     log::info!("[{}] Detected 'accept edits on'", terminal.session_id());
                 } else if output.contains("plan mode on") {
@@ -480,7 +483,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                             log::info!("Received binary message, length: {}", data.len());
                             match ClientMessage::from_msgpack(&data) {
                                 Ok(client_msg) => {
-                                    log::info!("Parsed client message: {:?}", client_msg);
+                                    log::debug!("Parsed client message: {:?}", client_msg);
                                     if let Err(e) = state.cli_tx.send(client_msg).await {
                                         log::error!("Failed to send client message: {}", e);
                                         break;

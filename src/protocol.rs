@@ -91,10 +91,6 @@ pub enum ServerMessage {
     #[serde(rename = "pty_out")]
     PtyOutput(Vec<u8>),
 
-    /// 屏幕显示文本
-    #[serde(rename = "screen_text")]
-    ScreenText(ScreenTextData),
-
     /// 屏幕显示图片
     #[serde(rename = "screen_image")]
     ScreenImage(ScreenImageData),
@@ -241,11 +237,6 @@ impl ServerMessage {
     /// 创建 PTY 输出消息
     pub fn pty_output(data: Vec<u8>) -> Self {
         Self::PtyOutput(data)
-    }
-
-    /// 创建屏幕文本消息
-    pub fn screen_text(text: impl Into<String>) -> Self {
-        Self::ScreenText(ScreenTextData { text: text.into() })
     }
 
     /// 创建屏幕图片消息
@@ -440,19 +431,6 @@ mod tests {
     }
 
     #[test]
-    fn test_server_screen_text_msgpack() {
-        let msg = ServerMessage::screen_text("Hello, World!");
-        let bytes = msg.to_msgpack().unwrap();
-        let decoded = ServerMessage::from_msgpack(&bytes).unwrap();
-        match decoded {
-            ServerMessage::ScreenText(data) => {
-                assert_eq!(data.text, "Hello, World!");
-            }
-            _ => panic!("Wrong message type"),
-        }
-    }
-
-    #[test]
     fn test_server_notification_msgpack() {
         let msg = ServerMessage::notification(NotificationLevel::Info, "Test message");
         let bytes = msg.to_msgpack().unwrap();
@@ -568,20 +546,6 @@ mod tests {
         match decoded {
             ClientMessage::Input(text) => {
                 assert_eq!(text, "测试文本");
-            }
-            _ => panic!("Wrong message type"),
-        }
-    }
-
-    #[test]
-    fn test_server_screen_text_json() {
-        let msg = ServerMessage::screen_text("Hello");
-        let json = msg.to_json().unwrap();
-        println!("JSON: {}", json);
-        let decoded = ServerMessage::from_json(&json).unwrap();
-        match decoded {
-            ServerMessage::ScreenText(data) => {
-                assert_eq!(data.text, "Hello");
             }
             _ => panic!("Wrong message type"),
         }
