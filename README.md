@@ -42,3 +42,33 @@ cargo run -- --help
 ```
 
 Visit: http://localhost:3000 after starting the service.
+
+## API Reference
+
+### Change Directory
+
+Change the current working directory via HTTP API.
+
+**Endpoint:** `POST /api/change-dir`
+
+**Request:**
+```bash
+curl -X POST http://localhost:3000/api/change-dir \
+  -H "Content-Type: application/json" \
+  -d '{"path": "/path/to/directory"}'
+```
+
+**Example:**
+```bash
+# Change to absolute path
+curl -X POST http://localhost:3000/api/change-dir \
+  -H "Content-Type: application/json" \
+  -d '{"path": "/home/user/documents"}'
+
+# Change to relative path
+curl -X POST http://localhost:3000/api/change-dir \
+  -H "Content-Type: application/json" \
+  -d '{"path": "../parent-folder"}'
+```
+
+**Note:** This endpoint only accepts requests from localhost for security reasons.
