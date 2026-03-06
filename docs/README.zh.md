@@ -32,7 +32,7 @@ cargo run -- -- claude
 
 # 或者先编译再运行
 cargo build --release
-./target/release/vibetty -- --claude
+./target/release/vibetty -- -- claude
 ```
 
 更多参数可以使用 `--help` 命令查看：
