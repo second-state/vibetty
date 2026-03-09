@@ -146,9 +146,10 @@ pub struct NotificationData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
 
-    /// 自定义颜色（仅当 level 为 Custom 时生效）
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub color: Option<String>,
+    /// 自定义 RGB 颜色（仅当 level 为 Custom 时生效）
+    /// BE BIG-ENDIAN: 0xRRGGBB
+    #[serde(default)]
+    pub color: u32,
 }
 
 /// 请求输入数据
@@ -260,7 +261,7 @@ impl ServerMessage {
             level,
             message: message.into(),
             title: None,
-            color: None,
+            color: 0,
         })
     }
 
