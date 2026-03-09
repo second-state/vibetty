@@ -141,6 +141,10 @@ pub struct NotificationData {
     /// 标题（可选）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+
+    /// 自定义颜色（仅当 level 为 Custom 时生效）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 /// 请求输入数据
@@ -183,6 +187,8 @@ pub enum NotificationLevel {
     Success,
     Warning,
     Error,
+    /// 自定义颜色（需要配合 color 字段使用）
+    Custom,
 }
 
 // ========== 客户端消息构造 ==========
@@ -250,6 +256,7 @@ impl ServerMessage {
             level,
             message: message.into(),
             title: None,
+            color: None,
         })
     }
 
