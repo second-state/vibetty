@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use axum::{
     extract::{
         State,
@@ -62,18 +60,33 @@ fn use_tool_to_choices(tool: &UseTool) -> ChoicesData {
     }
 
     // 其他工具，显示基本信息
-    let title = match serde_json::from_value::<HashMap<String, String>>(tool.input.clone()) {
-        Ok(map) => {
+    let title = match &tool.input {
+        serde_json::Value::Object(map) => {
             let mut keys: Vec<_> = map.keys().collect();
-            keys.sort(); // 排序 key 确保顺序固定
-            let mut title_str = vec![format!("Tool: {}", tool.name)];
+            keys.sort();
+            let tool_name = format!("\x1b[96mTool: {}\x1b[30m", tool.name);
+            let mut title_str = vec![tool_name];
             for k in keys {
-                title_str.push(format!("{}: {}", k, map.get(k).unwrap()));
+                let v = &map[k];
+                let value_str = match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Number(n) => n.to_string(),
+                    serde_json::Value::Bool(b) => b.to_string(),
+                    serde_json::Value::Null => "null".to_string(),
+                    serde_json::Value::Array(arr) => serde_json::to_string(arr).unwrap_or_default(),
+                    serde_json::Value::Object(obj) => {
+                        serde_json::to_string(obj).unwrap_or_default()
+                    }
+                };
+                title_str.push(format!("{}: {}", k, value_str));
             }
             title_str.join("\n\n")
         }
-        Err(_) => serde_json::to_string_pretty(&tool.input)
-            .unwrap_or(format!("Tool call: {:?}", tool.name)),
+        _ => format!(
+            "\x1b[35m{}\x1b[30m",
+            serde_json::to_string_pretty(&tool.input)
+                .unwrap_or(format!("Tool call: {:?}", tool.name))
+        ),
     };
 
     ChoicesData {
@@ -120,7 +133,7 @@ fn state_to_message(
                 log::info!("[{}] Claude is thinking...", session_id);
                 Some(ServerMessage::notification(
                     crate::protocol::NotificationLevel::Info,
-                    format!("\x1b[33mClaude is thinking...\n\x1b[0m\n {output}",),
+                    format!("\x1b[33mClaude is thinking...\n\x1b[39m\n {output}",),
                 ))
             } else {
                 Some(ServerMessage::notification(
@@ -169,7 +182,51 @@ pub struct AppState {
 
 fn t2s<S: AsRef<str>>(s: S) -> String {
     let s = hanconv::tw2sp(s.as_ref());
-    s.replace("什幺", "什么")
+    s.replace("幺", "么")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ClaudeMode {
+    Normal,
+    Plan,
+    AcceptEdits,
+}
+
+impl std::fmt::Display for ClaudeMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ClaudeMode::Normal => write!(f, "normal"),
+            ClaudeMode::Plan => write!(f, "plan"),
+            ClaudeMode::AcceptEdits => write!(f, "accept_edits"),
+        }
+    }
+}
+
+/// 会话状态，包含所有可扩展的状态标记
+#[derive(Debug)]
+struct SessionState {
+    mode: ClaudeMode,
+}
+
+impl Default for SessionState {
+    fn default() -> Self {
+        Self {
+            mode: ClaudeMode::Normal,
+        }
+    }
+}
+
+impl SessionState {
+    fn to_string(&self) -> String {
+        let mut result = String::new();
+        // mode 状态
+        match self.mode {
+            ClaudeMode::Normal => result.push_str("[N]"),
+            ClaudeMode::Plan => result.push_str("[P]"),
+            ClaudeMode::AcceptEdits => result.push_str("[E]"),
+        }
+        result
+    }
 }
 
 pub enum RunCommandResult {
@@ -217,6 +274,7 @@ pub async fn run_command(
     .await?;
 
     let mut input_received = false;
+    let mut session_state = SessionState::default();
     let mut wav_buffer = Vec::new();
     let mut wav_sample_rate = 16000;
     let mut no_ws_client = true;
@@ -272,10 +330,22 @@ pub async fn run_command(
                 log::trace!("[{}] PTY output: {}", terminal.session_id(), output.len());
                 if output.contains("accept edits on") {
                     log::info!("[{}] Detected 'accept edits on'", terminal.session_id());
+                    if session_state.mode != ClaudeMode::AcceptEdits {
+                        session_state.mode = ClaudeMode::AcceptEdits;
+                        let _ = tx.send(ServerMessage::status(session_state.to_string()));
+                    }
                 } else if output.contains("plan mode on") {
                     log::info!("[{}] Detected 'plan mode on'", terminal.session_id());
+                    if session_state.mode != ClaudeMode::Plan {
+                        session_state.mode = ClaudeMode::Plan;
+                        let _ = tx.send(ServerMessage::status(session_state.to_string()));
+                    }
                 } else if output.contains("? for shortcuts") {
                     log::info!("[{}] Detected 'normal mode on'", terminal.session_id());
+                    if session_state.mode != ClaudeMode::Normal {
+                        session_state.mode = ClaudeMode::Normal;
+                        let _ = tx.send(ServerMessage::status(session_state.to_string()));
+                    }
                 }
 
                 if tx
@@ -412,7 +482,16 @@ pub async fn run_command(
                 )
                 .await;
 
-                let asr_result = t2s(r.join("\n"));
+                let mut asr_text = t2s(r.join("\n"));
+
+                // 如果 ASR 结果等于环境变量 VIBETTY_EXIT_COMMAND 的值，替换为 "/exit"（大小写不敏感）
+                if let Ok(exit_trigger) = std::env::var("VIBETTY_EXIT_COMMAND") {
+                    if asr_text.trim().to_lowercase() == exit_trigger.trim().to_lowercase() {
+                        asr_text = "/exit".to_string();
+                    }
+                }
+
+                let asr_result = format!("{} ", asr_text);
 
                 if let Err(_e) = tx.send(ServerMessage::asr_result(asr_result)) {
                     log::error!("[{}] No client waiting for data", terminal.session_id());

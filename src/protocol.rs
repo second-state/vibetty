@@ -110,6 +110,10 @@ pub enum ServerMessage {
     /// 提供选择项
     #[serde(rename = "choices")]
     Choices(ChoicesData),
+
+    /// 设置状态栏
+    #[serde(rename = "status")]
+    Status(String),
 }
 
 /// 屏幕显示文本数据
@@ -292,6 +296,11 @@ impl ServerMessage {
     /// 创建 ASR 结果消息
     pub fn asr_result(text: impl Into<String>) -> Self {
         Self::AsrResult(text.into())
+    }
+
+    /// 创建状态栏消息
+    pub fn status(text: impl Into<String>) -> Self {
+        Self::Status(text.into())
     }
 }
 
@@ -489,6 +498,19 @@ mod tests {
     }
 
     #[test]
+    fn test_server_status_msgpack() {
+        let msg = ServerMessage::status("Connected");
+        let bytes = msg.to_msgpack().unwrap();
+        let decoded = ServerMessage::from_msgpack(&bytes).unwrap();
+        match decoded {
+            ServerMessage::Status(text) => {
+                assert_eq!(text, "Connected");
+            }
+            _ => panic!("Wrong message type"),
+        }
+    }
+
+    #[test]
     fn test_server_asr_result_msgpack() {
         let msg = ServerMessage::asr_result("你好世界");
         let bytes = msg.to_msgpack().unwrap();
@@ -568,6 +590,20 @@ mod tests {
             ServerMessage::Choices(data) => {
                 assert_eq!(data.title, "请选择");
                 assert_eq!(data.options, vec!["A", "B"]);
+            }
+            _ => panic!("Wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_server_status_json() {
+        let msg = ServerMessage::status("Ready");
+        let json = msg.to_json().unwrap();
+        println!("JSON: {}", json);
+        let decoded = ServerMessage::from_json(&json).unwrap();
+        match decoded {
+            ServerMessage::Status(text) => {
+                assert_eq!(text, "Ready");
             }
             _ => panic!("Wrong message type"),
         }
