@@ -231,6 +231,7 @@ pub mod realtime_asr {
 
     // cargo test --package echokit_server --bin echokit_server -- ai::bailian::realtime_asr::test_paraformer_asr --exact --show-output
     #[tokio::test]
+    #[ignore]
     async fn test_paraformer_asr() {
         env_logger::init();
         let token = std::env::var("COSYVOICE_TOKEN").unwrap();
@@ -278,6 +279,7 @@ pub mod realtime_asr {
 
     // cargo test --package echokit_server --bin echokit_server -- ai::bailian::realtime_asr::test_paraformer_stream_asr --exact --show-output
     #[tokio::test]
+    #[ignore]
     async fn test_paraformer_stream_asr() {
         env_logger::init();
         let token = std::env::var("COSYVOICE_TOKEN").unwrap();
