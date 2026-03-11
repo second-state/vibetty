@@ -265,6 +265,20 @@ impl ServerMessage {
         })
     }
 
+    /// 创建自定义颜色的通知消息
+    pub fn coustom_notification(
+        message: impl Into<String>,
+        title: Option<String>,
+        color: u32,
+    ) -> Self {
+        Self::Notification(NotificationData {
+            level: NotificationLevel::Custom,
+            message: message.into(),
+            title,
+            color,
+        })
+    }
+
     /// 创建请求输入消息
     pub fn get_input(prompt: impl Into<String>) -> Self {
         Self::GetInput(GetInputData {
