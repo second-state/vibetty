@@ -68,6 +68,7 @@ pub async fn whisper(
 }
 
 #[tokio::test]
+#[ignore]
 async fn test_groq_asr() {
     env_logger::init();
     let groq_api_key = std::env::var("GROQ_API_KEY").unwrap_or_default();
