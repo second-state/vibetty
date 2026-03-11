@@ -133,7 +133,7 @@ fn state_to_message(
                 log::info!("[{}] Claude is thinking...", session_id);
                 Some(ServerMessage::notification(
                     crate::protocol::NotificationLevel::Info,
-                    format!("\x1b[33mClaude is thinking...\n\x1b[39m\n {output}",),
+                    format!("\x1b[33mClaude is thinking...\n\x1b[90m\n {output}\x1b[39m",),
                 ))
             } else {
                 Some(ServerMessage::notification(
@@ -151,9 +151,10 @@ fn state_to_message(
                 ))
             } else {
                 log::info!("[{}] Tool execution completed", session_id);
-                Some(ServerMessage::notification(
-                    crate::protocol::NotificationLevel::Info,
-                    "Tool execution completed successfully.".to_string(),
+                Some(ServerMessage::coustom_notification(
+                    String::new(),
+                    None,
+                    0x20B2AA,
                 ))
             }
         }
