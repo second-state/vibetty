@@ -171,9 +171,25 @@ async fn main() {
         }
     });
 
+    let server_url = if let Ok(addr) = listener.local_addr() {
+        let port = addr.port();
+        let addr_ip = addr.ip();
+        if addr_ip.is_loopback() {
+            Some(format!(
+                "http://localhost:{}        Warning: Server only bind on loopback dev. ",
+                port
+            ))
+        } else {
+            Some(format!("http://{}:{}\n", addr.ip(), port))
+        }
+    } else {
+        None
+    }
+    .unwrap_or("Warning: Failed to get a valid server URL\n".to_string());
+
     let mut ui_app = ui::App::new("Vibetty".to_string(), "Footer".to_string(), pty_output_rx);
     let r = tokio::task::spawn_blocking(move || {
-        if let Err(e) = ui_app.run(ui_tx) {
+        if let Err(e) = ui_app.run(ui_tx, server_url) {
             log::error!("UI error: {}", e);
         }
     });

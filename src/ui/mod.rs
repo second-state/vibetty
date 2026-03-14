@@ -100,7 +100,8 @@ impl App {
         }
     }
 
-    pub fn run(&mut self, ui_tx: UITx) -> io::Result<()> {
+    pub fn run(&mut self, ui_tx: UITx, server_url: String) -> io::Result<()> {
+        self.footer_text = server_url;
         enable_raw_mode()?;
         let mut stdout = std::io::stdout();
         execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -192,18 +193,18 @@ impl App {
         let title = format!("{}", self.parser.callbacks().title,);
 
         let header = Paragraph::new(self.header_text.as_str())
-            .block(Block::new().borders(Borders::ALL).title(title))
+            .block(Block::new().borders(Borders::ALL))
             .alignment(Alignment::Center);
         f.render_widget(header, chunks[0]);
 
         {
             let pseudo_term = PseudoTerminal::new(self.parser.screen())
-                .block(Block::new().borders(Borders::ALL).title("Terminal"));
+                .block(Block::new().borders(Borders::ALL).title(title));
             f.render_widget(pseudo_term, chunks[1]);
         }
 
         let footer = Paragraph::new(self.footer_text.as_str())
-            .block(Block::new().borders(Borders::ALL).title("Status"))
+            .block(Block::new().borders(Borders::ALL))
             .alignment(Alignment::Center);
         f.render_widget(footer, chunks[2]);
     }
