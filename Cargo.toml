@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+flexi_logger = "0.31"
 env_logger = "0.11.6"
 log = "0.4.25"
 clap = { version = "4.5", features = ["derive", "env"] }
@@ -35,3 +36,9 @@ uuid = { version = "1.21.0", features = ["v4"] }
 pty-process = { version = "0.5.3", features = ["async"] }
 linemux = "0.3"
 strip-ansi-escapes = "0.2.1"
+
+# TUI
+ratatui = "0.30"
+crossterm = { version = "0.28", features = ["event-stream", "bracketed-paste"] }
+tui-term = "0.3"
+vt100 = "0.16"

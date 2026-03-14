@@ -104,6 +104,7 @@ pub struct ClaudeCode {
     history_file_path: std::path::PathBuf,
     start_output_buffer: LinkedList<String>,
     state: ClaudeCodeState,
+    working: bool,
 }
 
 impl TerminalType for ClaudeCode {
@@ -184,7 +185,7 @@ pub async fn new_with_command<S: AsRef<str>>(
 
         let n = n.unwrap()?;
 
-        log::debug!("Read {} bytes from PTY for status output", n);
+        log::trace!("Read {} bytes from PTY for status output", n);
         let output = str::from_utf8(&buffer[..n]).unwrap_or("");
         log::trace!("PTY Output during history file check: {}", output);
 
@@ -280,6 +281,7 @@ pub async fn new_with_command<S: AsRef<str>>(
             history_file_path,
             start_output_buffer,
             state: ClaudeCodeState::Idle,
+            working: false,
         },
     })
 }
@@ -289,6 +291,7 @@ pub enum ClaudeCodeResult {
     ClaudeLog(ClaudeCodeLog),
     WaitForUserInputBeforeTool,
     WaitForUserInput,
+    Working,
     Uncaught(String),
 }
 
@@ -305,11 +308,46 @@ impl EchokitChild<ClaudeCode> {
         &self.terminal_type.state
     }
 
+    pub fn update_title(&mut self, title: String) -> Option<ClaudeCodeResult> {
+        match &self.terminal_type.state {
+            ClaudeCodeState::PreUseTool { .. } => {
+                if title.contains("✳ Claude Code") {
+                    self.terminal_type.working = false;
+                    Some(ClaudeCodeResult::WaitForUserInputBeforeTool)
+                } else {
+                    self.terminal_type.working = true;
+                    Some(ClaudeCodeResult::Working)
+                }
+            }
+            _ => {
+                log::debug!(
+                    "Received title update in state {:?}, setting working state",
+                    self.terminal_type.state
+                );
+
+                if title.contains("✳ Claude Code") {
+                    self.terminal_type.working = false;
+                } else {
+                    self.terminal_type.working = true;
+                }
+
+                None
+            }
+        }
+    }
+
     pub fn update_state(&mut self, result: &ClaudeCodeResult) -> bool {
         let mut state_updated = false;
         match (result, &mut self.terminal_type.state) {
             (ClaudeCodeResult::PtyOutput(..), _) => {
                 log::debug!("Updating state from Idle to Processing");
+            }
+            (ClaudeCodeResult::Working, _) => {
+                log::debug!("Updating state to Working");
+                self.terminal_type.state = ClaudeCodeState::Working {
+                    prompt: "Continuing...".to_string(),
+                };
+                state_updated = true;
             }
             (
                 ClaudeCodeResult::WaitForUserInputBeforeTool,
@@ -476,7 +514,7 @@ impl EchokitChild<ClaudeCode> {
 
     pub async fn read_pty_output_and_history_line(&mut self) -> std::io::Result<ClaudeCodeResult> {
         if let Some(pty_output) = self.terminal_type.start_output_buffer.pop_front() {
-            log::debug!("Returning buffered PTY output: {}", pty_output);
+            log::trace!("Returning buffered PTY output: {}", pty_output);
             return Ok(ClaudeCodeResult::PtyOutput(pty_output));
         }
 
@@ -490,41 +528,31 @@ impl EchokitChild<ClaudeCode> {
         }
 
         let state = &mut self.terminal_type.state;
+        let claude_is_working = self.terminal_type.working;
 
         let read_buff = async {
             match state {
-                ClaudeCodeState::PreUseTool {
-                    start_time,
-                    is_pending,
-                    ..
-                } => {
-                    if !*is_pending && start_time.elapsed() > std::time::Duration::from_secs(5) {
+                ClaudeCodeState::PreUseTool { is_pending, .. } => {
+                    if !*is_pending && !claude_is_working {
                         log::debug!(
                             "PreUseTool state, waiting for user input before tool, setting read timeout to 5 seconds"
                         );
                         return Err(ClaudeCodeResult::WaitForUserInputBeforeTool);
                     }
 
-                    tokio::time::timeout(
-                        std::time::Duration::from_secs(5),
-                        self.pty.read(&mut buffer),
-                    )
-                    .await
-                    .or_else(|_| Err(ClaudeCodeResult::WaitForUserInputBeforeTool))
+                    Ok(self.pty.read(&mut buffer).await)
                 }
-                ClaudeCodeState::Idle
-                | ClaudeCodeState::Output {
+
+                ClaudeCodeState::Output {
                     is_thinking: false, ..
                 }
                 | ClaudeCodeState::StopUseTool { is_error: true } => {
-                    // log::debug!("Idle state, setting read timeout to 5 seconds");
-                    tokio::time::timeout(
-                        std::time::Duration::from_secs(5),
-                        self.pty.read(&mut buffer),
-                    )
-                    .await
+                    if !claude_is_working {
+                        return Err(ClaudeCodeResult::WaitForUserInput);
+                    } else {
+                        Ok(self.pty.read(&mut buffer).await)
+                    }
                 }
-                .or_else(|_| Err(ClaudeCodeResult::WaitForUserInput)),
                 _ => Ok(self.pty.read(&mut buffer).await),
             }
         };
@@ -573,7 +601,7 @@ impl EchokitChild<ClaudeCode> {
             }
 
             let n = self.pty.read(&mut buffer).await?;
-            log::debug!("Read {} bytes from PTY", n);
+            log::trace!("Read {} bytes from PTY", n);
             if n == 0 {
                 break;
             }

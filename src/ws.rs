@@ -227,18 +227,19 @@ impl SessionState {
 
 pub enum RunCommandResult {
     Done,
-    ChangeDir(String, ClientRx),
+    ChangeDir(String, ClientRx, mpsc::Receiver<crate::ui::UIEvent>),
 }
 
 pub async fn run_command(
     command: Vec<String>,
     asr_config: AsrConfig,
     mut rx: ClientRx,
+    mut ui_rx: mpsc::Receiver<crate::ui::UIEvent>,
     tx: ServerTx,
+    pty_output_tx: tokio::sync::mpsc::Sender<bytes::Bytes>,
     current_dir: Option<std::path::PathBuf>,
     listen_port: u16,
 ) -> anyhow::Result<RunCommandResult> {
-    // 广播当前工作目录
     let dir_path = current_dir
         .as_ref()
         .and_then(|p| p.to_str())
@@ -252,6 +253,8 @@ pub async fn run_command(
     enum TerminalEvent {
         Input(crate::protocol::ClientMessage),
         InputClosed,
+
+        UIEvent(crate::ui::UIEvent),
 
         ClaudeResult(Box<ClaudeCodeResult>),
 
@@ -273,29 +276,9 @@ pub async fn run_command(
     let mut session_state = SessionState::default();
     let mut wav_buffer = Vec::new();
     let mut wav_sample_rate = 16000;
-    let mut no_ws_client = true;
-
-    struct NeverReady;
-    impl std::future::Future for NeverReady {
-        type Output = ();
-
-        fn poll(
-            self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<Self::Output> {
-            std::task::Poll::Pending
-        }
-    }
 
     loop {
-        let terminal_read_event = async {
-            if no_ws_client {
-                NeverReady.await;
-                unreachable!();
-            } else {
-                terminal.read_pty_output_and_history_line().await
-            }
-        };
+        let terminal_read_event = terminal.read_pty_output_and_history_line();
 
         let event = tokio::select! {
             result = terminal_read_event => {
@@ -314,6 +297,16 @@ pub async fn run_command(
                     None => TerminalEvent::InputClosed,
                 }
             },
+
+            ui_evt = ui_rx.recv() => {
+                match ui_evt {
+                    Some(evt) => TerminalEvent::UIEvent(evt),
+                    None => {
+                        log::error!("[{}] UI event channel closed", terminal.session_id());
+                        TerminalEvent::Error
+                    }
+                }
+            }
         };
 
         match event {
@@ -344,6 +337,15 @@ pub async fn run_command(
                     }
                 }
 
+                if pty_output_tx
+                    .send(bytes::Bytes::from(output.clone()))
+                    .await
+                    .is_err()
+                {
+                    log::warn!("[{}] No active PTY output receiver", terminal.session_id());
+                    return Ok(RunCommandResult::Done);
+                }
+
                 if tx
                     .send(ServerMessage::PtyOutput(output.into_bytes()))
                     .is_err()
@@ -364,7 +366,6 @@ pub async fn run_command(
                     "Claude is waiting for user input...".to_string(),
                 )) {
                     log::error!("[{}] No client waiting for data", terminal.session_id());
-                    no_ws_client = true;
                 }
 
                 if input_received {
@@ -384,7 +385,6 @@ pub async fn run_command(
                         && let Err(_e) = tx.send(msg)
                     {
                         log::error!("[{}] No client waiting for data", terminal.session_id());
-                        no_ws_client = true;
                     }
 
                     // Handle Idle state input_received separately
@@ -401,9 +401,33 @@ pub async fn run_command(
                     }
                 }
             }
+            TerminalEvent::UIEvent(crate::ui::UIEvent::Input(input)) => {
+                terminal.send_bytes(&input).await?;
+            }
+            TerminalEvent::UIEvent(crate::ui::UIEvent::Title(title)) => {
+                log::debug!(
+                    "[{}] Terminal title updated: {:?}",
+                    terminal.session_id(),
+                    title
+                );
+                if let Some(r) = terminal.update_title(title) {
+                    log::info!(
+                        "[{}] Terminal state updated from title: {:?}",
+                        terminal.session_id(),
+                        terminal.state()
+                    );
+                    if terminal.update_state(&r) {
+                        if let Some(msg) =
+                            state_to_message(terminal.state(), &terminal.session_id().to_string())
+                            && let Err(_e) = tx.send(msg)
+                        {
+                            log::error!("[{}] No client waiting for data", terminal.session_id());
+                        }
+                    }
+                }
+            }
             TerminalEvent::Input(ClientMessage::Sync) => {
                 log::info!("Received Sync message from client");
-                no_ws_client = false;
             }
             TerminalEvent::Input(ClientMessage::PtyInput(input)) => {
                 log::info!(
@@ -437,13 +461,11 @@ pub async fn run_command(
             }
             TerminalEvent::Input(ClientMessage::ChangeDir(path)) => {
                 log::info!("Change directory requested: {}", path);
-                // 发送确认消息给客户端
                 let _ = tx.send(ServerMessage::notification(
                     crate::protocol::NotificationLevel::Info,
                     format!("Changing directory to: {}", path),
                 ));
-                // 返回新路径和 rx，让 main.rs 重新执行命令
-                return Ok(RunCommandResult::ChangeDir(path, rx));
+                return Ok(RunCommandResult::ChangeDir(path, rx, ui_rx));
             }
             TerminalEvent::Input(ClientMessage::VoiceInputStart(VoiceInputStart {
                 sample_rate,
@@ -491,7 +513,6 @@ pub async fn run_command(
 
                 if let Err(_e) = tx.send(ServerMessage::asr_result(asr_result)) {
                     log::error!("[{}] No client waiting for data", terminal.session_id());
-                    no_ws_client = true;
                 }
             }
             TerminalEvent::InputClosed | TerminalEvent::Error => {

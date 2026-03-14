@@ -19,6 +19,8 @@ mod ws;
 mod terminal;
 mod types;
 
+mod ui;
+
 use config::Args;
 
 // 嵌入静态资源
@@ -85,10 +87,21 @@ async fn change_dir_handler(
     (StatusCode::OK, format!("Changing to: {}", req.path)).into_response()
 }
 
+fn logger_init() -> anyhow::Result<flexi_logger::LoggerHandle> {
+    use flexi_logger::{FileSpec, Logger, WriteMode};
+
+    let logger = Logger::try_with_env_or_str("info")?
+        .log_to_file(FileSpec::default())
+        .write_mode(WriteMode::BufferAndFlush)
+        .start()?;
+
+    Ok(logger)
+}
+
 #[tokio::main]
 async fn main() {
     dotenv::dotenv().ok();
-    env_logger::init();
+    let _logger = logger_init().expect("Failed to initialize logger");
 
     let args = Args::parse();
 
@@ -102,6 +115,9 @@ async fn main() {
     let (cli_tx, cli_rx) = tokio::sync::mpsc::channel(100);
     let (tx, rx) = tokio::sync::broadcast::channel(100);
     drop(rx);
+
+    let (pty_output_tx, pty_output_rx) = tokio::sync::mpsc::channel(100);
+    let (ui_tx, ui_rx) = tokio::sync::mpsc::channel(100);
 
     let state = ws::AppState {
         tx: tx.clone(),
@@ -121,33 +137,44 @@ async fn main() {
         let command = args.command;
         let mut cli_rx = cli_rx;
         let mut current_dir: Option<std::path::PathBuf> = None;
+        let mut ui_rx = ui_rx;
 
         loop {
             let r = ws::run_command(
                 command.clone(),
                 asr_config.clone(),
                 cli_rx,
+                ui_rx,
                 tx.clone(),
+                pty_output_tx.clone(),
                 current_dir,
                 listen_port,
             )
             .await;
             match r {
-                Ok(ws::RunCommandResult::ChangeDir(new_path, returned_rx)) => {
+                Ok(ws::RunCommandResult::ChangeDir(new_path, returned_rx, returned_ui_rx)) => {
                     log::info!("Changing directory to: {}", new_path);
 
                     current_dir = Some(new_path.into());
                     cli_rx = returned_rx;
+                    ui_rx = returned_ui_rx;
                 }
                 Ok(ws::RunCommandResult::Done) => {
                     log::info!("Command execution finished");
-                    std::process::exit(0);
+                    break;
                 }
                 Err(e) => {
                     log::error!("Error in command execution: {}", e);
-                    std::process::exit(1);
+                    break;
                 }
             }
+        }
+    });
+
+    let mut ui_app = ui::App::new("Vibetty".to_string(), "Footer".to_string(), pty_output_rx);
+    let r = tokio::task::spawn_blocking(move || {
+        if let Err(e) = ui_app.run(ui_tx) {
+            log::error!("UI error: {}", e);
         }
     });
 
