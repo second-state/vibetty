@@ -213,7 +213,7 @@ impl Default for SessionState {
 }
 
 impl SessionState {
-    fn to_string(&self) -> String {
+    fn to_state_string(&self) -> String {
         let mut result = String::new();
         // mode 状态
         match self.mode {
@@ -230,6 +230,7 @@ pub enum RunCommandResult {
     ChangeDir(String, ClientRx, mpsc::Receiver<crate::ui::UIEvent>),
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_command(
     command: Vec<String>,
     asr_config: AsrConfig,
@@ -321,19 +322,19 @@ pub async fn run_command(
                     log::info!("[{}] Detected 'accept edits on'", terminal.session_id());
                     if session_state.mode != ClaudeMode::AcceptEdits {
                         session_state.mode = ClaudeMode::AcceptEdits;
-                        let _ = tx.send(ServerMessage::status(session_state.to_string()));
+                        let _ = tx.send(ServerMessage::status(session_state.to_state_string()));
                     }
                 } else if output.contains("plan mode on") {
                     log::info!("[{}] Detected 'plan mode on'", terminal.session_id());
                     if session_state.mode != ClaudeMode::Plan {
                         session_state.mode = ClaudeMode::Plan;
-                        let _ = tx.send(ServerMessage::status(session_state.to_string()));
+                        let _ = tx.send(ServerMessage::status(session_state.to_state_string()));
                     }
                 } else if output.contains("? for shortcuts") {
                     log::info!("[{}] Detected 'normal mode on'", terminal.session_id());
                     if session_state.mode != ClaudeMode::Normal {
                         session_state.mode = ClaudeMode::Normal;
-                        let _ = tx.send(ServerMessage::status(session_state.to_string()));
+                        let _ = tx.send(ServerMessage::status(session_state.to_state_string()));
                     }
                 }
 
@@ -421,13 +422,13 @@ pub async fn run_command(
                         terminal.session_id(),
                         terminal.state()
                     );
-                    if terminal.update_state(&r) {
-                        if let Some(msg) =
+
+                    if terminal.update_state(&r)
+                        && let Some(msg) =
                             state_to_message(terminal.state(), &terminal.session_id().to_string())
-                            && let Err(_e) = tx.send(msg)
-                        {
-                            log::error!("[{}] No client waiting for data", terminal.session_id());
-                        }
+                        && let Err(_e) = tx.send(msg)
+                    {
+                        log::error!("[{}] No client waiting for data", terminal.session_id());
                     }
                 }
             }
@@ -508,10 +509,10 @@ pub async fn run_command(
                 let mut asr_text = t2s(r.join("\n"));
 
                 // 如果 ASR 结果等于环境变量 VIBETTY_EXIT_COMMAND 的值，替换为 "/exit"（大小写不敏感）
-                if let Ok(exit_trigger) = std::env::var("VIBETTY_EXIT_COMMAND") {
-                    if asr_text.trim().to_lowercase() == exit_trigger.trim().to_lowercase() {
-                        asr_text = "/exit".to_string();
-                    }
+                if let Ok(exit_trigger) = std::env::var("VIBETTY_EXIT_COMMAND")
+                    && asr_text.trim().to_lowercase() == exit_trigger.trim().to_lowercase()
+                {
+                    asr_text = "/exit".to_string();
                 }
 
                 let asr_result = format!("{} ", asr_text);

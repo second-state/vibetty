@@ -76,26 +76,28 @@ impl ClaudeCodeState {
     pub fn is_use_tool(&self) -> bool {
         matches!(self, ClaudeCodeState::PreUseTool { .. })
     }
+}
 
-    pub fn to_string(&self) -> String {
+impl std::fmt::Display for ClaudeCodeState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ClaudeCodeState::PreUseTool { .. } => "pre_use_tool".to_string(),
+            ClaudeCodeState::PreUseTool { .. } => write!(f, "pre_use_tool"),
             ClaudeCodeState::Output { is_thinking, .. } => {
                 if *is_thinking {
-                    "thinking".to_string()
+                    write!(f, "thinking")
                 } else {
-                    "output".to_string()
+                    write!(f, "output")
                 }
             }
             ClaudeCodeState::StopUseTool { is_error } => {
                 if *is_error {
-                    "stop_use_tool_error".to_string()
+                    write!(f, "stop_use_tool_error")
                 } else {
-                    "stop_use_tool".to_string()
+                    write!(f, "stop_use_tool")
                 }
             }
-            ClaudeCodeState::Idle => "idle".to_string(),
-            ClaudeCodeState::Working { .. } => "working".to_string(),
+            ClaudeCodeState::Idle => write!(f, "idle"),
+            ClaudeCodeState::Working { .. } => write!(f, "working"),
         }
     }
 }
@@ -231,15 +233,15 @@ pub async fn new_with_command<S: AsRef<str>>(
     }
 
     if uuid.is_nil() {
-        return Err(pty_process::Error::Io(std::io::Error::other(format!(
-            "Failed to extract session ID from status output"
-        ))));
+        return Err(pty_process::Error::Io(std::io::Error::other(
+            "Failed to extract session ID from status output".to_string(),
+        )));
     }
 
     if cwd.is_empty() {
-        return Err(pty_process::Error::Io(std::io::Error::other(format!(
-            "Failed to extract current directory from status output"
-        ))));
+        return Err(pty_process::Error::Io(std::io::Error::other(
+            "Failed to extract current directory from status output".to_string(),
+        )));
     }
 
     log::debug!(
@@ -287,6 +289,7 @@ pub async fn new_with_command<S: AsRef<str>>(
     })
 }
 
+#[allow(clippy::large_enum_variant)]
 pub enum ClaudeCodeResult {
     PtyOutput(String),
     ClaudeLog(ClaudeCodeLog),
@@ -327,11 +330,7 @@ impl EchokitChild<ClaudeCode> {
                     self.terminal_type.state
                 );
 
-                if title.contains("✳ Claude Code") {
-                    self.terminal_type.working = false;
-                } else {
-                    self.terminal_type.working = true;
-                }
+                self.terminal_type.working = !title.contains("✳ Claude Code");
 
                 None
             }
@@ -467,11 +466,7 @@ impl EchokitChild<ClaudeCode> {
                 }
 
                 if log.is_stop() {
-                    state_updated = if self.terminal_type.state == ClaudeCodeState::Idle {
-                        false
-                    } else {
-                        true
-                    };
+                    state_updated = self.terminal_type.state != ClaudeCodeState::Idle;
 
                     self.terminal_type.state = ClaudeCodeState::Idle;
                 } else if let Some((id, name, input)) = log.is_tool_request() {
@@ -550,7 +545,7 @@ impl EchokitChild<ClaudeCode> {
                 }
                 | ClaudeCodeState::StopUseTool { is_error: true } => {
                     if !claude_is_working {
-                        return Err(ClaudeCodeResult::WaitForUserInput);
+                        Err(ClaudeCodeResult::WaitForUserInput)
                     } else {
                         Ok(self.pty.read(&mut buffer).await)
                     }

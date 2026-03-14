@@ -153,7 +153,7 @@ impl App {
             let callback = self.parser.callbacks_mut();
             if callback.update_title {
                 ui_tx
-                    .blocking_send(UIEvent::Title(format!("{}", callback.title)))
+                    .blocking_send(UIEvent::Title(callback.title.to_string()))
                     .ok();
                 callback.update_title = false;
                 self.parser.screen_mut().set_scrollback(0);
@@ -201,7 +201,7 @@ impl App {
             }
         }
 
-        let title = format!("{}", self.parser.callbacks().title,);
+        let title = self.parser.callbacks().title.to_string();
 
         let header = Paragraph::new(self.header_text.as_str())
             .block(Block::new().borders(Borders::ALL))
