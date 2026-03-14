@@ -37,6 +37,7 @@ pub enum ClaudeCodeState {
     },
 }
 
+#[allow(unused)]
 impl ClaudeCodeState {
     pub fn input_available(&self) -> bool {
         matches!(
@@ -300,6 +301,7 @@ impl EchokitChild<ClaudeCode> {
         self.uuid
     }
 
+    #[allow(unused)]
     pub fn log_file_path(&self) -> &std::path::PathBuf {
         &self.terminal_type.history_file_path
     }

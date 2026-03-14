@@ -6,19 +6,6 @@ use tokio::{
 
 pub mod claude;
 
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(tag = "type")]
-pub enum InputItem {
-    Text {
-        input: String,
-    },
-    KeyboardInterrupt,
-    Enter,
-    Esc,
-    #[serde(skip)]
-    Bytes(Vec<u8>),
-}
-
 pub type PtyCommand = Command;
 pub type PtySize = Size;
 
@@ -33,6 +20,7 @@ pub struct EchokitChild<T: TerminalType> {
     terminal_type: T,
 }
 
+#[allow(unused)]
 impl<T: TerminalType> EchokitChild<T> {
     pub async fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
         self.pty.write_all(buf).await?;

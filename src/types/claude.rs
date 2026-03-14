@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 #[derive(serde::Deserialize, Debug)]
 #[serde(tag = "type")]
 pub enum ClaudeCodeLog {
