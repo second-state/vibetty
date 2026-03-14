@@ -144,7 +144,7 @@ fn state_to_message(state: &ClaudeCodeState, session_id: &str) -> Option<ServerM
                 log::error!("[{}] Tool execution error", session_id);
                 Some(ServerMessage::notification(
                     crate::protocol::NotificationLevel::Error,
-                    "Tool execution failed. Please try again.".to_string(),
+                    "Tool execution failed.".to_string(),
                 ))
             } else {
                 log::info!("[{}] Tool execution completed", session_id);
