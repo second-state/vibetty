@@ -72,6 +72,34 @@
                         </div>
                     </div>
 
+                    <div class="collapse collapse-arrow bg-base-100 border border-base-300">
+                        <input type="checkbox" />
+                        <div class="collapse-title text-lg font-medium">
+                            ⚙️ Advanced Settings
+                        </div>
+                        <div class="collapse-content">
+                            <div class="card-body pt-0">
+                                <label class="form-control">
+                                    <div class="label">
+                                        <span class="label-text">Microphone Mode</span>
+                                    </div>
+                                    <div class="flex gap-4">
+                                        <label class="label cursor-pointer gap-2">
+                                            <input type="radio" name="micMode" value="0" id="micModePTT"
+                                                class="radio radio-primary radio-xs tooltip" checked="checked" />
+                                            <span class="label-text tooltip" data-tip="Hold to speak">PushToTalk</span>
+                                        </label>
+                                        <label class="label cursor-pointer gap-2">
+                                            <input type="radio" name="micMode" value="1" id="micModeToggle"
+                                                class="radio radio-primary radio-xs" />
+                                            <span class="label-text tooltip" data-tip="Press to toggle on/off">Toggle</span>
+                                        </label>
+                                    </div>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+
                     <div class="card bg-base-100 border border-base-300">
                         <div class="card-body">
                             <h3 class="card-title text-lg">Background Image</h3>
@@ -130,6 +158,7 @@
         const SERVER_URL_ID = "cef520a9-bcb5-4fc6-87f7-82804eee2b20";
         const BACKGROUND_IMAGE_ID = "d1f3b2c4-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
         const RESET_ID = "f0e1d2c3-b4a5-6789-0abc-def123456789";
+        const MIC_MODEL_ID = "72ae1823-ab95-4d78-af01-4ce8bb88e034";
 
         // global variables
         let device = null;
@@ -162,12 +191,15 @@
         const notificationToast = document.getElementById('notificationToast');
         const toastMessage = document.getElementById('toastMessage');
         const resetNotSupportedModal = document.getElementById('resetNotSupportedModal');
+        const micModePTT = document.getElementById('micModePTT');
+        const micModeToggle = document.getElementById('micModeToggle');
 
         // Track modified fields
         const modifiedFields = {
             ssid: false,
             pass: false,
-            url: false
+            url: false,
+            micMode: false
         };
 
         // Mark field as modified
@@ -393,6 +425,7 @@
                 await readCharacteristic(SSID_ID, ssidInput);
                 await readCharacteristic(PASS_ID, passInput);
                 await readCharacteristic(SERVER_URL_ID, serverUrlInput);
+                await readMicMode();
 
                 // Clear all modification marks
                 clearFieldModification('ssid', ssidTitle);
@@ -423,12 +456,13 @@
                 let savedCount = 0;
                 const hasModifications = Object.values(modifiedFields).some(modified => modified);
 
-                // If no modifications, send all three parameters
+                // If no modifications, send all four parameters
                 if (!hasModifications) {
                     await writeCharacteristic(SSID_ID, ssidInput.value);
                     await writeCharacteristic(PASS_ID, passInput.value);
                     await writeCharacteristic(SERVER_URL_ID, serverUrlInput.value);
-                    savedCount = 3;
+                    await writeMicMode();
+                    savedCount = 4;
                 } else {
                     // If there are modifications, only send modified fields
                     if (modifiedFields.ssid) {
@@ -446,6 +480,12 @@
                     if (modifiedFields.url) {
                         await writeCharacteristic(SERVER_URL_ID, serverUrlInput.value);
                         clearFieldModification('url', urlTitle);
+                        savedCount++;
+                    }
+
+                    if (modifiedFields.micMode) {
+                        await writeMicMode();
+                        modifiedFields.micMode = false;
                         savedCount++;
                     }
                 }
@@ -513,6 +553,49 @@
                 await characteristic.writeValue(data);
             } catch (error) {
                 console.error('Write error:', error);
+                throw error;
+            }
+        }
+
+        // Read mic mode
+        async function readMicMode() {
+            if (!isConnected || !service) {
+                return false;
+            }
+
+            try {
+                const characteristic = await service.getCharacteristic(MIC_MODEL_ID);
+                const value = await characteristic.readValue();
+                const modeValue = value.getUint8(0);
+                console.log('Read mic mode value:', modeValue);
+                if (modeValue === 0) {
+                    micModePTT.checked = true;
+                    micModeToggle.checked = false;
+                } else if (modeValue === 1) {
+                    micModeToggle.checked = true;
+                    micModePTT.checked = false;
+                }
+                return true;
+            } catch (error) {
+                console.error('Read mic mode error:', error);
+                return false;
+            }
+        }
+
+        // Write mic mode
+        async function writeMicMode() {
+            if (!isConnected || !service) {
+                throw new Error('VibeKeys is not connected');
+            }
+
+            const modeValue = micModePTT.checked ? 0 : 1;
+
+            try {
+                const characteristic = await service.getCharacteristic(MIC_MODEL_ID);
+                const data = new Uint8Array([modeValue]);
+                await characteristic.writeValue(data);
+            } catch (error) {
+                console.error('Write mic mode error:', error);
                 throw error;
             }
         }
@@ -604,6 +687,17 @@
             markFieldAsModified('url', urlTitle);
         });
 
+        // Listen for mic mode changes
+        micModePTT.addEventListener('change', () => {
+            modifiedFields.micMode = true;
+            updateSaveButtonState();
+        });
+
+        micModeToggle.addEventListener('change', () => {
+            modifiedFields.micMode = true;
+            updateSaveButtonState();
+        });
+
         // Auto fill server URL button
         autoServerUrlBtn.addEventListener('click', () => {
             const currentUrl = new URL(window.location.href);
@@ -632,9 +726,9 @@
         // Disable Auto button for loopback addresses (localhost, 127.0.0.1, etc.)
         const currentHost = window.location.hostname;
         const isLoopback = currentHost === 'localhost' ||
-                           currentHost === '127.0.0.1' ||
-                           currentHost === '[::1]' ||
-                           currentHost.startsWith('127.');
+            currentHost === '127.0.0.1' ||
+            currentHost === '[::1]' ||
+            currentHost.startsWith('127.');
         if (isLoopback) {
             autoServerUrlBtn.disabled = true;
             autoServerUrlBtn.title = 'Not available for loopback addresses';
