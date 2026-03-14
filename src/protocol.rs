@@ -116,13 +116,6 @@ pub enum ServerMessage {
     Status(String),
 }
 
-/// 屏幕显示文本数据
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScreenTextData {
-    /// 文本内容
-    pub text: String,
-}
-
 /// 屏幕显示图片数据
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScreenImageData {

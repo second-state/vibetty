@@ -16,6 +16,9 @@ mod protocol;
 mod util;
 mod ws;
 
+mod terminal;
+mod types;
+
 use config::Args;
 
 // 嵌入静态资源

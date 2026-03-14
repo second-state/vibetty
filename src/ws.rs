@@ -5,13 +5,13 @@ use axum::{
     },
     response::IntoResponse,
 };
-use echokit_terminal::terminal::claude::{ClaudeCodeResult, UseTool};
 use serde::Deserialize;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::{
     config::AsrConfig,
     protocol::{ChoicesData, ClientMessage, ServerMessage, VoiceInputStart},
+    terminal::claude::{ClaudeCodeResult, ClaudeCodeState, UseTool},
 };
 
 /// AskUserQuestion 工具输入结构
@@ -97,12 +97,9 @@ fn use_tool_to_choices(tool: &UseTool) -> ChoicesData {
 }
 
 /// 根据终端状态生成要发送的消息
-fn state_to_message(
-    state: &echokit_terminal::terminal::claude::ClaudeCodeState,
-    session_id: &str,
-) -> Option<ServerMessage> {
+fn state_to_message(state: &ClaudeCodeState, session_id: &str) -> Option<ServerMessage> {
     match state {
-        echokit_terminal::terminal::claude::ClaudeCodeState::PreUseTool {
+        ClaudeCodeState::PreUseTool {
             request,
             is_pending,
             ..
@@ -125,7 +122,7 @@ fn state_to_message(
             }
             None
         }
-        echokit_terminal::terminal::claude::ClaudeCodeState::Output {
+        ClaudeCodeState::Output {
             output,
             is_thinking,
         } => {
@@ -142,7 +139,7 @@ fn state_to_message(
                 ))
             }
         }
-        echokit_terminal::terminal::claude::ClaudeCodeState::StopUseTool { is_error } => {
+        ClaudeCodeState::StopUseTool { is_error } => {
             if *is_error {
                 log::error!("[{}] Tool execution error", session_id);
                 Some(ServerMessage::notification(
@@ -158,15 +155,13 @@ fn state_to_message(
                 ))
             }
         }
-        echokit_terminal::terminal::claude::ClaudeCodeState::Working { prompt } => {
-            Some(ServerMessage::notification(
-                crate::protocol::NotificationLevel::Success,
-                prompt.clone(),
-            ))
-        }
-        echokit_terminal::terminal::claude::ClaudeCodeState::Idle => Some(
-            ServerMessage::get_input("Claude is waiting for user input...".to_string()),
-        ),
+        ClaudeCodeState::Working { prompt } => Some(ServerMessage::notification(
+            crate::protocol::NotificationLevel::Success,
+            prompt.clone(),
+        )),
+        ClaudeCodeState::Idle => Some(ServerMessage::get_input(
+            "Claude is waiting for user input...".to_string(),
+        )),
     }
 }
 
@@ -265,7 +260,7 @@ pub async fn run_command(
 
     let asr_client = reqwest::Client::new();
 
-    let mut terminal = echokit_terminal::terminal::claude::new_with_command(
+    let mut terminal = crate::terminal::claude::new_with_command(
         command.first().unwrap().as_str(),
         &command[1..],
         &[("VIBETTY_PORT".to_string(), listen_port.to_string())],
@@ -394,12 +389,12 @@ pub async fn run_command(
 
                     // Handle Idle state input_received separately
                     match terminal.state() {
-                        echokit_terminal::terminal::claude::ClaudeCodeState::Idle => {
+                        ClaudeCodeState::Idle => {
                             if input_received {
                                 terminal.send_enter().await?;
                             }
                         }
-                        echokit_terminal::terminal::claude::ClaudeCodeState::Working { .. } => {
+                        ClaudeCodeState::Working { .. } => {
                             input_received = false;
                         }
                         _ => {}
