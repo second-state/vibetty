@@ -189,10 +189,19 @@ async fn main() {
     log::info!("WebSocket server listening on ws://{}/ws", args.bind_addr);
     log::info!("HTTP server listening on http://{}", args.bind_addr);
 
-    axum::serve(
+    let serve = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await
-    .unwrap();
+    );
+
+    tokio::select! {
+        res = serve => {
+            if let Err(e) = res {
+                log::error!("Server error: {}", e);
+            }
+        }
+        _ = r => {
+            log::info!("UI thread finished");
+        }
+    }
 }
