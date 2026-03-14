@@ -6,7 +6,7 @@ use bytes::Bytes;
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-        KeyModifiers,
+        KeyModifiers, MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -73,7 +73,7 @@ impl App {
         Self {
             header_text,
             footer_text,
-            parser: vt100::Parser::new_with_callbacks(24, 80, 0, WindowCallbacks::new()),
+            parser: vt100::Parser::new_with_callbacks(24, 80, 8096, WindowCallbacks::new()),
             rx_from_pty,
         }
     }
@@ -82,6 +82,16 @@ impl App {
     fn process_pty_output(&mut self) -> bool {
         match self.rx_from_pty.blocking_recv() {
             Some(bytes) => {
+                if b"\x1b[6~".as_slice() == bytes {
+                    // Page Down
+                    let s = self.parser.screen().scrollback();
+                    self.parser.screen_mut().set_scrollback(s.saturating_sub(5));
+                } else if b"\x1b[5~".as_slice() == bytes {
+                    // Page Up
+                    let s = self.parser.screen().scrollback();
+                    self.parser.screen_mut().set_scrollback(s + 5);
+                }
+
                 log::trace!("Received {} bytes from PTY", bytes.len());
                 self.parser.process(&bytes);
                 // 处理完一个后，非阻塞地检查是否有更多数据
@@ -146,6 +156,7 @@ impl App {
                     .blocking_send(UIEvent::Title(format!("{}", callback.title)))
                     .ok();
                 callback.update_title = false;
+                self.parser.screen_mut().set_scrollback(0);
             }
 
             terminal.draw(|f| self.ui(f))?;
@@ -242,6 +253,16 @@ fn event_loop_thread(tx_to_pty: UITx, shutdown: Arc<AtomicBool>) -> anyhow::Resu
             } else if let Event::Paste(s) = evt {
                 let bytes = s.into_bytes();
                 let _ = tx_to_pty.blocking_send(UIEvent::Input(bytes));
+            } else if let Event::Mouse(mouse) = evt {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => {
+                        let _ = tx_to_pty.blocking_send(UIEvent::Input(b"\x1b[5~".to_vec()));
+                    }
+                    MouseEventKind::ScrollDown => {
+                        let _ = tx_to_pty.blocking_send(UIEvent::Input(b"\x1b[6~".to_vec()));
+                    }
+                    _ => {}
+                }
             }
         }
     }

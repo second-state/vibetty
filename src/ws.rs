@@ -403,6 +403,11 @@ pub async fn run_command(
             }
             TerminalEvent::UIEvent(crate::ui::UIEvent::Input(input)) => {
                 terminal.send_bytes(&input).await?;
+                if input == b"\x1b[5~" || input == b"\x1b[6~" {
+                    log::debug!("Received Page Up/Down input from UI");
+                    pty_output_tx.send(bytes::Bytes::from_owner(input)).await?;
+                    continue;
+                }
             }
             TerminalEvent::UIEvent(crate::ui::UIEvent::Title(title)) => {
                 log::debug!(
