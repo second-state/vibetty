@@ -259,6 +259,7 @@ pub async fn new_with_command<S: AsRef<str>>(
 
     if !history_file_path.exists() {
         std::fs::create_dir_all(history_file_path.parent().unwrap())?;
+        std::fs::File::create(&history_file_path)?;
     }
 
     let mut history_file = linemux::MuxedLines::new().expect("Failed to create MuxedLines");
