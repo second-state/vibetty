@@ -130,7 +130,7 @@ fn state_to_message(state: &ClaudeCodeState, session_id: &str) -> Option<ServerM
                 log::info!("[{}] Claude is thinking...", session_id);
                 Some(ServerMessage::notification(
                     crate::protocol::NotificationLevel::Info,
-                    format!("\x1b[33mClaude is thinking...\n\x1b[90m\n {output}\x1b[39m",),
+                    format!("\x1b[38;5;245m{output}\x1b[0m",),
                 ))
             } else {
                 Some(ServerMessage::notification(
@@ -151,7 +151,7 @@ fn state_to_message(state: &ClaudeCodeState, session_id: &str) -> Option<ServerM
                 Some(ServerMessage::coustom_notification(
                     String::new(),
                     None,
-                    0x20B2AA,
+                    0x3CB371,
                 ))
             }
         }
