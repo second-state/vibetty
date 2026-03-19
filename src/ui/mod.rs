@@ -287,7 +287,14 @@ fn bytes_from_key(key: KeyEvent) -> Option<Vec<u8>> {
             }
         }
         KeyCode::Enter => bytes.push(b'\r'),
-        KeyCode::Tab => bytes.push(b'\t'),
+        KeyCode::Tab => {
+            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                bytes.extend_from_slice(b"\x1b[Z");
+            } else {
+                bytes.push(b'\t');
+            }
+        }
+        KeyCode::BackTab => bytes.extend_from_slice(b"\x1b[Z"),
         KeyCode::Backspace => bytes.push(0x08),
         KeyCode::Esc => bytes.push(0x1b),
         KeyCode::Up => bytes.extend_from_slice(b"\x1b[A"),

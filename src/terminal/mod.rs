@@ -27,6 +27,14 @@ impl<T: TerminalType> EchokitChild<T> {
         self.pty.flush().await
     }
 
+    pub async fn send_key_iter<S: AsRef<[u8]>>(&mut self, keys: &[S]) -> std::io::Result<()> {
+        for key in keys {
+            self.write_all(key.as_ref()).await?;
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        Ok(())
+    }
+
     pub async fn send_text(&mut self, text: &str) -> std::io::Result<()> {
         self.write_all(text.as_bytes()).await
     }

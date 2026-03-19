@@ -39,6 +39,13 @@ pub enum ClientMessage {
         index: i32,
     },
 
+    #[serde(rename = "choices")]
+    Choices {
+        index: Vec<i32>,
+        custom_input: Option<String>,
+        multi_select: bool,
+    },
+
     /// 切换工作目录
     #[serde(rename = "change_dir")]
     ChangeDir(String),
@@ -64,6 +71,16 @@ impl Debug for ClientMessage {
             ClientMessage::Choice { index } => {
                 f.debug_struct("Choice").field("index", index).finish()
             }
+            ClientMessage::Choices {
+                index,
+                custom_input,
+                multi_select,
+            } => f
+                .debug_struct("Choices")
+                .field("index", index)
+                .field("custom_input", custom_input)
+                .field("multi_select", multi_select)
+                .finish(),
             ClientMessage::ChangeDir(path) => f.debug_tuple("ChangeDir").field(path).finish(),
         }
     }
@@ -164,6 +181,12 @@ pub struct ChoicesData {
 
     /// 选择项列表, 如果是空则表示选择 confirm/cancel
     pub options: Vec<String>,
+
+    /// 是否允许多选（如果为 true，客户端可以选择多个选项，index 将是一个数组）
+    pub multi_select: bool,
+
+    /// 是否允许用户输入自定义选项（如果为 true，客户端可以提供一个文本输入，文本输入内容将通过 input 消息发送）
+    pub allow_custom_input: bool,
 }
 
 // ========== 辅助类型 ==========
@@ -280,11 +303,18 @@ impl ServerMessage {
     }
 
     /// 创建提供选择项消息
-    pub fn choices(title: impl Into<String>, options: Vec<String>) -> Self {
+    pub fn choices(
+        title: impl Into<String>,
+        options: Vec<String>,
+        multi_select: bool,
+        allow_custom_input: bool,
+    ) -> Self {
         Self::Choices(ChoicesData {
             id: None,
             title: title.into(),
             options,
+            multi_select,
+            allow_custom_input,
         })
     }
 
@@ -293,11 +323,15 @@ impl ServerMessage {
         id: impl Into<String>,
         title: impl Into<String>,
         options: Vec<String>,
+        multi_select: bool,
+        allow_custom_input: bool,
     ) -> Self {
         Self::Choices(ChoicesData {
             id: Some(id.into()),
             title: title.into(),
             options,
+            multi_select,
+            allow_custom_input,
         })
     }
 
@@ -490,6 +524,8 @@ mod tests {
                 "选项B".to_string(),
                 "选项C".to_string(),
             ],
+            false,
+            false,
         );
         let bytes = msg.to_msgpack().unwrap();
         let decoded = ServerMessage::from_msgpack(&bytes).unwrap();
@@ -590,7 +626,7 @@ mod tests {
 
     #[test]
     fn test_server_choices_json() {
-        let msg = ServerMessage::choices("请选择", vec!["A".into(), "B".into()]);
+        let msg = ServerMessage::choices("请选择", vec!["A".into(), "B".into()], false, false);
         let json = msg.to_json().unwrap();
         println!("JSON: {}", json);
         let decoded = ServerMessage::from_json(&json).unwrap();
