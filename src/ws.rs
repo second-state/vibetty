@@ -438,6 +438,12 @@ pub async fn run_command(
             }
             TerminalEvent::Input(ClientMessage::Sync) => {
                 log::info!("Received Sync message from client");
+                if let Some(msg) =
+                    state_to_message(terminal.state(), &terminal.session_id().to_string())
+                    && let Err(_e) = tx.send(msg)
+                {
+                    log::error!("[{}] No client waiting for data", terminal.session_id());
+                }
             }
             TerminalEvent::Input(ClientMessage::PtyInput(input)) => {
                 log::info!(
