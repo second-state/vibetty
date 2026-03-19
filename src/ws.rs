@@ -25,8 +25,8 @@ struct Question {
     question: String,
     #[serde(rename = "header")]
     _header: Option<String>,
-    #[serde(rename = "multiSelect")]
-    _multi_select: Option<bool>,
+    #[serde(rename = "multiSelect", default)]
+    multi_select: bool,
     options: Vec<QuestionOption>,
 }
 
@@ -56,6 +56,8 @@ fn use_tool_to_choices(tool: &UseTool) -> ChoicesData {
             id: tool_id,
             title: first_q.question.clone(),
             options,
+            multi_select: first_q.multi_select,
+            allow_custom_input: true,
         };
     }
 
@@ -93,6 +95,8 @@ fn use_tool_to_choices(tool: &UseTool) -> ChoicesData {
         id: tool_id,
         title,
         options: vec![],
+        multi_select: false,
+        allow_custom_input: false,
     }
 }
 
@@ -457,13 +461,49 @@ pub async fn run_command(
                     continue;
                 }
 
-                for _ in 0..index {
-                    terminal.send_down_arrow().await?;
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                terminal.send_key_iter(&[(index + 1).to_string()]).await?;
+            }
+            TerminalEvent::Input(ClientMessage::Choices {
+                index,
+                custom_input,
+                multi_select,
+            }) => {
+                log::info!("Sending choice input to terminal: {:?}", index);
+                let mut keys = Vec::new();
+                for i in index {
+                    if i < 0 {
+                        terminal.send_esc().await?;
+                        continue;
+                    }
+                    keys.push((i + 1).to_string());
                 }
 
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                terminal.send_enter().await?;
+                if let Some(input) = custom_input
+                    && !input.trim().is_empty()
+                {
+                    terminal.send_up_arrow().await?;
+                    log::info!("Sending custom input to terminal: {:?}", input);
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    terminal.send_text(&input).await?;
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    if multi_select {
+                        terminal.send_up_arrow().await?;
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    } else {
+                        terminal.send_enter().await?;
+                        continue;
+                    }
+                }
+
+                log::info!("Submitting choice input");
+
+                terminal.send_key_iter(&keys).await?;
+
+                if multi_select {
+                    terminal.send_right_arrow().await?;
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    terminal.send_enter().await?;
+                }
             }
             TerminalEvent::Input(ClientMessage::ChangeDir(path)) => {
                 log::info!("Change directory requested: {}", path);
