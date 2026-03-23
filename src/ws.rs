@@ -530,12 +530,21 @@ pub async fn run_command(
                 wav_buffer.extend_from_slice(&chunk);
             }
             TerminalEvent::Input(ClientMessage::VoiceInputEnd(..)) => {
+                log::info!("Voice input ended, total size: {} bytes", wav_buffer.len());
                 let config = crate::util::WavConfig {
                     sample_rate: wav_sample_rate,
                     channels: 1,
                     bits_per_sample: 16,
                 };
                 let wav_data = crate::util::pcm_to_wav(&wav_buffer, config);
+                if std::env::var("ASR_DEBUG_WAV").is_ok() {
+                    let debug_path = format!("debug_{}.wav", terminal.session_id());
+                    if let Err(e) = std::fs::write(&debug_path, &wav_data) {
+                        log::error!("Failed to write debug WAV file: {}", e);
+                    } else {
+                        log::info!("Saved debug WAV file: {}", debug_path);
+                    }
+                }
 
                 let AsrConfig::Whisper(asr_config) = &asr_config;
 
@@ -628,7 +637,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                 match result {
                     Some(Ok(msg)) => match msg {
                         Message::Binary(data) => {
-                            log::info!("Received binary message, length: {}", data.len());
+                            log::trace!("Received binary message, length: {}", data.len());
                             match ClientMessage::from_msgpack(&data) {
                                 Ok(client_msg) => {
                                     log::debug!("Parsed client message: {:?}", client_msg);
@@ -695,13 +704,17 @@ async fn retry_whisper(
     timeout: std::time::Duration,
 ) -> Vec<String> {
     for i in 0..retry {
+        log::debug!("Attempting ASR request, try {}/{}", i + 1, retry);
         let r = tokio::time::timeout(
             timeout,
             crate::asr::whisper(client, url, api_key, model, lang, prompt, wav_audio.clone()),
         )
         .await;
         match r {
-            Ok(Ok(v)) => return v,
+            Ok(Ok(v)) => {
+                log::info!("ASR successful on try {}/{}, result: {:?}", i + 1, retry, v);
+                return v;
+            }
             Ok(Err(e)) => {
                 log::error!("asr error: {e}");
                 continue;
