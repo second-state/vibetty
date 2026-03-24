@@ -1,13 +1,8 @@
 use axum::{
-    Json, Router,
-    body::Body,
-    extract::{ConnectInfo, State},
-    http::StatusCode,
-    response::{IntoResponse, Response},
+    Router,
     routing::{get, post},
 };
 use clap::Parser;
-use serde::Deserialize;
 use std::net::SocketAddr;
 
 mod asr;
@@ -23,69 +18,7 @@ mod ui;
 
 use config::Args;
 
-// 嵌入静态资源
-const INDEX_HTML: &str = include_str!("../resources/index.html");
-const APP_JS: &str = include_str!("../resources/app.js");
-const SETUP_HTML: &str = include_str!("../resources/setup.html");
-
-async fn index_handler() -> impl IntoResponse {
-    Response::builder()
-        .header("content-type", "text/html")
-        .body(Body::from(INDEX_HTML))
-        .unwrap()
-}
-
-async fn app_js_handler() -> impl IntoResponse {
-    Response::builder()
-        .header("content-type", "application/javascript")
-        .body(Body::from(APP_JS))
-        .unwrap()
-}
-
-async fn setup_handler() -> impl IntoResponse {
-    Response::builder()
-        .header("content-type", "text/html")
-        .body(Body::from(SETUP_HTML))
-        .unwrap()
-}
-
-#[derive(Deserialize)]
-struct ChangeDirRequest {
-    path: String,
-}
-
-async fn change_dir_handler(
-    State(state): State<ws::AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    Json(req): Json<ChangeDirRequest>,
-) -> impl IntoResponse {
-    // 检查是否来自 localhost
-    let ip = addr.ip();
-    let is_localhost = ip.is_loopback();
-
-    if !is_localhost {
-        log::warn!("Change directory request from non-localhost: {}", ip);
-        return (StatusCode::FORBIDDEN, "Only localhost access allowed").into_response();
-    }
-
-    log::info!("Change directory request from {}: {}", ip, req.path);
-
-    // 发送 ChangeDir 消息到 cli_tx
-    if let Err(e) = state
-        .cli_tx
-        .send(crate::protocol::ClientMessage::ChangeDir(req.path.clone()))
-        .await
-    {
-        log::error!("Failed to send ChangeDir message: {}", e);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to send change directory command: {}", e),
-        )
-            .into_response();
-    }
-
-    (StatusCode::OK, format!("Changing to: {}", req.path)).into_response()
-}
+mod static_page;
 
 fn logger_init() -> anyhow::Result<flexi_logger::LoggerHandle> {
     use flexi_logger::{FileSpec, Logger, WriteMode};
@@ -195,11 +128,11 @@ async fn main() {
     });
 
     let app = Router::new()
-        .route("/", get(index_handler))
-        .route("/app.js", get(app_js_handler))
-        .route("/setup", get(setup_handler))
+        .route("/", get(static_page::index_handler))
+        .route("/app.js", get(static_page::app_js_handler))
+        .route("/setup", get(static_page::setup_handler))
         .route("/ws", get(ws::ws_handler))
-        .route("/api/change-dir", post(change_dir_handler))
+        .route("/api/change-dir", post(static_page::change_dir_handler))
         .with_state(state);
 
     log::info!("WebSocket server listening on ws://{}/ws", args.bind_addr);
