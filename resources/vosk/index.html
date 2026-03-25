@@ -23,8 +23,8 @@
                 <div class="label">
                     <span class="label-text">WebSocket URL</span>
                 </div>
-                <input type="text" id="wsUrlInput" placeholder="ws://localhost:3000/vosk_ws"
-                    class="input input-bordered w-full mb-2" />
+                <input type="text" id="wsUrlInput" value="ws://localhost:3000/vosk_ws"
+                    placeholder="ws://localhost:3000/vosk_ws" class="input input-bordered w-full mb-2" />
             </label>
 
             <label class="form-control">
@@ -91,10 +91,11 @@
         let model = null;
         let audioContext = null;
 
-        // Language model paths
+        // Language model paths (relative to current page)
+        const currentPath = window.location.pathname.replace(/\/[^\/]*$/, '');
         const modelPaths = {
-            cn: 'models/vosk-model-small-cn-0.22.zip',
-            en: 'models/vosk-model-small-en-us-0.15.zip',
+            cn: currentPath + '/models/vosk-model-small-cn-0.22.zip',
+            en: currentPath + '/models/vosk-model-small-en-us-0.15.zip',
         };
 
         // Load saved URL from localStorage
@@ -251,7 +252,7 @@
 
                     // Send result back to server
                     if (ws && ws.readyState === WebSocket.OPEN) {
-                        ws.send(JSON.stringify({ type: 'result', text: text }));
+                        ws.send(text);
                     }
                 });
 
@@ -346,8 +347,8 @@
         }
 
         window.onload = () => {
-            // Auto-fill on load
-            autoBtn.click();
+            // Auto-fill on load (disabled - use HTML default)
+            // autoBtn.click();
         };
     </script>
 </body>
