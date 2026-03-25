@@ -13,7 +13,11 @@ WebSocket terminal server with voice input support and Claude AI intelligent int
 
 ## Quick Start
 
-### 1. Set Environment Variables
+### ASR Configuration
+
+Vibetty supports two speech recognition modes:
+
+#### Option 1: Whisper API (Server-side)
 
 Create a `.env` file and configure the Whisper API (Groq recommended):
 
@@ -25,7 +29,7 @@ ASR_LANG=en
 ASR_PROMPT=
 ```
 
-### 2. Start the Service
+Then start the service:
 
 ```bash
 # Run directly with cargo
@@ -35,6 +39,19 @@ cargo run -- -- claude
 cargo build --release
 ./target/release/vibetty -- claude
 ```
+
+#### Option 2: WebVosk (Browser-side)
+
+Speech recognition runs entirely in the browser using Vosk models. No API key required.
+
+```bash
+# Set ASR platform to WebVosk
+ASR_PLATFORM=web_vosk cargo run -- -- claude
+```
+
+Then visit the WebVosk interface at: https://second-state.github.io/vibetty_web_vosk/
+
+**Note:** First-time use requires downloading Vosk model files (~40MB each). The models are cached in your browser.
 
 For more options, use `--help`:
 ```bash
