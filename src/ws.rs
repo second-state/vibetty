@@ -264,9 +264,9 @@ impl ASRInterface {
                 let mut req = (bytes::Bytes::from(wav_data), resp_tx);
 
                 loop {
-                    let tx = rx
-                        .recv()
+                    let tx = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
                         .await
+                        .map_err(|_| anyhow::anyhow!("Request WebVosk timed out"))?
                         .ok_or(anyhow::anyhow!("WebVosk channel closed"))?;
 
                     if tx.is_closed() {
