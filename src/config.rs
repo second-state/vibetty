@@ -17,6 +17,11 @@ pub struct WhisperASRConfig {
 #[serde(tag = "platform")]
 pub enum AsrConfig {
     Whisper(WhisperASRConfig),
+    /// vosk is a small local ASR engine. And it can run in browser.
+    /// This option uses WebSocket to perform speech recognition in the browser via Vosk,
+    /// sending results to the server. This avoids complex configuration and installation,
+    /// enabling quick deployment and testing.
+    WebVosk,
 }
 
 #[derive(Parser, Debug)]
@@ -41,14 +46,18 @@ impl Args {
         // 如果指定了配置文件，从文件读取
         if let Some(path) = &self.asr_config_path {
             if let Ok(content) = std::fs::read_to_string(path)
-                && let Ok(config) = serde_json::from_str::<WhisperASRConfig>(&content)
+                && let Ok(config) = serde_json::from_str::<AsrConfig>(&content)
             {
-                return AsrConfig::Whisper(config);
+                return config;
             }
             log::warn!(
                 "Failed to parse ASR config from {}, falling back to env",
                 path
             );
+        }
+
+        if std::env::var("ASR_PLATFORM").unwrap_or_else(|_| "whisper".to_string()) == "web_vosk" {
+            return AsrConfig::WebVosk;
         }
 
         // 否则从环境变量读取

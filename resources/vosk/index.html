@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="silk">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Web Vosk</title>
+
+    <link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css" />
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <link href="https://cdn.jsdelivr.net/npm/daisyui@5/themes.css" rel="stylesheet" type="text/css" />
+
+    <script type="application/javascript" src="https://cdn.jsdelivr.net/npm/vosk-browser@0.0.5/dist/vosk.js"></script>
+</head>
+
+<body class="bg-base-200 min-h-screen flex flex-col items-center justify-center p-4">
+    <!-- Config Panel -->
+    <div class="card bg-base-100 shadow-xl w-full max-w-md mb-4">
+        <div class="card-body">
+            <h2 class="card-title text-2xl mb-4">Web Vosk</h2>
+
+            <label class="form-control">
+                <div class="label">
+                    <span class="label-text">WebSocket URL</span>
+                </div>
+                <input type="text" id="wsUrlInput" placeholder="ws://localhost:3000/vosk_ws"
+                    class="input input-bordered w-full mb-2" />
+            </label>
+
+            <label class="form-control">
+                <div class="label">
+                    <span class="label-text">Language Model</span>
+                </div>
+                <select id="langSelect" class="select select-bordered w-full">
+                    <option value="en">English (US)</option>
+                    <option value="cn">中文 (Chinese)</option>
+                </select>
+            </label>
+
+            <div class="card-actions justify-end gap-2 mt-4">
+                <button class="btn btn-outline flex-1" id="autoBtn">Auto</button>
+                <button class="btn btn-primary flex-1" id="connectBtn">Connect</button>
+            </div>
+
+            <div id="status" class="mt-4 text-center hidden">
+                <div class="badge badge-success gap-2" id="statusBadge">
+                    <div class="w-2 h-2 rounded-full bg-success animate-pulse"></div>
+                    <span id="statusText">Connected</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Recognition Result -->
+    <div class="card bg-base-100 shadow-xl w-full max-w-md">
+        <div class="card-body">
+            <h3 class="card-title text-lg mb-2">Recognition Result</h3>
+
+            <!-- File Upload (hidden) -->
+            <div class="mb-4 hidden">
+                <label class="form-control">
+                    <div class="label">
+                        <span class="label-text">Upload audio file for recognition</span>
+                    </div>
+                    <input type="file" id="fileInput" accept="audio/*,.wav"
+                        class="file-input file-input-bordered w-full" />
+                </label>
+            </div>
+
+            <div id="result" class="bg-base-200 rounded-lg p-4 min-h-[100px] font-mono text-sm">
+                <span class="text-base-content/50">Waiting for audio...</span>
+            </div>
+            <div id="partial" class="text-base-content/70 text-sm mt-2 italic"></div>
+        </div>
+    </div>
+
+    <script>
+        const wsUrlInput = document.getElementById('wsUrlInput');
+        const autoBtn = document.getElementById('autoBtn');
+        const connectBtn = document.getElementById('connectBtn');
+        const langSelect = document.getElementById('langSelect');
+        const status = document.getElementById('status');
+        const statusBadge = document.getElementById('statusBadge');
+        const statusText = document.getElementById('statusText');
+        const resultDiv = document.getElementById('result');
+        const partialDiv = document.getElementById('partial');
+        const fileInput = document.getElementById('fileInput');
+
+        let ws = null;
+        let recognizer = null;
+        let model = null;
+        let audioContext = null;
+
+        // Language model paths
+        const modelPaths = {
+            cn: 'models/vosk-model-small-cn-0.22.zip',
+            en: 'models/vosk-model-small-en-us-0.15.zip',
+        };
+
+        // Load saved URL from localStorage
+        const savedUrl = localStorage.getItem('vosk_ws_url');
+        if (savedUrl) {
+            wsUrlInput.value = savedUrl;
+        }
+
+        // Load saved language from localStorage
+        const savedLang = localStorage.getItem('vosk_lang');
+        if (savedLang) {
+            langSelect.value = savedLang;
+        }
+
+        // Auto-fill URL based on current page
+        autoBtn.addEventListener('click', () => {
+            const currentUrl = new URL(window.location.href);
+            const protocol = currentUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+            const host = currentUrl.host;
+            const wsUrl = `${protocol}//${host}/vosk_ws`;
+            wsUrlInput.value = wsUrl;
+        });
+
+        // Save language selection
+        langSelect.addEventListener('change', () => {
+            localStorage.setItem('vosk_lang', langSelect.value);
+        });
+
+        // Connect
+        connectBtn.addEventListener('click', async () => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                // Disconnect
+                ws.close();
+            } else {
+                // Connect
+                const url = wsUrlInput.value.trim();
+                if (!url) {
+                    alert('Please enter a WebSocket URL');
+                    return;
+                }
+
+                // Save to localStorage
+                localStorage.setItem('vosk_ws_url', url);
+
+                // Connect
+                connectBtn.textContent = 'Connecting...';
+                connectBtn.disabled = true;
+
+                ws = new WebSocket(url);
+                ws.binaryType = 'arraybuffer';
+
+                ws.onopen = async () => {
+                    showStatus('Connected', false);
+                    connectBtn.textContent = 'Disconnect';
+                    connectBtn.classList.remove('btn-primary');
+                    connectBtn.classList.add('btn-error');
+                    connectBtn.disabled = false;
+
+                    // Load Vosk model
+                    await loadModel();
+                };
+
+                ws.onerror = (error) => {
+                    console.error('WebSocket error:', error);
+                    showStatus('Connection error', true);
+                    resetButton();
+                };
+
+                ws.onclose = () => {
+                    showStatus('Disconnected', true);
+                    resetButton();
+                    ws = null;
+                };
+
+                ws.onmessage = async (event) => {
+                    console.log('[ws.onmessage] Received message, type:', typeof event.data, 'instanceof ArrayBuffer:', event.data instanceof ArrayBuffer);
+                    // Handle binary WAV file from server
+                    if (event.data instanceof ArrayBuffer) {
+                        console.log('[ws.onmessage] Processing binary WAV, size:', event.data.byteLength);
+                        await processWavFile(event.data);
+                    } else {
+                        console.log('[ws.onmessage] Received text:', event.data);
+                    }
+                };
+            }
+        });
+
+        // File upload handler
+        fileInput.addEventListener('change', async (event) => {
+            const file = event.target.files[0];
+            if (!file) {
+                return;
+            }
+
+            console.log('[fileUpload] File selected:', file.name, 'size:', file.size, 'type:', file.type);
+
+            if (!model || !recognizer) {
+                alert('Please connect to WebSocket first to load the model');
+                fileInput.value = '';
+                return;
+            }
+
+            // Read file as ArrayBuffer
+            const arrayBuffer = await file.arrayBuffer();
+            console.log('[fileUpload] File read, size:', arrayBuffer.byteLength);
+
+            // Process the file
+            await processWavFile(arrayBuffer);
+
+            // Clear input
+            fileInput.value = '';
+        });
+
+        function showStatus(text, isError) {
+            status.classList.remove('hidden');
+            statusText.textContent = text;
+            if (isError) {
+                statusBadge.classList.remove('badge-success', 'badge-info');
+                statusBadge.classList.add('badge-error');
+            } else {
+                statusBadge.classList.remove('badge-error');
+                statusBadge.classList.add('badge-success');
+            }
+        }
+
+        function resetButton() {
+            connectBtn.textContent = 'Connect';
+            connectBtn.classList.remove('btn-error');
+            connectBtn.classList.add('btn-primary');
+            connectBtn.disabled = false;
+        }
+
+        let started = false;
+
+        // Load Vosk model
+        async function loadModel() {
+            showStatus('Loading model...', false);
+
+            try {
+                const lang = langSelect.value;
+                const modelPath = modelPaths[lang] || modelPaths.cn;
+                console.log('[loadModel] Loading model:', modelPath);
+
+                model = await Vosk.createModel(modelPath);
+                recognizer = new model.KaldiRecognizer(16000);
+                window.voskModel = model; // Expose model for debugging
+                window.voskRecognizer = recognizer; // Expose recognizer for debugging
+
+                recognizer.on("result", (message) => {
+                    started = false;
+                    const text = message.result.text;
+                    console.log(message);
+                    resultDiv.innerHTML = text || '<span class="text-base-content/50">No result</span>';
+
+                    // Send result back to server
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ type: 'result', text: text }));
+                    }
+                });
+
+                recognizer.on("partialresult", (message) => {
+                    const partial = message.result.partial;
+                    console.log(`Partial result: ${partial}`);
+                    partialDiv.textContent = partial;
+                });
+
+                showStatus('Ready - Waiting for audio...', false);
+
+            } catch (error) {
+                console.error('Model load error:', error);
+                showStatus('Model load failed: ' + error.message, true);
+                resetButton();
+            }
+        }
+
+        // Process WAV file received from WebSocket or file upload (fast mode, no playback)
+        async function processWavFile(arrayBuffer) {
+            console.log('[processWavFile] Started, arrayBuffer size:', arrayBuffer.byteLength);
+            showStatus('Processing audio...', false);
+            started = true;
+            resultDiv.innerHTML = '<span class="text-base-content/50">Processing...</span>';
+            partialDiv.textContent = '';
+
+            try {
+                if (!audioContext) {
+                    console.log('[processWavFile] Creating AudioContext with 16000Hz');
+                    audioContext = new AudioContext({ sampleRate: 16000 });
+                }
+
+                // Resume AudioContext if suspended (required after user interaction)
+                if (audioContext.state === 'suspended') {
+                    await audioContext.resume();
+                }
+
+                // Decode WAV file directly (fast, no playback needed)
+                console.log('[processWavFile] Decoding audio data...');
+                const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+                console.log('[processWavFile] Decoded:', {
+                    channels: audioBuffer.numberOfChannels,
+                    length: audioBuffer.length,
+                    duration: audioBuffer.duration + 's',
+                    sampleRate: audioBuffer.sampleRate
+                });
+
+                // Get audio data (use first channel)
+                const audioData = audioBuffer.getChannelData(0);
+
+                // Process in chunks
+                const CHUNK_SIZE = 4096;
+                const totalChunks = Math.ceil(audioData.length / CHUNK_SIZE);
+                console.log('[processWavFile] Processing', totalChunks, 'chunks');
+
+                for (let i = 0; i < audioData.length; i += CHUNK_SIZE) {
+                    if (!started) {
+                        console.log('[processWavFile] Processing cancelled');
+                        break;
+                    }
+
+                    const chunkSize = Math.min(CHUNK_SIZE, audioData.length - i);
+                    const chunkBuffer = audioContext.createBuffer(1, chunkSize, audioBuffer.sampleRate);
+                    const channelData = chunkBuffer.getChannelData(0);
+
+                    // Copy chunk data
+                    for (let j = 0; j < chunkSize; j++) {
+                        channelData[j] = audioData[i + j];
+                    }
+
+                    // Feed to recognizer
+                    recognizer.acceptWaveform(chunkBuffer);
+
+                    // Update progress
+                    if (i % (CHUNK_SIZE * 10) === 0) {
+                        const progress = Math.round((i / audioData.length) * 100);
+                        showStatus(`Recognizing... ${progress}%`, false);
+                    }
+                }
+
+                // Signal end of audio with empty buffer to get final result
+                console.log('[processWavFile] Sending final empty buffer');
+                const emptyBuffer = audioContext.createBuffer(1, audioBuffer.sampleRate * 5, audioBuffer.sampleRate);
+                recognizer.acceptWaveform(emptyBuffer);
+
+                showStatus('Ready - Waiting for audio...', false);
+
+            } catch (error) {
+                console.error('[processWavFile] Audio processing error:', error);
+                showStatus('Processing failed: ' + error.message, true);
+            }
+        }
+
+        window.onload = () => {
+            // Auto-fill on load
+            autoBtn.click();
+        };
+    </script>
+</body>
+
+</html>

@@ -174,10 +174,17 @@ type ServerTx = broadcast::Sender<ServerMessage>;
 type ClientTx = mpsc::Sender<ClientMessage>;
 type ClientRx = mpsc::Receiver<ClientMessage>;
 
+type OneshotSender<T> = tokio::sync::oneshot::Sender<T>;
+
+type WebVoskReqTx = OneshotSender<(bytes::Bytes, OneshotSender<String>)>;
+type WebVoskTx = mpsc::Sender<WebVoskReqTx>;
+type WebVoskRx = mpsc::Receiver<WebVoskReqTx>;
+
 #[derive(Clone)]
 pub struct AppState {
     pub tx: ServerTx,
     pub cli_tx: ClientTx,
+    pub web_vosk_tx: Option<WebVoskTx>,
 }
 
 fn t2s<S: AsRef<str>>(s: S) -> String {
@@ -206,6 +213,85 @@ impl std::fmt::Display for ClaudeMode {
 #[derive(Debug)]
 struct SessionState {
     mode: ClaudeMode,
+}
+
+pub enum ASRInterface {
+    Whisper {
+        client: reqwest::Client,
+        config: crate::config::WhisperASRConfig,
+    },
+    WebVosk(WebVoskRx),
+}
+
+impl ASRInterface {
+    pub fn from_config(config: AsrConfig) -> (Self, Option<WebVoskTx>) {
+        match config {
+            AsrConfig::Whisper(cfg) => (
+                ASRInterface::Whisper {
+                    client: reqwest::Client::new(),
+                    config: cfg,
+                },
+                None,
+            ),
+            AsrConfig::WebVosk => {
+                let (web_vosk_tx, web_vosk_rx) = mpsc::channel(10);
+                (ASRInterface::WebVosk(web_vosk_rx), Some(web_vosk_tx))
+            }
+        }
+    }
+
+    pub async fn transcribe(&mut self, wav_data: Vec<u8>) -> anyhow::Result<String> {
+        match self {
+            ASRInterface::Whisper { client, config } => {
+                let r = retry_whisper(
+                    &client,
+                    &config.url,
+                    &config.api_key,
+                    &config.model,
+                    &config.lang,
+                    &config.prompt,
+                    wav_data,
+                    3,
+                    std::time::Duration::from_secs(5),
+                )
+                .await;
+
+                Ok(t2s(r.join("\n")))
+            }
+            ASRInterface::WebVosk(rx) => {
+                log::info!("Start recv a WebVosk transcription request");
+                let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+                let mut req = (bytes::Bytes::from(wav_data), resp_tx);
+
+                loop {
+                    let tx = rx
+                        .recv()
+                        .await
+                        .ok_or(anyhow::anyhow!("WebVosk channel closed"))?;
+
+                    if tx.is_closed() {
+                        continue;
+                    };
+
+                    if let Err(e) = tx.send(req) {
+                        log::warn!(
+                            "Failed to send WebVosk transcription request, wait next request tx",
+                        );
+                        req = e;
+                        continue;
+                    } else {
+                        break;
+                    }
+                }
+
+                match tokio::time::timeout(std::time::Duration::from_secs(10), resp_rx).await {
+                    Ok(Ok(transcription)) => Ok(transcription),
+                    Ok(Err(_)) => Err(anyhow::anyhow!("WebVosk response channel closed")),
+                    Err(_) => Err(anyhow::anyhow!("WebVosk transcription timed out")),
+                }
+            }
+        }
+    }
 }
 
 impl Default for SessionState {
@@ -237,7 +323,7 @@ pub enum RunCommandResult {
 #[allow(clippy::too_many_arguments)]
 pub async fn run_command(
     command: Vec<String>,
-    asr_config: AsrConfig,
+    asr_interface: &mut ASRInterface,
     mut rx: ClientRx,
     mut ui_rx: mpsc::Receiver<crate::ui::UIEvent>,
     tx: ServerTx,
@@ -265,8 +351,6 @@ pub async fn run_command(
 
         Error,
     }
-
-    let asr_client = reqwest::Client::new();
 
     let mut terminal = crate::terminal::claude::new_with_command(
         command.first().unwrap().as_str(),
@@ -546,22 +630,16 @@ pub async fn run_command(
                     }
                 }
 
-                let AsrConfig::Whisper(asr_config) = &asr_config;
-
-                let r = retry_whisper(
-                    &asr_client,
-                    &asr_config.url,
-                    &asr_config.api_key,
-                    &asr_config.model,
-                    &asr_config.lang,
-                    &asr_config.prompt,
-                    wav_data,
-                    3,
-                    std::time::Duration::from_secs(5),
-                )
-                .await;
-
-                let mut asr_text = t2s(r.join("\n"));
+                let mut asr_text = match asr_interface.transcribe(wav_data).await {
+                    Ok(text) => {
+                        log::info!("ASR transcription result: {}", text);
+                        text
+                    }
+                    Err(e) => {
+                        log::error!("ASR transcription failed: {}", e);
+                        format!("ASR Error: {}", e)
+                    }
+                };
 
                 // 如果 ASR 结果等于环境变量 VIBETTY_EXIT_COMMAND 的值，替换为 "/exit"（大小写不敏感）
                 if let Ok(exit_trigger) = std::env::var("VIBETTY_EXIT_COMMAND")
@@ -570,9 +648,7 @@ pub async fn run_command(
                     asr_text = "/exit".to_string();
                 }
 
-                let asr_result = format!("{} ", asr_text);
-
-                if let Err(_e) = tx.send(ServerMessage::asr_result(asr_result)) {
+                if let Err(_e) = tx.send(ServerMessage::asr_result(asr_text)) {
                     log::error!("[{}] No client waiting for data", terminal.session_id());
                 }
             }
@@ -726,4 +802,85 @@ async fn retry_whisper(
         }
     }
     vec![]
+}
+
+pub async fn web_vosk_ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    if let Some(tx) = state.web_vosk_tx {
+        ws.on_upgrade(move |socket| handle_web_vosk_socket(socket, tx))
+    } else {
+        log::error!("WebVosk ASR interface not configured");
+        // 直接返回一个错误响应
+        axum::response::Response::builder()
+            .status(400)
+            .body("WebVosk ASR interface not configured".into())
+            .unwrap()
+    }
+}
+
+async fn handle_web_vosk_socket(mut socket: WebSocket, vosk_tx: WebVoskTx) {
+    loop {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if vosk_tx.send(tx).await.is_err() {
+            log::error!("Failed to send WebVosk request channel");
+            break;
+        }
+
+        match rx.await {
+            Ok((wav_data, resp_tx)) => {
+                log::info!(
+                    "Received WebVosk transcription request, data length: {}",
+                    wav_data.len()
+                );
+                socket
+                    .send(Message::Binary(wav_data))
+                    .await
+                    .unwrap_or_else(|e| {
+                        log::error!("Failed to send WAV data to WebVosk client: {}", e);
+                    });
+
+                match socket.recv().await {
+                    Some(Ok(Message::Binary(_))) => {
+                        log::warn!(
+                            "Unexpected binary message from WebVosk client, expected transcription result"
+                        );
+                    }
+                    Some(Ok(Message::Text(text))) => {
+                        log::info!(
+                            "Received transcription result from WebVosk client: {}",
+                            text
+                        );
+                        if resp_tx.send(text.to_string()).is_err() {
+                            log::error!("Failed to send transcription response back to requester");
+                            continue;
+                        }
+                    }
+                    Some(Ok(Message::Ping(_))) => {
+                        log::trace!("Received ping from WebVosk client");
+                    }
+                    Some(Ok(Message::Pong(_))) => {
+                        log::trace!("Received pong from WebVosk client");
+                    }
+                    Some(Ok(Message::Close(_))) => {
+                        log::info!("WebVosk client disconnected");
+                        break;
+                    }
+                    Some(Err(e)) => {
+                        log::error!("WebSocket error while waiting for  result: {}", e);
+                        break;
+                    }
+                    None => {
+                        log::error!("WebSocket connection closed");
+                        break;
+                    }
+                }
+            }
+            Err(e) => {
+                log::error!("Failed to receive WebVosk request: {}", e);
+                continue;
+            }
+        }
+    }
 }

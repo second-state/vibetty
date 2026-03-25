@@ -52,13 +52,16 @@ async fn main() {
     let (pty_output_tx, pty_output_rx) = tokio::sync::mpsc::channel(100);
     let (ui_tx, ui_rx) = tokio::sync::mpsc::channel(100);
 
+    let asr_config = args.asr_config();
+    log::info!("ASR Config: {:?}", asr_config);
+
+    let (mut asr_interface, web_vosk_tx) = ws::ASRInterface::from_config(asr_config);
+
     let state = ws::AppState {
         tx: tx.clone(),
         cli_tx,
+        web_vosk_tx,
     };
-
-    let asr_config = args.asr_config();
-    log::info!("ASR Config: {:?}", asr_config);
 
     let listener = tokio::net::TcpListener::bind(&args.bind_addr)
         .await
@@ -75,7 +78,7 @@ async fn main() {
         loop {
             let r = ws::run_command(
                 command.clone(),
-                asr_config.clone(),
+                &mut asr_interface,
                 cli_rx,
                 ui_rx,
                 tx.clone(),
@@ -133,6 +136,7 @@ async fn main() {
         .route("/setup", get(static_page::setup_handler))
         .route("/ws", get(ws::ws_handler))
         .route("/api/change-dir", post(static_page::change_dir_handler))
+        .route("/vosk_ws", get(ws::web_vosk_ws_handler))
         .with_state(state);
 
     log::info!("WebSocket server listening on ws://{}/ws", args.bind_addr);
