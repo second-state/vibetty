@@ -3,7 +3,9 @@ use axum::{
     routing::{get, post},
 };
 use clap::Parser;
+use std::env;
 use std::net::SocketAddr;
+use tower_http::services::ServeDir;
 
 mod asr;
 mod config;
@@ -16,9 +18,90 @@ mod types;
 
 mod ui;
 
-use config::Args;
+use config::{Args, AsrConfig};
 
 mod static_page;
+
+fn check_vosk_models(asr_config: &AsrConfig) {
+    if !matches!(asr_config, AsrConfig::WebVosk) {
+        return;
+    }
+
+    let models_dir = match env::home_dir() {
+        Some(home) => home.join(".vibetty/models"),
+        None => {
+            log::warn!("Failed to get home directory");
+            return;
+        }
+    };
+
+    // 检查并创建目录
+    if !models_dir.exists() {
+        if let Err(e) = std::fs::create_dir_all(&models_dir) {
+            log::warn!(
+                "Failed to create models directory {}: {}",
+                models_dir.display(),
+                e
+            );
+            return;
+        }
+        log::info!("Created models directory: {}", models_dir.display());
+    }
+
+    // 检查模型文件
+    let models = [
+        ("vosk-model-small-cn-0.22.zip", "Chinese model"),
+        ("vosk-model-small-en-us-0.15.zip", "English model"),
+    ];
+
+    let mut missing = Vec::new();
+    for (filename, _desc) in models {
+        let path = models_dir.join(filename);
+        if !path.exists() {
+            missing.push((filename, _desc));
+        }
+    }
+
+    if !missing.is_empty() {
+        println!("==========================================");
+        println!("VOSK model files missing:");
+        for (filename, desc) in &missing {
+            println!("  - {} ({})", filename, desc);
+        }
+        println!();
+        println!("Download models to: {}", models_dir.display());
+        println!();
+        println!("Download commands:");
+        println!("  # Chinese model");
+        println!(
+            "  wget -P {} https://alphacephei.com/vosk/models/vosk-model-small-cn-0.22.zip",
+            models_dir.display()
+        );
+        println!(
+            "  # or: curl -o {} https://alphacephei.com/vosk/models/vosk-model-small-cn-0.22.zip",
+            models_dir.join("vosk-model-small-cn-0.22.zip").display()
+        );
+        println!();
+        println!("  # English model");
+        println!(
+            "  wget -P {} https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip",
+            models_dir.display()
+        );
+        println!(
+            "  # or: curl -o {} https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip",
+            models_dir.join("vosk-model-small-en-us-0.15.zip").display()
+        );
+        println!();
+        println!("After download, models will be available at /models/ path");
+        println!("==========================================");
+        std::process::exit(1);
+    } else {
+        log::info!(
+            "VOSK models check passed: all models found in {}",
+            models_dir.display()
+        );
+    }
+}
 
 fn logger_init() -> anyhow::Result<flexi_logger::LoggerHandle> {
     use flexi_logger::{FileSpec, Logger, WriteMode};
@@ -54,6 +137,9 @@ async fn main() {
 
     let asr_config = args.asr_config();
     log::info!("ASR Config: {:?}", asr_config);
+
+    // 检查 VOSK 模型
+    check_vosk_models(&asr_config);
 
     let (mut asr_interface, web_vosk_tx) = ws::ASRInterface::from_config(asr_config);
 
@@ -134,9 +220,14 @@ async fn main() {
         .route("/", get(static_page::index_handler))
         .route("/app.js", get(static_page::app_js_handler))
         .route("/setup", get(static_page::setup_handler))
+        .route("/vosk", get(static_page::vosk_handler))
         .route("/ws", get(ws::ws_handler))
         .route("/api/change-dir", post(static_page::change_dir_handler))
         .route("/vosk_ws", get(ws::web_vosk_ws_handler))
+        .nest_service(
+            "/models",
+            ServeDir::new(env::home_dir().unwrap().join(".vibetty/models")),
+        )
         .with_state(state);
 
     log::info!("WebSocket server listening on ws://{}/ws", args.bind_addr);
