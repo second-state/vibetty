@@ -49,7 +49,7 @@ Speech recognition runs entirely in the browser using Vosk models. No API key re
 ASR_PLATFORM=web_vosk cargo run -- -- claude
 ```
 
-Then visit the WebVosk interface at: https://second-state.github.io/vibetty_web_vosk/
+Then visit the WebVosk interface at: http://localhost:3000/vosk
 
 **Note:** First-time use requires downloading Vosk model files (~40MB each). The models are cached in your browser.
 

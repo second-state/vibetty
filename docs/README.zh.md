@@ -49,7 +49,7 @@ cargo build --release
 ASR_PLATFORM=web_vosk cargo run -- -- claude
 ```
 
-然后访问 WebVosk 界面：https://second-state.github.io/vibetty_web_vosk/
+然后访问 WebVosk 界面：http://localhost:3000/vosk
 
 **注意：** 首次使用需要下载 Vosk 模型文件（每个约 40MB）。模型会缓存在浏览器中。
 
