@@ -631,8 +631,9 @@ pub async fn run_command(
                 }
 
                 let mut asr_text = match asr_interface.transcribe(wav_data).await {
-                    Ok(text) => {
+                    Ok(mut text) => {
                         log::info!("ASR transcription result: {}", text);
+                        text.push(' ');
                         text
                     }
                     Err(e) => {
