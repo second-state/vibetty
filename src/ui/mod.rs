@@ -324,3 +324,20 @@ fn bytes_from_key(key: KeyEvent) -> Option<Vec<u8>> {
 
     Some(bytes)
 }
+
+/// Export a screenshot of the current terminal screen
+pub fn export_screenshot(
+    screen: &vt100::Screen,
+    path: &str,
+    title: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::screenshot::{save_screen_png, ScreenshotConfig};
+
+    let config = ScreenshotConfig {
+        title: title.map(|s| s.to_string()),
+        ..Default::default()
+    };
+
+    save_screen_png(screen, path, &config)?;
+    Ok(())
+}

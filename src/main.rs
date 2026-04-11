@@ -18,6 +18,8 @@ mod types;
 
 mod ui;
 
+mod screenshot;
+
 use config::{Args, AsrConfig};
 
 mod static_page;

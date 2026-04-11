@@ -42,3 +42,10 @@ ratatui = "0.30"
 crossterm = { version = "0.28", features = ["event-stream", "bracketed-paste"] }
 tui-term = "0.3"
 vt100 = "0.16"
+
+# Screenshot / Image rendering
+ab_glyph = "0.2"
+image = "0.25"
+imageproc = "0.26"
+tiny-skia = "0.12"
+thiserror = "2.0"

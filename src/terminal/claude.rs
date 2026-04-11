@@ -203,8 +203,11 @@ pub async fn new_with_command<S: AsRef<str>>(
 
     let mut uuid = uuid::Uuid::nil();
     let mut cwd = String::new();
-    let status_output = strip_ansi_escapes::strip_str(&status_output);
-    for line in status_output.lines() {
+    //    let status_output = strip_ansi_escapes::strip_str(&status_output);
+    log::trace!("status_output:{status_output:?}");
+    for line in status_output.split(['\r', '\n']) {
+        let line = strip_ansi_escapes::strip_str(&line);
+        log::trace!("line:{line:?}");
         if let Some(session_id) = line.trim().strip_prefix("Session ID:") {
             let session_id = session_id.trim();
             log::debug!("Extracted session ID from status output: {}", session_id);
@@ -317,7 +320,7 @@ impl EchokitChild<ClaudeCode> {
     pub fn update_title(&mut self, title: String) -> Option<ClaudeCodeResult> {
         match &self.terminal_type.state {
             ClaudeCodeState::PreUseTool { .. } => {
-                if title.contains("✳ Claude Code") {
+                if title.starts_with("✳") {
                     self.terminal_type.working = false;
                     Some(ClaudeCodeResult::WaitForUserInputBeforeTool)
                 } else {
@@ -331,7 +334,7 @@ impl EchokitChild<ClaudeCode> {
                     self.terminal_type.state
                 );
 
-                self.terminal_type.working = !title.contains("✳ Claude Code");
+                self.terminal_type.working = !title.starts_with("✳");
 
                 None
             }
