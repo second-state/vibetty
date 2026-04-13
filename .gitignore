@@ -2,3 +2,7 @@
 
 # Environment variables
 .env
+
+# Test outputs
+*.png
+*.log
