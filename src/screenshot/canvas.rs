@@ -60,15 +60,12 @@ impl Canvas {
         }
     }
 
-    /// Draw a title bar at the top
-    pub fn draw_title_bar(&mut self, title: &str, padding: u32) {
+    /// Draw a title bar background at the top
+    pub fn draw_title_bar(&mut self, _title: &str, padding: u32) {
         let height = 32;
         let bg = [40, 40, 45, 255];
         self.fill_rect(0, 0, self.width(), height, bg);
         self.fill_rect(0, height as i32 - 2, self.width(), 2, [60, 60, 65, 255]);
-        let x = padding as i32 + 8;
-        let y = 10;
-        self.draw_text_simple(title, x, y, [220, 220, 220, 255]);
     }
 
     /// Draw text at the specified position (simple placeholder)

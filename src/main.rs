@@ -18,7 +18,7 @@ mod types;
 
 mod ui;
 
-mod screenshot;
+pub mod screenshot;
 
 use config::{Args, AsrConfig};
 
