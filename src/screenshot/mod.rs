@@ -67,7 +67,7 @@ pub fn capture_screen(
 ) -> Result<image::RgbaImage, ScreenshotError> {
     // Try to load font, fallback to built-in if not available
     let font_data = load_font_with_size(config.font_size)
-        .unwrap_or_else(|_| FontData::with_fallback(config.font_size));
+        .unwrap_or_else(|_| FontData::new(config.font_size));
 
     let theme = Theme::default();
 

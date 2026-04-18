@@ -2,7 +2,6 @@ use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use bytes::Bytes;
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
@@ -20,212 +19,94 @@ use ratatui::{
 use tokio::sync::mpsc;
 use tokio::time::Duration;
 use tui_term::widget::PseudoTerminal;
-use vt100::Callbacks;
-
-struct WindowCallbacks {
-    title: String,
-    icon_name: String,
-    update_title: bool,
-}
-
-impl WindowCallbacks {
-    fn new() -> Self {
-        Self {
-            title: String::new(),
-            icon_name: String::new(),
-            update_title: false,
-        }
-    }
-}
-
-impl Callbacks for WindowCallbacks {
-    fn set_window_icon_name(&mut self, _: &mut vt100::Screen, icon_name: &[u8]) {
-        self.icon_name = std::str::from_utf8(icon_name).unwrap().to_string();
-        self.update_title = true;
-    }
-
-    fn set_window_title(&mut self, _: &mut vt100::Screen, title: &[u8]) {
-        self.title = std::str::from_utf8(title).unwrap().to_string();
-        self.update_title = true;
-    }
-}
 
 pub enum UIEvent {
     Input(Vec<u8>),
-    Title(String),
+    ScrollUp,
+    ScrollDown,
+    Resize(u16, u16),
 }
 
 pub type UITx = mpsc::Sender<UIEvent>;
 
-pub struct App {
-    header_text: String,
-    footer_text: String,
-    parser: vt100::Parser<WindowCallbacks>,
-    rx_from_pty: mpsc::Receiver<Bytes>,
+pub type TuiTerminal = Terminal<CrosstermBackend<std::io::Stdout>>;
+
+pub fn init_terminal() -> io::Result<TuiTerminal> {
+    enable_raw_mode()?;
+    let mut stdout = std::io::stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    let backend = CrosstermBackend::new(stdout);
+    Terminal::new(backend)
 }
 
-impl App {
-    pub fn new(
-        header_text: String,
-        footer_text: String,
-        rx_from_pty: mpsc::Receiver<Bytes>,
-    ) -> Self {
-        Self {
-            header_text,
-            footer_text,
-            parser: vt100::Parser::new_with_callbacks(24, 80, 8096, WindowCallbacks::new()),
-            rx_from_pty,
-        }
+pub fn cleanup_terminal(terminal: &mut TuiTerminal) -> io::Result<()> {
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
+    terminal.show_cursor()
+}
+
+pub fn render_frame(f: &mut Frame, screen: &vt100::Screen, title: &str, header_text: &str, footer_text: &str) {
+    let size = f.area();
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(3),
+        ])
+        .split(size);
+
+    let header = Paragraph::new(header_text)
+        .block(Block::new().borders(Borders::ALL))
+        .alignment(Alignment::Center);
+    f.render_widget(header, chunks[0]);
+
+    {
+        let pseudo_term = PseudoTerminal::new(screen)
+            .block(Block::new().borders(Borders::ALL).title(title));
+        f.render_widget(pseudo_term, chunks[1]);
     }
 
-    /// 处理来自 PTY 的输出数据（阻塞式）
-    fn process_pty_output(&mut self) -> bool {
-        match self.rx_from_pty.blocking_recv() {
-            Some(bytes) => {
-                if b"\x1b[6~".as_slice() == bytes {
-                    // Page Down
-                    let s = self.parser.screen().scrollback();
-                    self.parser.screen_mut().set_scrollback(s.saturating_sub(5));
-                } else if b"\x1b[5~".as_slice() == bytes {
-                    // Page Up
-                    let s = self.parser.screen().scrollback();
-                    self.parser.screen_mut().set_scrollback(s + 5);
-                }
+    let footer = Paragraph::new(footer_text)
+        .block(Block::new().borders(Borders::ALL))
+        .alignment(Alignment::Center);
+    f.render_widget(footer, chunks[2]);
+}
 
-                log::trace!("Received {} bytes from PTY", bytes.len());
-                self.parser.process(&bytes);
-                // 处理完一个后，非阻塞地检查是否有更多数据
-                loop {
-                    match self.rx_from_pty.try_recv() {
-                        Ok(bytes) => {
-                            self.parser.process(&bytes);
-                        }
-                        Err(mpsc::error::TryRecvError::Empty) => break,
-                        Err(mpsc::error::TryRecvError::Disconnected) => break,
-                    }
-                }
-                true
-            }
-            None => false,
+pub struct EventLoopHandle {
+    pub shutdown: Arc<AtomicBool>,
+    pub thread: std::thread::JoinHandle<()>,
+}
+
+pub fn spawn_event_loop(ui_tx: UITx) -> EventLoopHandle {
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let event_shutdown = shutdown.clone();
+    let thread = std::thread::spawn(move || {
+        if let Err(e) = event_loop_thread(ui_tx, event_shutdown) {
+            log::error!("Event loop error: {}", e);
         }
+    });
+    EventLoopHandle { shutdown, thread }
+}
+
+impl EventLoopHandle {
+    pub fn is_finished(&self) -> bool {
+        self.thread.is_finished()
     }
 
-    pub fn run(&mut self, ui_tx: UITx, server_url: String) -> io::Result<()> {
-        self.footer_text = server_url;
-        enable_raw_mode()?;
-        let mut stdout = std::io::stdout();
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-        let backend = CrosstermBackend::new(stdout);
-        let mut terminal = Terminal::new(backend)?;
-
-        let term_size = terminal.size()?;
-        let header_height = 3u16;
-        let footer_height = 3u16;
-        let content_rows = term_size
-            .height
-            .saturating_sub(header_height + footer_height);
-        let content_cols = term_size.width.saturating_sub(4);
-
-        // 设置 parser 初始尺寸
-        self.parser
-            .screen_mut()
-            .set_size(content_rows, content_cols);
-
-        // 创建事件循环线程
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let event_tx = ui_tx.clone();
-        let event_shutdown = shutdown.clone();
-        let event_thread = std::thread::spawn(move || {
-            if let Err(e) = event_loop_thread(event_tx, event_shutdown) {
-                log::error!("Event loop error: {}", e);
-            }
-        });
-
-        loop {
-            if !self.process_pty_output() {
-                break;
-            }
-
-            if event_thread.is_finished() {
-                break;
-            }
-
-            let callback = self.parser.callbacks_mut();
-            if callback.update_title {
-                ui_tx
-                    .blocking_send(UIEvent::Title(callback.title.to_string()))
-                    .ok();
-                callback.update_title = false;
-                self.parser.screen_mut().set_scrollback(0);
-            }
-
-            terminal.draw(|f| self.ui(f))?;
-        }
-
-        log::info!("Shutting down event loop thread...");
-        shutdown.store(true, Ordering::Relaxed);
-
-        disable_raw_mode()?;
-        execute!(
-            terminal.backend_mut(),
-            LeaveAlternateScreen,
-            DisableMouseCapture
-        )?;
-        terminal.show_cursor()?;
-
-        Ok(())
-    }
-
-    fn ui(&mut self, f: &mut Frame) {
-        let size = f.area();
-
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Min(0),
-                Constraint::Length(3),
-            ])
-            .split(size);
-
-        let content_rows = chunks[1].height.saturating_sub(2);
-        let content_cols = chunks[1].width.saturating_sub(2);
-
-        // Update parser size if changed
-        {
-            let (current_rows, current_cols) = self.parser.screen().size();
-            if current_rows != content_rows || current_cols != content_cols {
-                self.parser
-                    .screen_mut()
-                    .set_size(content_rows, content_cols);
-            }
-        }
-
-        let title = self.parser.callbacks().title.to_string();
-
-        let header = Paragraph::new(self.header_text.as_str())
-            .block(Block::new().borders(Borders::ALL))
-            .alignment(Alignment::Center);
-        f.render_widget(header, chunks[0]);
-
-        {
-            let pseudo_term = PseudoTerminal::new(self.parser.screen())
-                .block(Block::new().borders(Borders::ALL).title(title));
-            f.render_widget(pseudo_term, chunks[1]);
-        }
-
-        let footer = Paragraph::new(self.footer_text.as_str())
-            .block(Block::new().borders(Borders::ALL))
-            .alignment(Alignment::Center);
-        f.render_widget(footer, chunks[2]);
+    pub fn stop(&self) {
+        self.shutdown.store(true, Ordering::Relaxed);
     }
 }
 
-/// 事件循环线程 - 负责读取键盘事件并发送到 PTY
 fn event_loop_thread(tx_to_pty: UITx, shutdown: Arc<AtomicBool>) -> anyhow::Result<()> {
     let timeout = Duration::from_millis(500);
     loop {
-        // 检查是否应该退出
         if shutdown.load(Ordering::Relaxed) {
             break;
         }
@@ -256,13 +137,15 @@ fn event_loop_thread(tx_to_pty: UITx, shutdown: Arc<AtomicBool>) -> anyhow::Resu
             } else if let Event::Mouse(mouse) = evt {
                 match mouse.kind {
                     MouseEventKind::ScrollUp => {
-                        let _ = tx_to_pty.blocking_send(UIEvent::Input(b"\x1b[5~".to_vec()));
+                        let _ = tx_to_pty.blocking_send(UIEvent::ScrollUp);
                     }
                     MouseEventKind::ScrollDown => {
-                        let _ = tx_to_pty.blocking_send(UIEvent::Input(b"\x1b[6~".to_vec()));
+                        let _ = tx_to_pty.blocking_send(UIEvent::ScrollDown);
                     }
                     _ => {}
                 }
+            } else if let Event::Resize(cols, rows) = evt {
+                let _ = tx_to_pty.blocking_send(UIEvent::Resize(cols, rows));
             }
         }
     }
@@ -323,21 +206,4 @@ fn bytes_from_key(key: KeyEvent) -> Option<Vec<u8>> {
     }
 
     Some(bytes)
-}
-
-/// Export a screenshot of the current terminal screen
-pub fn export_screenshot(
-    screen: &vt100::Screen,
-    path: &str,
-    title: Option<&str>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    use crate::screenshot::{save_screen_png, ScreenshotConfig};
-
-    let config = ScreenshotConfig {
-        title: title.map(|s| s.to_string()),
-        ..Default::default()
-    };
-
-    save_screen_png(screen, path, &config)?;
-    Ok(())
 }

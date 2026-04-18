@@ -7,6 +7,7 @@ use axum::{
 };
 use serde::Deserialize;
 use tokio::sync::{broadcast, mpsc};
+use vt100::Callbacks;
 
 use crate::{
     config::AsrConfig,
@@ -180,11 +181,36 @@ type WebVoskReqTx = OneshotSender<(bytes::Bytes, OneshotSender<String>)>;
 type WebVoskTx = mpsc::Sender<WebVoskReqTx>;
 type WebVoskRx = mpsc::Receiver<WebVoskReqTx>;
 
+struct WindowCallbacks {
+    title: String,
+    update_title: bool,
+}
+
+impl WindowCallbacks {
+    fn new() -> Self {
+        Self {
+            title: String::new(),
+            update_title: false,
+        }
+    }
+}
+
+impl Callbacks for WindowCallbacks {
+    fn set_window_title(&mut self, _: &mut vt100::Screen, title: &[u8]) {
+        self.title = std::str::from_utf8(title).unwrap().to_string();
+        self.update_title = true;
+    }
+}
+
+/// Screenshot request: send a oneshot sender to get the rendered JPEG bytes
+type ScreenshotTx = mpsc::Sender<tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>>;
+
 #[derive(Clone)]
 pub struct AppState {
     pub tx: ServerTx,
     pub cli_tx: ClientTx,
     pub web_vosk_tx: Option<WebVoskTx>,
+    pub screenshot_tx: ScreenshotTx,
 }
 
 fn t2s<S: AsRef<str>>(s: S) -> String {
@@ -317,7 +343,11 @@ impl SessionState {
 
 pub enum RunCommandResult {
     Done,
-    ChangeDir(String, ClientRx, mpsc::Receiver<crate::ui::UIEvent>),
+    ChangeDir(
+        String,
+        ClientRx,
+        mpsc::Receiver<tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>>,
+    ),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -325,11 +355,14 @@ pub async fn run_command(
     command: Vec<String>,
     asr_interface: &mut ASRInterface,
     mut rx: ClientRx,
-    mut ui_rx: mpsc::Receiver<crate::ui::UIEvent>,
+    ui_rx: &mut mpsc::Receiver<crate::ui::UIEvent>,
     tx: ServerTx,
-    pty_output_tx: tokio::sync::mpsc::Sender<bytes::Bytes>,
     current_dir: Option<std::path::PathBuf>,
     listen_port: u16,
+    mut screenshot_rx: mpsc::Receiver<tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>>,
+    tui: &mut crate::ui::TuiTerminal,
+    ui_title: &mut String,
+    ui_footer: &str,
 ) -> anyhow::Result<RunCommandResult> {
     let dir_path = current_dir
         .as_ref()
@@ -366,6 +399,8 @@ pub async fn run_command(
     let mut wav_buffer = Vec::new();
     let mut wav_sample_rate = 16000;
 
+    let mut vt_parser = vt100::Parser::new_with_callbacks(24, 80, 8096, WindowCallbacks::new());
+
     loop {
         let terminal_read_event = terminal.read_pty_output_and_history_line();
 
@@ -395,6 +430,22 @@ pub async fn run_command(
                         TerminalEvent::Error
                     }
                 }
+            },
+
+            req = screenshot_rx.recv() => {
+                if let Some(resp_tx) = req {
+                    let screen = vt_parser.screen().clone();
+                    let result = tokio::task::spawn_blocking(move || {
+                        render_screen_to_jpeg(&screen)
+                    }).await;
+                    let jpeg = match result {
+                        Ok(Ok(data)) => Ok(data),
+                        Ok(Err(e)) => Err(e),
+                        Err(e) => Err(e.to_string()),
+                    };
+                    let _ = resp_tx.send(jpeg);
+                }
+                continue;
             }
         };
 
@@ -406,6 +457,24 @@ pub async fn run_command(
                     unreachable!()
                 };
                 log::trace!("[{}] PTY output: {}", terminal.session_id(), output.len());
+                vt_parser.process(output.as_bytes());
+
+                // Check for title update from callbacks
+                {
+                    let cb = vt_parser.callbacks_mut();
+                    if cb.update_title {
+                        cb.update_title = false;
+                        *ui_title = cb.title.clone();
+                        let _ = cb;
+                        vt_parser.screen_mut().set_scrollback(0);
+                    }
+                }
+
+                // Render directly to TUI
+                let screen = vt_parser.screen().clone();
+                let title = ui_title.clone();
+                let footer = ui_footer.to_string();
+                let _ = tui.draw(|f| crate::ui::render_frame(f, &screen, &title, "Vibetty", &footer));
                 if output.contains("accept edits on") {
                     log::info!("[{}] Detected 'accept edits on'", terminal.session_id());
                     if session_state.mode != ClaudeMode::AcceptEdits {
@@ -424,15 +493,6 @@ pub async fn run_command(
                         session_state.mode = ClaudeMode::Normal;
                         let _ = tx.send(ServerMessage::status(session_state.to_state_string()));
                     }
-                }
-
-                if pty_output_tx
-                    .send(bytes::Bytes::from(output.clone()))
-                    .await
-                    .is_err()
-                {
-                    log::warn!("[{}] No active PTY output receiver", terminal.session_id());
-                    return Ok(RunCommandResult::Done);
                 }
 
                 if tx
@@ -492,33 +552,25 @@ pub async fn run_command(
             }
             TerminalEvent::UIEvent(crate::ui::UIEvent::Input(input)) => {
                 terminal.send_bytes(&input).await?;
-                if input == b"\x1b[5~" || input == b"\x1b[6~" {
-                    log::debug!("Received Page Up/Down input from UI");
-                    pty_output_tx.send(bytes::Bytes::from_owner(input)).await?;
-                    continue;
-                }
             }
-            TerminalEvent::UIEvent(crate::ui::UIEvent::Title(title)) => {
-                log::debug!(
-                    "[{}] Terminal title updated: {:?}",
-                    terminal.session_id(),
-                    title
-                );
-                if let Some(r) = terminal.update_title(title) {
-                    log::info!(
-                        "[{}] Terminal state updated from title: {:?}",
-                        terminal.session_id(),
-                        terminal.state()
-                    );
-
-                    if terminal.update_state(&r)
-                        && let Some(msg) =
-                            state_to_message(terminal.state(), &terminal.session_id().to_string())
-                        && let Err(_e) = tx.send(msg)
-                    {
-                        log::error!("[{}] No client waiting for data", terminal.session_id());
-                    }
-                }
+            TerminalEvent::UIEvent(crate::ui::UIEvent::ScrollUp) => {
+                let s = vt_parser.screen().scrollback();
+                vt_parser.screen_mut().set_scrollback(s + 5);
+                let screen = vt_parser.screen().clone();
+                let title = ui_title.clone();
+                let footer = ui_footer.to_string();
+                let _ = tui.draw(|f| crate::ui::render_frame(f, &screen, &title, "Vibetty", &footer));
+            }
+            TerminalEvent::UIEvent(crate::ui::UIEvent::ScrollDown) => {
+                let s = vt_parser.screen().scrollback();
+                vt_parser.screen_mut().set_scrollback(s.saturating_sub(5));
+                let screen = vt_parser.screen().clone();
+                let title = ui_title.clone();
+                let footer = ui_footer.to_string();
+                let _ = tui.draw(|f| crate::ui::render_frame(f, &screen, &title, "Vibetty", &footer));
+            }
+            TerminalEvent::UIEvent(crate::ui::UIEvent::Resize(cols, rows)) => {
+                vt_parser.screen_mut().set_size(rows.saturating_sub(6) as u16, cols.saturating_sub(4) as u16);
             }
             TerminalEvent::Input(ClientMessage::Sync) => {
                 log::info!("Received Sync message from client");
@@ -601,7 +653,7 @@ pub async fn run_command(
                     crate::protocol::NotificationLevel::Info,
                     format!("Changing directory to: {}", path),
                 ));
-                return Ok(RunCommandResult::ChangeDir(path, rx, ui_rx));
+                return Ok(RunCommandResult::ChangeDir(path, rx, screenshot_rx));
             }
             TerminalEvent::Input(ClientMessage::VoiceInputStart(VoiceInputStart {
                 sample_rate,
@@ -883,5 +935,68 @@ async fn handle_web_vosk_socket(mut socket: WebSocket, vosk_tx: WebVoskTx) {
                 continue;
             }
         }
+    }
+}
+
+/// Render a vt100 screen to JPEG bytes
+fn render_screen_to_jpeg(screen: &vt100::Screen) -> Result<Vec<u8>, String> {
+    let config = crate::screenshot::ScreenshotConfig::default();
+    let image = crate::screenshot::capture_screen(screen, &config)
+        .map_err(|e| format!("Failed to capture screen: {}", e))?;
+
+    // Convert RGBA to RGB for JPEG
+    let rgb_image = image::DynamicImage::ImageRgba8(image).to_rgb8();
+    let mut jpeg_buf = std::io::Cursor::new(Vec::new());
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_buf, 85);
+    encoder
+        .encode(
+            rgb_image.as_raw(),
+            rgb_image.width(),
+            rgb_image.height(),
+            image::ExtendedColorType::Rgb8,
+        )
+        .map_err(|e| format!("Failed to encode JPEG: {}", e))?;
+
+    Ok(jpeg_buf.into_inner())
+}
+
+/// HTTP handler for /screenshot.jpeg
+pub async fn screenshot_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+
+    if state.screenshot_tx.send(resp_tx).await.is_err() {
+        return (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            axum::http::HeaderMap::new(),
+            "Screenshot service unavailable".to_string(),
+        )
+            .into_response();
+    }
+
+    match resp_rx.await {
+        Ok(Ok(jpeg_data)) => {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert(
+                axum::http::header::CONTENT_TYPE,
+                "image/jpeg".parse().unwrap(),
+            );
+            headers.insert(
+                axum::http::header::CACHE_CONTROL,
+                "no-cache".parse().unwrap(),
+            );
+            (axum::http::StatusCode::OK, headers, jpeg_data).into_response()
+        }
+        Ok(Err(e)) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            axum::http::HeaderMap::new(),
+            format!("Failed to render screenshot: {}", e),
+        )
+            .into_response(),
+        Err(_) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            axum::http::HeaderMap::new(),
+            "Screenshot request timed out".to_string(),
+        )
+            .into_response(),
     }
 }
