@@ -34,7 +34,6 @@ bytes = "1.11.1"
 uuid = { version = "1.21.0", features = ["v4"] }
 
 pty-process = { version = "0.5.3", features = ["async"] }
-linemux = "0.3"
 strip-ansi-escapes = "0.2.1"
 
 # TUI

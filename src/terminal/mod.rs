@@ -4,24 +4,23 @@ use tokio::{
     process::Child,
 };
 
-pub mod claude;
+pub mod pty;
 
 pub type PtyCommand = Command;
 pub type PtySize = Size;
 
-pub trait TerminalType {
-    type Output;
-}
-
-pub struct EchokitChild<T: TerminalType> {
+pub struct EchokitChild {
     uuid: uuid::Uuid,
     pty: Pty,
     child: Child,
-    terminal_type: T,
 }
 
 #[allow(unused)]
-impl<T: TerminalType> EchokitChild<T> {
+impl EchokitChild {
+    pub fn session_id(&self) -> uuid::Uuid {
+        self.uuid
+    }
+
     pub async fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
         self.pty.write_all(buf).await?;
         self.pty.flush().await
@@ -102,5 +101,32 @@ impl<T: TerminalType> EchokitChild<T> {
 
     pub async fn kill(&mut self) -> std::io::Result<()> {
         self.child.kill().await
+    }
+
+    pub async fn read_pty_output(&mut self) -> std::io::Result<String> {
+        let mut buffer = [0u8; 1024];
+        let mut string_buffer = Vec::with_capacity(512);
+
+        let n = self.pty.read(&mut buffer).await?;
+        if n == 0 {
+            return Ok(String::new());
+        }
+        string_buffer.extend_from_slice(&buffer[..n]);
+
+        // Drain remaining buffered data
+        loop {
+            let s = str::from_utf8(&string_buffer);
+            if let Ok(_) = s {
+                break;
+            }
+
+            let n = self.pty.read(&mut buffer).await?;
+            if n == 0 {
+                break;
+            }
+            string_buffer.extend_from_slice(&buffer[..n]);
+        }
+
+        Ok(String::from_utf8_lossy(&string_buffer).to_string())
     }
 }

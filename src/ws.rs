@@ -5,170 +5,13 @@ use axum::{
     },
     response::IntoResponse,
 };
-use serde::Deserialize;
 use tokio::sync::{broadcast, mpsc};
 use vt100::Callbacks;
 
 use crate::{
     config::AsrConfig,
-    protocol::{ChoicesData, ClientMessage, ServerMessage, VoiceInputStart},
-    terminal::claude::{ClaudeCodeResult, ClaudeCodeState, UseTool},
+    protocol::{ClientMessage, ServerMessage, VoiceInputStart},
 };
-
-/// AskUserQuestion 工具输入结构
-#[derive(Debug, Clone, Deserialize)]
-struct AskUserQuestionInput {
-    questions: Vec<Question>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct Question {
-    question: String,
-    #[serde(rename = "header")]
-    _header: Option<String>,
-    #[serde(rename = "multiSelect", default)]
-    multi_select: bool,
-    options: Vec<QuestionOption>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct QuestionOption {
-    label: String,
-    #[serde(rename = "description")]
-    _description: Option<String>,
-}
-
-/// 将 UseTool 转换为 ChoicesData
-fn use_tool_to_choices(tool: &UseTool) -> ChoicesData {
-    let tool_id = if !tool.id.is_empty() {
-        Some(tool.id.clone())
-    } else {
-        None
-    };
-
-    // 检测 AskUserQuestion 并转换成 choices
-    if tool.name == "AskUserQuestion"
-        && let Ok(input) = serde_json::from_value::<AskUserQuestionInput>(tool.input.clone())
-        && let Some(first_q) = input.questions.first()
-    {
-        let options: Vec<String> = first_q.options.iter().map(|o| o.label.clone()).collect();
-
-        return ChoicesData {
-            id: tool_id,
-            title: first_q.question.clone(),
-            options,
-            multi_select: first_q.multi_select,
-            allow_custom_input: true,
-        };
-    }
-
-    // 其他工具，显示基本信息
-    let title = match &tool.input {
-        serde_json::Value::Object(map) => {
-            let mut keys: Vec<_> = map.keys().collect();
-            keys.sort();
-            let tool_name = format!("\x1b[96mTool: {}\x1b[30m", tool.name);
-            let mut title_str = vec![tool_name];
-            for k in keys {
-                let v = &map[k];
-                let value_str = match v {
-                    serde_json::Value::String(s) => s.clone(),
-                    serde_json::Value::Number(n) => n.to_string(),
-                    serde_json::Value::Bool(b) => b.to_string(),
-                    serde_json::Value::Null => "null".to_string(),
-                    serde_json::Value::Array(arr) => serde_json::to_string(arr).unwrap_or_default(),
-                    serde_json::Value::Object(obj) => {
-                        serde_json::to_string(obj).unwrap_or_default()
-                    }
-                };
-                title_str.push(format!("{}: {}", k, value_str));
-            }
-            title_str.join("\n\n")
-        }
-        _ => format!(
-            "\x1b[35m{}\x1b[30m",
-            serde_json::to_string_pretty(&tool.input)
-                .unwrap_or(format!("Tool call: {:?}", tool.name))
-        ),
-    };
-
-    ChoicesData {
-        id: tool_id,
-        title,
-        options: vec![],
-        multi_select: false,
-        allow_custom_input: false,
-    }
-}
-
-/// 根据终端状态生成要发送的消息
-fn state_to_message(state: &ClaudeCodeState, session_id: &str) -> Option<ServerMessage> {
-    match state {
-        ClaudeCodeState::PreUseTool {
-            request,
-            is_pending,
-            ..
-        } => {
-            if *is_pending {
-                for r in request {
-                    if r.done {
-                        continue;
-                    }
-
-                    log::info!(
-                        "[{}] Claude is requesting to use a tool: {:?}",
-                        session_id,
-                        r
-                    );
-
-                    let choice_data = use_tool_to_choices(r);
-                    return Some(ServerMessage::Choices(choice_data));
-                }
-            }
-            None
-        }
-        ClaudeCodeState::Output {
-            output,
-            is_thinking,
-        } => {
-            if *is_thinking {
-                log::info!("[{}] Claude is thinking...", session_id);
-                Some(ServerMessage::notification(
-                    crate::protocol::NotificationLevel::Info,
-                    format!("\x1b[38;5;245m{output}\x1b[0m",),
-                ))
-            } else {
-                Some(ServerMessage::notification(
-                    crate::protocol::NotificationLevel::Success,
-                    output.clone(),
-                ))
-            }
-        }
-        ClaudeCodeState::StopUseTool { is_error } => {
-            if *is_error {
-                log::error!("[{}] Tool execution error", session_id);
-                Some(ServerMessage::notification(
-                    crate::protocol::NotificationLevel::Error,
-                    "Tool execution failed.".to_string(),
-                ))
-            } else {
-                log::info!("[{}] Tool execution completed", session_id);
-                Some(ServerMessage::coustom_notification(
-                    String::new(),
-                    None,
-                    0x3CB371,
-                ))
-            }
-        }
-        ClaudeCodeState::Working { prompt } => Some(ServerMessage::notification(
-            crate::protocol::NotificationLevel::Success,
-            prompt.clone(),
-        )),
-        ClaudeCodeState::Idle => Some(ServerMessage::get_input(
-            "Claude is waiting for user input...".to_string(),
-        )),
-    }
-}
 
 type ServerTx = broadcast::Sender<ServerMessage>;
 
@@ -216,29 +59,6 @@ pub struct AppState {
 fn t2s<S: AsRef<str>>(s: S) -> String {
     let s = hanconv::tw2sp(s.as_ref());
     s.replace("幺", "么")
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum ClaudeMode {
-    Normal,
-    Plan,
-    AcceptEdits,
-}
-
-impl std::fmt::Display for ClaudeMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ClaudeMode::Normal => write!(f, "normal"),
-            ClaudeMode::Plan => write!(f, "plan"),
-            ClaudeMode::AcceptEdits => write!(f, "accept_edits"),
-        }
-    }
-}
-
-/// 会话状态，包含所有可扩展的状态标记
-#[derive(Debug)]
-struct SessionState {
-    mode: ClaudeMode,
 }
 
 pub enum ASRInterface {
@@ -320,26 +140,6 @@ impl ASRInterface {
     }
 }
 
-impl Default for SessionState {
-    fn default() -> Self {
-        Self {
-            mode: ClaudeMode::Normal,
-        }
-    }
-}
-
-impl SessionState {
-    fn to_state_string(&self) -> String {
-        let mut result = String::new();
-        // mode 状态
-        match self.mode {
-            ClaudeMode::Normal => result.push_str("[N]"),
-            ClaudeMode::Plan => result.push_str("[P]"),
-            ClaudeMode::AcceptEdits => result.push_str("[E]"),
-        }
-        result
-    }
-}
 
 pub enum RunCommandResult {
     Done,
@@ -380,12 +180,12 @@ pub async fn run_command(
 
         UIEvent(crate::ui::UIEvent),
 
-        ClaudeResult(Box<ClaudeCodeResult>),
+        PtyOutput(String),
 
         Error,
     }
 
-    let mut terminal = crate::terminal::claude::new_with_command(
+    let mut terminal = crate::terminal::pty::new_with_command(
         command.first().unwrap().as_str(),
         &command[1..],
         &[("VIBETTY_PORT".to_string(), listen_port.to_string())],
@@ -394,20 +194,18 @@ pub async fn run_command(
     )
     .await?;
 
-    let mut input_received = false;
-    let mut session_state = SessionState::default();
     let mut wav_buffer = Vec::new();
     let mut wav_sample_rate = 16000;
 
     let mut vt_parser = vt100::Parser::new_with_callbacks(24, 80, 8096, WindowCallbacks::new());
 
     loop {
-        let terminal_read_event = terminal.read_pty_output_and_history_line();
+        let terminal_read_event = terminal.read_pty_output();
 
         let event = tokio::select! {
             result = terminal_read_event => {
                 match result {
-                    Ok(r) => TerminalEvent::ClaudeResult(Box::new(r)),
+                    Ok(r) => TerminalEvent::PtyOutput(r),
                     Err(e) => {
                         log::error!("[{}] Error reading PTY output: {:?}", terminal.session_id(), e);
                         TerminalEvent::Error
@@ -450,12 +248,7 @@ pub async fn run_command(
         };
 
         match event {
-            TerminalEvent::ClaudeResult(r)
-                if matches!(r.as_ref(), ClaudeCodeResult::PtyOutput(_)) =>
-            {
-                let ClaudeCodeResult::PtyOutput(output) = *r else {
-                    unreachable!()
-                };
+            TerminalEvent::PtyOutput(output) => {
                 log::trace!("[{}] PTY output: {}", terminal.session_id(), output.len());
                 vt_parser.process(output.as_bytes());
 
@@ -464,8 +257,15 @@ pub async fn run_command(
                     let cb = vt_parser.callbacks_mut();
                     if cb.update_title {
                         cb.update_title = false;
-                        *ui_title = cb.title.clone();
+                        let new_title = cb.title.clone();
                         let _ = cb;
+                        *ui_title = new_title.clone();
+
+                        // Send title change to client
+                        let _ = tx.send(ServerMessage::status(
+                            new_title,
+                        ));
+
                         vt_parser.screen_mut().set_scrollback(0);
                     }
                 }
@@ -475,26 +275,6 @@ pub async fn run_command(
                 let title = ui_title.clone();
                 let footer = ui_footer.to_string();
                 let _ = tui.draw(|f| crate::ui::render_frame(f, &screen, &title, "Vibetty", &footer));
-                if output.contains("accept edits on") {
-                    log::info!("[{}] Detected 'accept edits on'", terminal.session_id());
-                    if session_state.mode != ClaudeMode::AcceptEdits {
-                        session_state.mode = ClaudeMode::AcceptEdits;
-                        let _ = tx.send(ServerMessage::status(session_state.to_state_string()));
-                    }
-                } else if output.contains("plan mode on") {
-                    log::info!("[{}] Detected 'plan mode on'", terminal.session_id());
-                    if session_state.mode != ClaudeMode::Plan {
-                        session_state.mode = ClaudeMode::Plan;
-                        let _ = tx.send(ServerMessage::status(session_state.to_state_string()));
-                    }
-                } else if output.contains("? for shortcuts") {
-                    log::info!("[{}] Detected 'normal mode on'", terminal.session_id());
-                    if session_state.mode != ClaudeMode::Normal {
-                        session_state.mode = ClaudeMode::Normal;
-                        let _ = tx.send(ServerMessage::status(session_state.to_state_string()));
-                    }
-                }
-
                 if tx
                     .send(ServerMessage::PtyOutput(output.into_bytes()))
                     .is_err()
@@ -504,52 +284,6 @@ pub async fn run_command(
                 }
             }
 
-            TerminalEvent::ClaudeResult(r)
-                if matches!(r.as_ref(), ClaudeCodeResult::WaitForUserInput) =>
-            {
-                log::info!("[{}] Waiting for user input", terminal.session_id());
-
-                terminal.update_state(&r);
-
-                if let Err(_e) = tx.send(ServerMessage::get_input(
-                    "Claude is waiting for user input...".to_string(),
-                )) {
-                    log::error!("[{}] No client waiting for data", terminal.session_id());
-                }
-
-                if input_received {
-                    terminal.send_enter().await?;
-                }
-            }
-            TerminalEvent::ClaudeResult(r) => {
-                input_received = false;
-                if terminal.update_state(&r) {
-                    log::info!(
-                        "[{}] Terminal state updated: {:?}",
-                        terminal.session_id(),
-                        terminal.state()
-                    );
-                    if let Some(msg) =
-                        state_to_message(terminal.state(), &terminal.session_id().to_string())
-                        && let Err(_e) = tx.send(msg)
-                    {
-                        log::error!("[{}] No client waiting for data", terminal.session_id());
-                    }
-
-                    // Handle Idle state input_received separately
-                    match terminal.state() {
-                        ClaudeCodeState::Idle => {
-                            if input_received {
-                                terminal.send_enter().await?;
-                            }
-                        }
-                        ClaudeCodeState::Working { .. } => {
-                            input_received = false;
-                        }
-                        _ => {}
-                    }
-                }
-            }
             TerminalEvent::UIEvent(crate::ui::UIEvent::Input(input)) => {
                 terminal.send_bytes(&input).await?;
             }
@@ -574,12 +308,6 @@ pub async fn run_command(
             }
             TerminalEvent::Input(ClientMessage::Sync) => {
                 log::info!("Received Sync message from client");
-                if let Some(msg) =
-                    state_to_message(terminal.state(), &terminal.session_id().to_string())
-                    && let Err(_e) = tx.send(msg)
-                {
-                    log::error!("[{}] No client waiting for data", terminal.session_id());
-                }
             }
             TerminalEvent::Input(ClientMessage::PtyInput(input)) => {
                 log::info!(
@@ -592,60 +320,6 @@ pub async fn run_command(
             TerminalEvent::Input(ClientMessage::Input(text)) => {
                 log::info!("Sending text input to terminal: {:?}", text);
                 terminal.send_text(&text).await?;
-                input_received = true;
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                terminal.send_enter().await?;
-            }
-            TerminalEvent::Input(ClientMessage::Choice { index }) => {
-                log::info!("Sending choice input to terminal: {:?}", index);
-                if index < 0 {
-                    terminal.send_esc().await?;
-                    continue;
-                }
-
-                terminal.send_key_iter(&[(index + 1).to_string()]).await?;
-            }
-            TerminalEvent::Input(ClientMessage::Choices {
-                index,
-                custom_input,
-                multi_select,
-            }) => {
-                log::info!("Sending choice input to terminal: {:?}", index);
-                let mut keys = Vec::new();
-                for i in index {
-                    if i < 0 {
-                        terminal.send_esc().await?;
-                        continue;
-                    }
-                    keys.push((i + 1).to_string());
-                }
-
-                if let Some(input) = custom_input
-                    && !input.trim().is_empty()
-                {
-                    terminal.send_up_arrow().await?;
-                    log::info!("Sending custom input to terminal: {:?}", input);
-                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                    terminal.send_text(&input).await?;
-                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                    if multi_select {
-                        terminal.send_up_arrow().await?;
-                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                    } else {
-                        terminal.send_enter().await?;
-                        continue;
-                    }
-                }
-
-                log::info!("Submitting choice input");
-
-                terminal.send_key_iter(&keys).await?;
-
-                if multi_select {
-                    terminal.send_right_arrow().await?;
-                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                    terminal.send_enter().await?;
-                }
             }
             TerminalEvent::Input(ClientMessage::ChangeDir(path)) => {
                 log::info!("Change directory requested: {}", path);

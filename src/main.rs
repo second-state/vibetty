@@ -14,7 +14,6 @@ mod util;
 mod ws;
 
 mod terminal;
-mod types;
 
 mod ui;
 
