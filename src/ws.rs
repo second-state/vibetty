@@ -262,7 +262,7 @@ pub async fn run_command(
                         *ui_title = new_title.clone();
 
                         // Send title change to client
-                        let _ = tx.send(ServerMessage::status(
+                        let _ = tx.send(ServerMessage::title(
                             new_title,
                         ));
 

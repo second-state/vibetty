@@ -89,17 +89,13 @@ pub enum ServerMessage {
     #[serde(rename = "notification")]
     Notification(NotificationData),
 
-    /// 请求输入
-    #[serde(rename = "get_input")]
-    GetInput(GetInputData),
-
     /// ASR 结果
     #[serde(rename = "asr_result")]
     AsrResult(String),
 
-    /// 设置状态栏
-    #[serde(rename = "status")]
-    Status(String),
+    /// 终端标题变化
+    #[serde(rename = "title")]
+    Title(String),
 }
 
 /// 屏幕显示图片数据
@@ -129,13 +125,6 @@ pub struct NotificationData {
     /// BE BIG-ENDIAN: 0xRRGGBB
     #[serde(default)]
     pub color: u32,
-}
-
-/// 请求输入数据
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GetInputData {
-    /// 提示语
-    pub prompt: String,
 }
 
 // ========== 辅助类型 ==========
@@ -239,21 +228,14 @@ impl ServerMessage {
         })
     }
 
-    /// 创建请求输入消息
-    pub fn get_input(prompt: impl Into<String>) -> Self {
-        Self::GetInput(GetInputData {
-            prompt: prompt.into(),
-        })
-    }
-
     /// 创建 ASR 结果消息
     pub fn asr_result(text: impl Into<String>) -> Self {
         Self::AsrResult(text.into())
     }
 
     /// 创建状态栏消息
-    pub fn status(text: impl Into<String>) -> Self {
-        Self::Status(text.into())
+    pub fn title(text: impl Into<String>) -> Self {
+        Self::Title(text.into())
     }
 }
 
@@ -387,25 +369,12 @@ mod tests {
     }
 
     #[test]
-    fn test_server_get_input_msgpack() {
-        let msg = ServerMessage::get_input("请说话");
-        let bytes = msg.to_msgpack().unwrap();
-        let decoded = ServerMessage::from_msgpack(&bytes).unwrap();
-        match decoded {
-            ServerMessage::GetInput(data) => {
-                assert_eq!(data.prompt, "请说话");
-            }
-            _ => panic!("Wrong message type"),
-        }
-    }
-
-    #[test]
     fn test_server_status_msgpack() {
-        let msg = ServerMessage::status("Connected");
+        let msg = ServerMessage::title("Connected");
         let bytes = msg.to_msgpack().unwrap();
         let decoded = ServerMessage::from_msgpack(&bytes).unwrap();
         match decoded {
-            ServerMessage::Status(text) => {
+            ServerMessage::Title(text) => {
                 assert_eq!(text, "Connected");
             }
             _ => panic!("Wrong message type"),
@@ -484,12 +453,12 @@ mod tests {
 
     #[test]
     fn test_server_status_json() {
-        let msg = ServerMessage::status("Ready");
+        let msg = ServerMessage::title("Ready");
         let json = msg.to_json().unwrap();
         println!("JSON: {}", json);
         let decoded = ServerMessage::from_json(&json).unwrap();
         match decoded {
-            ServerMessage::Status(text) => {
+            ServerMessage::Title(text) => {
                 assert_eq!(text, "Ready");
             }
             _ => panic!("Wrong message type"),
