@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use axum::{
     extract::{
         Query, State,
@@ -17,6 +19,10 @@ use crate::{
 const IMAGE_FRAME_INTERVAL_MS: u64 = 500;
 /// Image chunk size (bytes)
 const IMAGE_CHUNK_SIZE: usize = 10 * 1024;
+/// Columns reserved for TUI decorations (borders)
+const TUI_COLS_PADDING: u16 = 4;
+/// Rows reserved for TUI decorations (title + footer)
+const TUI_ROWS_PADDING: u16 = 6;
 
 type ServerTx = broadcast::Sender<ServerMessage>;
 
@@ -145,6 +151,22 @@ impl ASRInterface {
     }
 }
 
+fn send_screen(tx: &ServerTx, screen: Arc<vt100::Screen>) {
+    // if let Ok(jpeg) = render_screen_to_jpeg(&screen) {
+    //     let chunk_size = IMAGE_CHUNK_SIZE;
+    //     let total_chunks = (jpeg.len() + chunk_size - 1) / chunk_size;
+    //     for (i, chunk) in jpeg.chunks(chunk_size).enumerate() {
+    //         let is_last = i == total_chunks - 1;
+    //         let _ = tx.send(ServerMessage::screen_image_chunk(
+    //             crate::protocol::ImageFormat::Jpeg,
+    //             is_last,
+    //             chunk.to_vec(),
+    //         ));
+    //     }
+    // }
+
+    let _ = tx.send(ServerMessage::Screen(screen));
+}
 
 pub enum RunCommandResult {
     Done,
@@ -187,14 +209,20 @@ pub async fn run_command(
 
         PtyOutput(String),
 
+        ScreenGetter(tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>),
+
         Error,
     }
+
+    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+    let vt_cols = cols - TUI_COLS_PADDING;
+    let vt_rows = rows - TUI_ROWS_PADDING;
 
     let mut terminal = crate::terminal::pty::new_with_command(
         command.first().unwrap().as_str(),
         &command[1..],
         &[("VIBETTY_PORT".to_string(), listen_port.to_string())],
-        (24, 80),
+        (vt_rows, vt_cols),
         current_dir,
     )
     .await?;
@@ -202,7 +230,8 @@ pub async fn run_command(
     let mut wav_buffer = Vec::new();
     let mut wav_sample_rate = 16000;
 
-    let mut vt_parser = vt100::Parser::new_with_callbacks(24, 80, 8096, WindowCallbacks::new());
+    let mut vt_parser =
+        vt100::Parser::new_with_callbacks(vt_rows, vt_cols, 8096, WindowCallbacks::new());
 
     // Frame rate limit for image broadcast (default 2 fps)
     let frame_interval = std::time::Duration::from_millis(IMAGE_FRAME_INTERVAL_MS);
@@ -240,23 +269,28 @@ pub async fn run_command(
             },
 
             req = screenshot_rx.recv() => {
-                if let Some(resp_tx) = req {
-                    let screen = vt_parser.screen().clone();
-                    let result = tokio::task::spawn_blocking(move || {
-                        render_screen_to_jpeg(&screen)
-                    }).await;
-                    let jpeg = match result {
-                        Ok(Ok(data)) => Ok(data),
-                        Ok(Err(e)) => Err(e),
-                        Err(e) => Err(e.to_string()),
-                    };
-                    let _ = resp_tx.send(jpeg);
+                match req {
+                    Some(resp_tx) => TerminalEvent::ScreenGetter(resp_tx),
+                    None => {
+                        log::error!("[{}] Screenshot request channel closed", terminal.session_id());
+                        TerminalEvent::Error
+                    }
                 }
-                continue;
             }
         };
 
         match event {
+            TerminalEvent::ScreenGetter(getter) => {
+                let screen = vt_parser.screen().clone();
+                let mut window_scrollback = 0;
+                let result = render_screen_to_jpeg(&screen, None, &mut window_scrollback);
+
+                let jpeg = match result {
+                    Ok(data) => Ok(data),
+                    Err(e) => Err(e.to_string()),
+                };
+                let _ = getter.send(jpeg);
+            }
             TerminalEvent::PtyOutput(output) => {
                 log::trace!("[{}] PTY output: {}", terminal.session_id(), output.len());
                 vt_parser.process(output.as_bytes());
@@ -271,19 +305,16 @@ pub async fn run_command(
                         *ui_title = new_title.clone();
 
                         // Send title change to client
-                        let _ = tx.send(ServerMessage::title(
-                            new_title,
-                        ));
-
-                        vt_parser.screen_mut().set_scrollback(0);
+                        let _ = tx.send(ServerMessage::title(new_title));
                     }
                 }
 
                 // Render directly to TUI
-                let screen = vt_parser.screen().clone();
+                let screen = Arc::new(vt_parser.screen().clone());
                 let title = ui_title.clone();
                 let footer = ui_footer.to_string();
-                let _ = tui.draw(|f| crate::ui::render_frame(f, &screen, &title, "Vibetty", &footer));
+                let _ =
+                    tui.draw(|f| crate::ui::render_frame(f, &screen, &title, "Vibetty", &footer));
                 if tx
                     .send(ServerMessage::PtyOutput(output.into_bytes()))
                     .is_err()
@@ -296,46 +327,53 @@ pub async fn run_command(
                 let now = std::time::Instant::now();
                 if now.duration_since(last_frame_time) >= frame_interval {
                     last_frame_time = now;
-                    let jpeg_screen = vt_parser.screen().clone();
-                    if let Ok(jpeg) = render_screen_to_jpeg(&jpeg_screen) {
-                        let chunk_size = IMAGE_CHUNK_SIZE;
-                        let total_chunks = (jpeg.len() + chunk_size - 1) / chunk_size;
-                        for (i, chunk) in jpeg.chunks(chunk_size).enumerate() {
-                            let is_last = i == total_chunks - 1;
-                            let _ = tx.send(ServerMessage::screen_image_chunk(
-                                crate::protocol::ImageFormat::Jpeg,
-                                is_last,
-                                chunk.to_vec(),
-                            ));
-                        }
-                    }
+                    send_screen(&tx, screen);
                 }
             }
 
             TerminalEvent::UIEvent(crate::ui::UIEvent::Input(input)) => {
+                log::info!("UI Input: {:?}", String::from_utf8_lossy(&input));
                 terminal.send_bytes(&input).await?;
             }
-            TerminalEvent::UIEvent(crate::ui::UIEvent::ScrollUp) => {
+            TerminalEvent::UIEvent(crate::ui::UIEvent::ScrollUp)
+            | TerminalEvent::Input(ClientMessage::ScrollUp) => {
+                log::info!("ScrollUp");
                 let s = vt_parser.screen().scrollback();
                 vt_parser.screen_mut().set_scrollback(s + 5);
-                let screen = vt_parser.screen().clone();
+                let screen = Arc::new(vt_parser.screen().clone());
                 let title = ui_title.clone();
                 let footer = ui_footer.to_string();
-                let _ = tui.draw(|f| crate::ui::render_frame(f, &screen, &title, "Vibetty", &footer));
+                let _ =
+                    tui.draw(|f| crate::ui::render_frame(f, &screen, &title, "Vibetty", &footer));
+
+                send_screen(&tx, screen);
             }
-            TerminalEvent::UIEvent(crate::ui::UIEvent::ScrollDown) => {
+            TerminalEvent::UIEvent(crate::ui::UIEvent::ScrollDown)
+            | TerminalEvent::Input(ClientMessage::ScrollDown) => {
+                log::info!("ScrollDown");
                 let s = vt_parser.screen().scrollback();
                 vt_parser.screen_mut().set_scrollback(s.saturating_sub(5));
-                let screen = vt_parser.screen().clone();
+                let screen = Arc::new(vt_parser.screen().clone());
                 let title = ui_title.clone();
                 let footer = ui_footer.to_string();
-                let _ = tui.draw(|f| crate::ui::render_frame(f, &screen, &title, "Vibetty", &footer));
+                let _ =
+                    tui.draw(|f| crate::ui::render_frame(f, &screen, &title, "Vibetty", &footer));
+
+                send_screen(&tx, screen);
             }
             TerminalEvent::UIEvent(crate::ui::UIEvent::Resize(cols, rows)) => {
-                vt_parser.screen_mut().set_size(rows.saturating_sub(6) as u16, cols.saturating_sub(4) as u16);
+                log::info!("Resize: cols={}, rows={}", cols, rows);
+                let vt_cols = cols.saturating_sub(TUI_COLS_PADDING);
+                let vt_rows = rows.saturating_sub(TUI_ROWS_PADDING);
+                vt_parser.screen_mut().set_size(vt_rows, vt_cols);
+                let _ = terminal.resize(vt_rows, vt_cols);
+                let screen = Arc::new(vt_parser.screen().clone());
+                send_screen(&tx, screen);
             }
             TerminalEvent::Input(ClientMessage::Sync) => {
-                log::info!("Received Sync message from client");
+                log::info!("Received Sync message from client, sending screen");
+                let screen = Arc::new(vt_parser.screen().clone());
+                send_screen(&tx, screen);
             }
             TerminalEvent::Input(ClientMessage::PtyInput(input)) => {
                 log::info!(
@@ -423,10 +461,24 @@ pub struct WsParams {
     pub pty: bool,
     #[serde(default)]
     pub img: bool,
+    /// Client screen width (columns)
+    #[serde(default = "default_width")]
+    pub width: u16,
+    /// Client screen height (rows)
+    #[serde(default = "default_height")]
+    pub height: u16,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_height() -> u16 {
+    240
+}
+
+fn default_width() -> u16 {
+    240
 }
 
 pub async fn ws_handler(
@@ -434,8 +486,102 @@ pub async fn ws_handler(
     Query(params): Query<WsParams>,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    log::info!("WebSocket connection params: pty={}, img={}", params.pty, params.img);
+    log::info!(
+        "WebSocket connection params: pty={}, img={}",
+        params.pty,
+        params.img
+    );
     ws.on_upgrade(move |socket| handle_socket(socket, state, params))
+}
+
+async fn send_screen_to_client(
+    state: &AppState,
+    socket: &mut WebSocket,
+    screen: &vt100::Screen,
+    window_size: Option<(u16, u16)>, // (width, height)
+    window_h_offset: &mut u16,
+) -> anyhow::Result<()> {
+    let jpeg = render_screen_to_jpeg(&screen, window_size, window_h_offset)?;
+    if jpeg.is_empty() {
+        state
+            .cli_tx
+            .send(ClientMessage::ScrollDown)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to send ScrollDown message to cli_tx after empty JPEG: {}",
+                    e
+                )
+            })?;
+    }
+    log::debug!(
+        "Sending screen JPEG to client, size: {} KB",
+        jpeg.len() / 1024
+    );
+    let chunk_size = IMAGE_CHUNK_SIZE;
+    let total_chunks = (jpeg.len() + chunk_size - 1) / chunk_size;
+    for (i, chunk) in jpeg.chunks(chunk_size).enumerate() {
+        let is_last = i == total_chunks - 1;
+        let msg = ServerMessage::screen_image_chunk(
+            crate::protocol::ImageFormat::Jpeg,
+            is_last,
+            chunk.to_vec(),
+        );
+        let data = msg.to_msgpack()?;
+        socket.send(Message::Binary(data.into())).await?;
+    }
+    Ok(())
+}
+
+async fn handle_client_message(
+    state: &AppState,
+    msg: ClientMessage,
+    height: u16,
+    window_h_offset: &mut u16,
+) -> anyhow::Result<()> {
+    log::debug!("Handling client message: {:?}", msg);
+    match msg {
+        ClientMessage::ScrollUp => {
+            if *window_h_offset == 0 {
+                state
+                    .cli_tx
+                    .send(ClientMessage::ScrollUp)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to send client message: {}", e))?;
+                return Ok(());
+            }
+            if *window_h_offset > height / 2 {
+                *window_h_offset -= height / 2
+            } else {
+                *window_h_offset = 0
+            };
+
+            log::debug!("ScrollUp, new window_h_offset: {}", window_h_offset);
+            state
+                .cli_tx
+                .send(ClientMessage::Sync)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to send client message: {}", e))?;
+        }
+        ClientMessage::ScrollDown => {
+            *window_h_offset += height / 2;
+
+            log::debug!("ScrollDown, new window_h_offset: {}", window_h_offset);
+            state
+                .cli_tx
+                .send(ClientMessage::Sync)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to send client message: {}", e))?;
+        }
+        msg => {
+            state
+                .cli_tx
+                .send(msg)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to send client message: {}", e))?;
+        }
+    }
+    Ok(())
 }
 
 async fn handle_socket(mut socket: WebSocket, state: AppState, params: WsParams) {
@@ -447,6 +593,9 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, params: WsParams)
 
     let mut wait_pong = false;
     let mut ticker = tokio::time::interval(std::time::Duration::from_secs(30));
+
+    let window_size = (params.width, params.height);
+    let mut window_h_offset = 0;
 
     loop {
         tokio::select! {
@@ -468,7 +617,16 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, params: WsParams)
                         // Filter based on subscription params
                         match &msg {
                             ServerMessage::PtyOutput(_) if !params.pty => continue,
-                            ServerMessage::ScreenImage(_) if !params.img => continue,
+                            ServerMessage::ScreenImage(_) => {
+                                log::warn!("unexpected ScreenImage message");
+                                continue
+                            },
+                            ServerMessage::Screen(screen) => {
+                                if let Err(e) = send_screen_to_client(&state, &mut socket, screen, Some(window_size), &mut window_h_offset).await {
+                                    log::error!("Failed to send screen to client: {}", e);
+                                }
+                                continue;
+                            },
                             _ => {}
                         }
                         let data = msg.to_msgpack().unwrap();
@@ -494,12 +652,10 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, params: WsParams)
                             log::trace!("Received binary message, length: {}", data.len());
                             match ClientMessage::from_msgpack(&data) {
                                 Ok(client_msg) => {
-                                    log::debug!("Parsed client message: {:?}", client_msg);
-                                    if let Err(e) = state.cli_tx.send(client_msg).await {
-                                        log::error!("Failed to send client message: {}", e);
+                                    if let Err(e) = handle_client_message(&state, client_msg, window_size.1, &mut window_h_offset).await {
+                                        log::error!("Failed to handle client message: {}", e);
                                         break;
                                     }
-                                    log::debug!("Successfully sent client message to cli_tx");
                                 }
                                 Err(e) => {
                                     log::error!("Failed to parse message: {}", e);
@@ -510,9 +666,8 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, params: WsParams)
                         Message::Text(text) => {
                             match ClientMessage::from_json(&text) {
                                 Ok(client_msg) => {
-                                    log::info!("Received: {:?}", client_msg);
-                                    if let Err(e) = state.cli_tx.send(client_msg).await {
-                                        log::error!("Failed to send client message: {}", e);
+                                    if let Err(e) = handle_client_message(&state, client_msg, window_size.1, &mut window_h_offset).await {
+                                        log::error!("Failed to handle client message: {}", e);
                                         break;
                                     }
                                 }
@@ -664,15 +819,72 @@ async fn handle_web_vosk_socket(mut socket: WebSocket, vosk_tx: WebVoskTx) {
 }
 
 /// Render a vt100 screen to JPEG bytes
-fn render_screen_to_jpeg(screen: &vt100::Screen) -> Result<Vec<u8>, String> {
-    let config = crate::screenshot::ScreenshotConfig::default();
+fn render_screen_to_jpeg(
+    screen: &vt100::Screen,
+    window_size: Option<(u16, u16)>, // (width, height)
+    window_h_offset: &mut u16,
+) -> anyhow::Result<Vec<u8>> {
+    let config = crate::screenshot::ScreenshotConfig {
+        show_decorations: false,
+        ..Default::default()
+    };
+
     let image = crate::screenshot::capture_screen(screen, &config)
-        .map_err(|e| format!("Failed to capture screen: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to capture screen: {}", e))?;
 
     // Convert RGBA to RGB for JPEG
-    let rgb_image = image::DynamicImage::ImageRgba8(image).to_rgb8();
+    let mut rgb_image = image::DynamicImage::ImageRgba8(image).to_rgb8();
+
+    if let Some((width, height)) = window_size {
+        let orig_width = rgb_image.width();
+        let orig_height = rgb_image.height();
+        log::debug!(
+            "Original image size: {}x{}, requested window size: {}x{}",
+            orig_width,
+            orig_height,
+            width,
+            height
+        );
+        let scale = width as f32 / orig_width as f32;
+        let new_height = (orig_height as f32 * scale).round() as u32;
+
+        rgb_image = image::imageops::resize(
+            &rgb_image,
+            width as u32,
+            new_height,
+            image::imageops::FilterType::Lanczos3,
+        );
+
+        // 根据垂直偏移截取
+        let y_offset = *window_h_offset as u32;
+        let crop_height = height as u32;
+
+        if y_offset + crop_height > new_height {
+            if crop_height > new_height {
+                log::warn!(
+                    "Requested crop height {} exceeds image height {}, adjusting to fit",
+                    crop_height,
+                    new_height
+                );
+                *window_h_offset = 0;
+            } else {
+                log::warn!(
+                    "Vertical offset {} + crop height {} exceeds image height {}, adjusting offset",
+                    y_offset,
+                    crop_height,
+                    new_height
+                );
+                *window_h_offset = (new_height - crop_height) as u16;
+            }
+            return Ok(Vec::new());
+        }
+
+        rgb_image = image::imageops::crop(&mut rgb_image, 0, y_offset, width as u32, crop_height)
+            .to_image();
+    }
+
     let mut jpeg_buf = std::io::Cursor::new(Vec::new());
-    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_buf, 85);
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_buf, 100);
     encoder
         .encode(
             rgb_image.as_raw(),
@@ -680,7 +892,7 @@ fn render_screen_to_jpeg(screen: &vt100::Screen) -> Result<Vec<u8>, String> {
             rgb_image.height(),
             image::ExtendedColorType::Rgb8,
         )
-        .map_err(|e| format!("Failed to encode JPEG: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to encode JPEG: {}", e))?;
 
     Ok(jpeg_buf.into_inner())
 }

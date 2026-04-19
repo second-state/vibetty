@@ -103,6 +103,12 @@ impl EchokitChild {
         self.child.kill().await
     }
 
+    pub fn resize(&mut self, rows: u16, cols: u16) -> std::io::Result<()> {
+        self.pty
+            .resize(PtySize::new(rows, cols))
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    }
+
     pub async fn read_pty_output(&mut self) -> std::io::Result<String> {
         let mut buffer = [0u8; 1024];
         let mut string_buffer = Vec::with_capacity(512);

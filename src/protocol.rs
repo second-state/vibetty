@@ -32,6 +32,12 @@ pub enum ClientMessage {
     #[serde(rename = "input_text")]
     Input(String),
 
+    #[serde(rename = "scroll_up")]
+    ScrollUp,
+
+    #[serde(rename = "scroll_down")]
+    ScrollDown,
+
     /// 切换工作目录
     #[serde(rename = "change_dir")]
     ChangeDir(String),
@@ -54,6 +60,8 @@ impl Debug for ClientMessage {
                 .finish(),
             ClientMessage::VoiceInputEnd(_) => f.debug_tuple("VoiceInputEnd").finish(),
             ClientMessage::Input(text) => f.debug_tuple("Input").field(text).finish(),
+            ClientMessage::ScrollUp => f.debug_tuple("ScrollUp").finish(),
+            ClientMessage::ScrollDown => f.debug_tuple("ScrollDown").finish(),
             ClientMessage::ChangeDir(path) => f.debug_tuple("ChangeDir").field(path).finish(),
         }
     }
@@ -80,6 +88,9 @@ pub enum ServerMessage {
     /// PTY 输出（终端输出显示）
     #[serde(rename = "pty_out")]
     PtyOutput(Vec<u8>),
+
+    #[serde(skip)]
+    Screen(std::sync::Arc<vt100::Screen>),
 
     /// 屏幕显示图片（分片）
     #[serde(rename = "screen_image")]
@@ -204,7 +215,11 @@ impl ServerMessage {
 
     /// 创建屏幕图片消息
     pub fn screen_image_chunk(format: ImageFormat, is_last: bool, data: Vec<u8>) -> Self {
-        Self::ScreenImage(ScreenImageChunk { format, is_last, data })
+        Self::ScreenImage(ScreenImageChunk {
+            format,
+            is_last,
+            data,
+        })
     }
 
     /// 创建通知消息

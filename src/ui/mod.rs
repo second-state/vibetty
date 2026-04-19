@@ -49,7 +49,13 @@ pub fn cleanup_terminal(terminal: &mut TuiTerminal) -> io::Result<()> {
     terminal.show_cursor()
 }
 
-pub fn render_frame(f: &mut Frame, screen: &vt100::Screen, title: &str, header_text: &str, footer_text: &str) {
+pub fn render_frame(
+    f: &mut Frame,
+    screen: &vt100::Screen,
+    title: &str,
+    header_text: &str,
+    footer_text: &str,
+) {
     let size = f.area();
 
     let chunks = Layout::default()
@@ -67,8 +73,8 @@ pub fn render_frame(f: &mut Frame, screen: &vt100::Screen, title: &str, header_t
     f.render_widget(header, chunks[0]);
 
     {
-        let pseudo_term = PseudoTerminal::new(screen)
-            .block(Block::new().borders(Borders::ALL).title(title));
+        let pseudo_term =
+            PseudoTerminal::new(screen).block(Block::new().borders(Borders::ALL).title(title));
         f.render_widget(pseudo_term, chunks[1]);
     }
 
@@ -78,39 +84,17 @@ pub fn render_frame(f: &mut Frame, screen: &vt100::Screen, title: &str, header_t
     f.render_widget(footer, chunks[2]);
 }
 
-pub struct EventLoopHandle {
-    pub shutdown: Arc<AtomicBool>,
-    pub thread: std::thread::JoinHandle<()>,
-}
-
-pub fn spawn_event_loop(ui_tx: UITx) -> EventLoopHandle {
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let event_shutdown = shutdown.clone();
-    let thread = std::thread::spawn(move || {
-        if let Err(e) = event_loop_thread(ui_tx, event_shutdown) {
+pub fn spawn_event_loop(ui_tx: UITx) {
+    let _thread = std::thread::spawn(move || {
+        if let Err(e) = event_loop_thread(ui_tx) {
             log::error!("Event loop error: {}", e);
         }
     });
-    EventLoopHandle { shutdown, thread }
 }
 
-impl EventLoopHandle {
-    pub fn is_finished(&self) -> bool {
-        self.thread.is_finished()
-    }
-
-    pub fn stop(&self) {
-        self.shutdown.store(true, Ordering::Relaxed);
-    }
-}
-
-fn event_loop_thread(tx_to_pty: UITx, shutdown: Arc<AtomicBool>) -> anyhow::Result<()> {
+fn event_loop_thread(tx_to_pty: UITx) -> anyhow::Result<()> {
     let timeout = Duration::from_millis(500);
     loop {
-        if shutdown.load(Ordering::Relaxed) {
-            break;
-        }
-
         if event::poll(timeout)? {
             let evt = event::read()?;
 
