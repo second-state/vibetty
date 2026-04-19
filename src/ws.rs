@@ -1,6 +1,6 @@
 use axum::{
     extract::{
-        State,
+        Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     response::IntoResponse,
@@ -12,6 +12,11 @@ use crate::{
     config::AsrConfig,
     protocol::{ClientMessage, ServerMessage, VoiceInputStart},
 };
+
+/// Image broadcast frame interval (ms)
+const IMAGE_FRAME_INTERVAL_MS: u64 = 500;
+/// Image chunk size (bytes)
+const IMAGE_CHUNK_SIZE: usize = 10 * 1024;
 
 type ServerTx = broadcast::Sender<ServerMessage>;
 
@@ -199,6 +204,10 @@ pub async fn run_command(
 
     let mut vt_parser = vt100::Parser::new_with_callbacks(24, 80, 8096, WindowCallbacks::new());
 
+    // Frame rate limit for image broadcast (default 2 fps)
+    let frame_interval = std::time::Duration::from_millis(IMAGE_FRAME_INTERVAL_MS);
+    let mut last_frame_time = std::time::Instant::now() - frame_interval;
+
     loop {
         let terminal_read_event = terminal.read_pty_output();
 
@@ -281,6 +290,25 @@ pub async fn run_command(
                 {
                     log::warn!("[{}] no active PTY subscribers", terminal.session_id());
                     continue;
+                }
+
+                // Generate JPEG and broadcast chunks for img subscribers (rate limited)
+                let now = std::time::Instant::now();
+                if now.duration_since(last_frame_time) >= frame_interval {
+                    last_frame_time = now;
+                    let jpeg_screen = vt_parser.screen().clone();
+                    if let Ok(jpeg) = render_screen_to_jpeg(&jpeg_screen) {
+                        let chunk_size = IMAGE_CHUNK_SIZE;
+                        let total_chunks = (jpeg.len() + chunk_size - 1) / chunk_size;
+                        for (i, chunk) in jpeg.chunks(chunk_size).enumerate() {
+                            let is_last = i == total_chunks - 1;
+                            let _ = tx.send(ServerMessage::screen_image_chunk(
+                                crate::protocol::ImageFormat::Jpeg,
+                                is_last,
+                                chunk.to_vec(),
+                            ));
+                        }
+                    }
                 }
             }
 
@@ -389,11 +417,28 @@ pub async fn run_command(
     Ok(RunCommandResult::Done)
 }
 
-pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct WsParams {
+    #[serde(default = "default_true")]
+    pub pty: bool,
+    #[serde(default)]
+    pub img: bool,
 }
 
-async fn handle_socket(mut socket: WebSocket, state: AppState) {
+fn default_true() -> bool {
+    true
+}
+
+pub async fn ws_handler(
+    ws: WebSocketUpgrade,
+    Query(params): Query<WsParams>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    log::info!("WebSocket connection params: pty={}, img={}", params.pty, params.img);
+    ws.on_upgrade(move |socket| handle_socket(socket, state, params))
+}
+
+async fn handle_socket(mut socket: WebSocket, state: AppState, params: WsParams) {
     let mut server_rx = state.tx.subscribe();
     if state.cli_tx.send(ClientMessage::Sync).await.is_err() {
         log::error!("Failed to send Sync message to cli_tx");
@@ -420,6 +465,12 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
             result = server_rx.recv() => {
                 match result {
                     Ok(msg) => {
+                        // Filter based on subscription params
+                        match &msg {
+                            ServerMessage::PtyOutput(_) if !params.pty => continue,
+                            ServerMessage::ScreenImage(_) if !params.img => continue,
+                            _ => {}
+                        }
                         let data = msg.to_msgpack().unwrap();
                         if socket.send(Message::Binary(data.into())).await.is_err() {
                             log::error!("Failed to send message to WebSocket");

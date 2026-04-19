@@ -81,9 +81,9 @@ pub enum ServerMessage {
     #[serde(rename = "pty_out")]
     PtyOutput(Vec<u8>),
 
-    /// 屏幕显示图片
+    /// 屏幕显示图片（分片）
     #[serde(rename = "screen_image")]
-    ScreenImage(ScreenImageData),
+    ScreenImage(ScreenImageChunk),
 
     /// 通知消息
     #[serde(rename = "notification")]
@@ -98,14 +98,17 @@ pub enum ServerMessage {
     Title(String),
 }
 
-/// 屏幕显示图片数据
+/// 屏幕图片分片数据
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScreenImageData {
-    /// 图片数据（原始字节）
-    pub data: Vec<u8>,
-
+pub struct ScreenImageChunk {
     /// 图片格式
     pub format: ImageFormat,
+
+    /// 是否为最后一个分片
+    pub is_last: bool,
+
+    /// 分片数据
+    pub data: Vec<u8>,
 }
 
 /// 通知消息数据
@@ -200,8 +203,8 @@ impl ServerMessage {
     }
 
     /// 创建屏幕图片消息
-    pub fn screen_image(data: Vec<u8>, format: ImageFormat) -> Self {
-        Self::ScreenImage(ScreenImageData { data, format })
+    pub fn screen_image_chunk(format: ImageFormat, is_last: bool, data: Vec<u8>) -> Self {
+        Self::ScreenImage(ScreenImageChunk { format, is_last, data })
     }
 
     /// 创建通知消息
