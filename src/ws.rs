@@ -1,3 +1,4 @@
+use core::sync;
 use std::sync::Arc;
 
 use axum::{
@@ -387,6 +388,7 @@ pub async fn run_command(
             TerminalEvent::Input(ClientMessage::Input(text)) => {
                 log::info!("Sending text input to terminal: {:?}", text);
                 terminal.send_text(&text).await?;
+                vt_parser.screen_mut().set_scrollback(0);
             }
             TerminalEvent::Input(ClientMessage::ChangeDir(path)) => {
                 log::info!("Change directory requested: {}", path);
@@ -537,6 +539,9 @@ async fn send_screen_to_client(
 async fn handle_client_message(
     state: &AppState,
     msg: ClientMessage,
+    socket: &mut WebSocket,
+    screen: Option<&vt100::Screen>,
+    width: u16,
     height: u16,
     window_h_offset: &mut u16,
 ) -> anyhow::Result<()> {
@@ -551,26 +556,57 @@ async fn handle_client_message(
                     .map_err(|e| anyhow::anyhow!("Failed to send client message: {}", e))?;
                 return Ok(());
             }
-            if *window_h_offset > height / 2 {
-                *window_h_offset -= height / 2
+            if *window_h_offset > height / 4 {
+                *window_h_offset -= height / 4
             } else {
                 *window_h_offset = 0
             };
 
             log::debug!("ScrollUp, new window_h_offset: {}", window_h_offset);
-            state
-                .cli_tx
-                .send(ClientMessage::Sync)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to send client message: {}", e))?;
+            if let Some(screen) = screen {
+                send_screen_to_client(
+                    state,
+                    socket,
+                    screen,
+                    Some((width, height)),
+                    window_h_offset,
+                )
+                .await?;
+            } else {
+                state
+                    .cli_tx
+                    .send(ClientMessage::Sync)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to send client message: {}", e))?;
+            }
         }
         ClientMessage::ScrollDown => {
-            *window_h_offset += height / 2;
+            *window_h_offset += height / 4;
 
             log::debug!("ScrollDown, new window_h_offset: {}", window_h_offset);
+
+            if let Some(screen) = screen {
+                send_screen_to_client(
+                    state,
+                    socket,
+                    screen,
+                    Some((width, height)),
+                    window_h_offset,
+                )
+                .await?;
+            } else {
+                state
+                    .cli_tx
+                    .send(ClientMessage::Sync)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to send client message: {}", e))?;
+            }
+        }
+        ClientMessage::Input(text) => {
+            *window_h_offset = u16::MAX; // reset offset on new input
             state
                 .cli_tx
-                .send(ClientMessage::Sync)
+                .send(ClientMessage::Input(text))
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to send client message: {}", e))?;
         }
@@ -597,6 +633,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, params: WsParams)
 
     let window_size = (params.width, params.height);
     let mut window_h_offset = 0;
+    let mut screen = None; // default size, will be resized by client message
 
     loop {
         tokio::select! {
@@ -622,8 +659,9 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, params: WsParams)
                                 log::warn!("unexpected ScreenImage message");
                                 continue
                             },
-                            ServerMessage::Screen(screen) => {
-                                if let Err(e) = send_screen_to_client(&state, &mut socket, screen, Some(window_size), &mut window_h_offset).await {
+                            ServerMessage::Screen(screen_) => {
+                                screen = Some(screen_.clone());
+                                if let Err(e) = send_screen_to_client(&state, &mut socket, screen_, Some(window_size), &mut window_h_offset).await {
                                     log::error!("Failed to send screen to client: {}", e);
                                 }
                                 continue;
@@ -647,13 +685,14 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, params: WsParams)
             }
             // 接收来自 WebSocket 客户端的消息
             result = socket.recv() => {
+                let screen_ref = screen.as_ref().map(|s|s.as_ref());
                 match result {
                     Some(Ok(msg)) => match msg {
                         Message::Binary(data) => {
                             log::trace!("Received binary message, length: {}", data.len());
                             match ClientMessage::from_msgpack(&data) {
                                 Ok(client_msg) => {
-                                    if let Err(e) = handle_client_message(&state, client_msg, window_size.1, &mut window_h_offset).await {
+                                    if let Err(e) = handle_client_message(&state, client_msg, &mut socket, screen_ref, window_size.0, window_size.1, &mut window_h_offset).await {
                                         log::error!("Failed to handle client message: {}", e);
                                         break;
                                     }
@@ -667,7 +706,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, params: WsParams)
                         Message::Text(text) => {
                             match ClientMessage::from_json(&text) {
                                 Ok(client_msg) => {
-                                    if let Err(e) = handle_client_message(&state, client_msg, window_size.1, &mut window_h_offset).await {
+                                    if let Err(e) = handle_client_message(&state, client_msg, &mut socket, screen_ref, window_size.0, window_size.1, &mut window_h_offset).await {
                                         log::error!("Failed to handle client message: {}", e);
                                         break;
                                     }
@@ -857,8 +896,12 @@ fn render_screen_to_jpeg(
         );
 
         // 根据垂直偏移截取
-        let y_offset = *window_h_offset as u32;
         let crop_height = height as u32;
+        if *window_h_offset == u16::MAX {
+            *window_h_offset = (new_height - crop_height) as u16;
+        }
+
+        let y_offset = *window_h_offset as u32;
 
         if crop_height > new_height {
             // 在顶部填充缺失的部分（图片高度不足）
