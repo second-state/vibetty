@@ -127,16 +127,23 @@ impl Canvas {
         )
         .ok_or_else(|| "Failed to create image from raw data".to_string())?;
 
-        // Blend text layer on top
-        for (final_pixel, text_pixel) in final_image.pixels_mut().zip(self.text_layer.pixels()) {
-            let alpha = text_pixel[3] as f32 / 255.0;
-            if alpha > 0.0 {
-                for i in 0..3 {
-                    final_pixel[i] = (text_pixel[i] as f32 * alpha
-                        + final_pixel[i] as f32 * (1.0 - alpha))
-                        as u8;
-                }
-                final_pixel[3] = 255;
+        // Blend text layer on top (fast integer alpha blending)
+        for (dst, src) in final_image.pixels_mut().zip(self.text_layer.pixels()) {
+            let a = src[3] as u32;
+            if a == 0 {
+                continue;
+            }
+            if a == 255 {
+                dst[0] = src[0];
+                dst[1] = src[1];
+                dst[2] = src[2];
+                dst[3] = 255;
+            } else {
+                let inv_a = 255 - a;
+                dst[0] = ((src[0] as u32 * a + dst[0] as u32 * inv_a + 128) >> 8) as u8;
+                dst[1] = ((src[1] as u32 * a + dst[1] as u32 * inv_a + 128) >> 8) as u8;
+                dst[2] = ((src[2] as u32 * a + dst[2] as u32 * inv_a + 128) >> 8) as u8;
+                dst[3] = 255;
             }
         }
 
