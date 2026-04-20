@@ -88,8 +88,24 @@ pub fn capture_screen(
     let padding = config.padding;
     let title_height = if config.show_decorations { 32 } else { 0 };
 
+    // Find the last row with actual content (skip trailing empty rows)
+    let mut last_content_row = 0;
+    'b: for row in (0..rows).rev() {
+        for col in 0..cols {
+            if let Some(cell) = screen.cell(row, col) {
+                if cell.has_contents() {
+                    last_content_row = row;
+                    break 'b;
+                }
+            }
+        }
+    }
+
+    // Only render rows up to the last one with content
+    let actual_rows = last_content_row + 1;
+
     let image_width = cols as u32 * char_width + padding * 2;
-    let image_height = rows as u32 * char_height + title_height + padding * 2;
+    let image_height = actual_rows as u32 * char_height + title_height + padding * 2;
 
     let mut canvas = Canvas::new(image_width, image_height)
         .map_err(|e| ScreenshotError::CanvasError(e.to_string()))?;
@@ -117,8 +133,8 @@ pub fn capture_screen(
         );
     }
 
-    // Draw terminal content
-    for row in 0..rows {
+    // Draw terminal content (only up to last_content_row)
+    for row in 0..actual_rows {
         for col in 0..cols {
             if let Some(cell) = screen.cell(row, col) {
                 let x = padding + col as u32 * char_width;
