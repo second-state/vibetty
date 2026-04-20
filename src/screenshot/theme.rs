@@ -59,9 +59,9 @@ impl Theme {
         }
     }
 
-    /// Get foreground color with bold attribute
-    pub fn get_foreground(&self, color: vt100::Color, bold: bool) -> [u8; 4] {
-        if bold {
+    /// Get foreground color with bold and dim attributes
+    pub fn get_foreground(&self, color: vt100::Color, bold: bool, dim: bool) -> [u8; 4] {
+        let rgba = if bold {
             match color {
                 vt100::Color::Default => self.colors[15], // bright white
                 vt100::Color::Idx(i) if i < 8 => {
@@ -72,6 +72,19 @@ impl Theme {
             }
         } else {
             self.color_to_rgba(color)
+        };
+
+        if dim {
+            // Dim: blend 50% toward background (30,30,30)
+            let bg = [30u8, 30, 30];
+            [
+                (rgba[0] as u16 / 2 + bg[0] as u16 / 2) as u8,
+                (rgba[1] as u16 / 2 + bg[1] as u16 / 2) as u8,
+                (rgba[2] as u16 / 2 + bg[2] as u16 / 2) as u8,
+                rgba[3],
+            ]
+        } else {
+            rgba
         }
     }
 

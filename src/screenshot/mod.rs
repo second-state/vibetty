@@ -155,7 +155,7 @@ pub fn capture_screen(
                 // Draw text - imageproc's draw_text_mut y param is the top of the text
                 if cell.has_contents() && !cell.is_wide_continuation() {
                     let fg = cell.fgcolor();
-                    let fg_color = theme.get_foreground(fg, cell.bold());
+                    let fg_color = theme.get_foreground(fg, cell.bold(), cell.dim());
                     canvas.draw_text_with_font(
                         cell.contents(),
                         x as i32,
