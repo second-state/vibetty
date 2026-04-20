@@ -325,7 +325,8 @@ pub async fn run_command(
 
                 // Generate JPEG and broadcast chunks for img subscribers (rate limited)
                 let now = std::time::Instant::now();
-                if now.duration_since(last_frame_time) >= frame_interval {
+                if now.duration_since(last_frame_time) >= frame_interval || title.starts_with("✳")
+                {
                     last_frame_time = now;
                     send_screen(&tx, screen);
                 }

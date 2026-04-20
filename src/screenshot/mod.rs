@@ -93,7 +93,7 @@ pub fn capture_screen(
     'b: for row in (0..rows).rev() {
         for col in 0..cols {
             if let Some(cell) = screen.cell(row, col) {
-                if cell.has_contents() {
+                if cell.has_contents() && cell.contents() != " " {
                     last_content_row = row;
                     break 'b;
                 }
