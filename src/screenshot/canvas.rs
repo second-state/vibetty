@@ -16,8 +16,8 @@ pub struct Canvas {
 impl Canvas {
     /// Create a new canvas with the given dimensions
     pub fn new(width: u32, height: u32) -> Result<Self, String> {
-        let background = Pixmap::new(width, height)
-            .ok_or_else(|| "Failed to create pixmap".to_string())?;
+        let background =
+            Pixmap::new(width, height).ok_or_else(|| "Failed to create pixmap".to_string())?;
 
         let text_layer = ImageBuffer::new(width, height);
 
@@ -56,7 +56,9 @@ impl Canvas {
         if let Some(rect) = Rect::from_xywh(x as f32, y as f32, width as f32, height as f32) {
             let mut paint = Paint::default();
             paint.set_color(Color::from_rgba8(color[0], color[1], color[2], color[3]));
-            let _ = self.background.fill_rect(rect, &paint, Transform::identity(), None);
+            let _ = self
+                .background
+                .fill_rect(rect, &paint, Transform::identity(), None);
         }
     }
 
@@ -69,7 +71,15 @@ impl Canvas {
     }
 
     /// Draw text at the specified position (simple placeholder)
-    pub fn draw_text(&mut self, text: &str, x: i32, y: i32, color: [u8; 4], _font: Option<&()>, _font_size: f32) {
+    pub fn draw_text(
+        &mut self,
+        text: &str,
+        x: i32,
+        y: i32,
+        color: [u8; 4],
+        _font: Option<&()>,
+        _font_size: f32,
+    ) {
         self.draw_text_simple(text, x, y, color);
     }
 
@@ -122,7 +132,9 @@ impl Canvas {
             let alpha = text_pixel[3] as f32 / 255.0;
             if alpha > 0.0 {
                 for i in 0..3 {
-                    final_pixel[i] = (text_pixel[i] as f32 * alpha + final_pixel[i] as f32 * (1.0 - alpha)) as u8;
+                    final_pixel[i] = (text_pixel[i] as f32 * alpha
+                        + final_pixel[i] as f32 * (1.0 - alpha))
+                        as u8;
                 }
                 final_pixel[3] = 255;
             }

@@ -1,9 +1,9 @@
 use axum::{
+    Json,
     body::Body,
     extract::{ConnectInfo, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
 use serde::Deserialize;
 use std::net::SocketAddr;

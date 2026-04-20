@@ -32,10 +32,7 @@ pub async fn new_with_command<S: AsRef<str>>(
     }
 
     let child = cmd.spawn(pts)?;
-    log::debug!(
-        "Started terminal with PID {}",
-        child.id().unwrap_or(0)
-    );
+    log::debug!("Started terminal with PID {}", child.id().unwrap_or(0));
 
     Ok(EchokitChild {
         uuid: uuid::Uuid::new_v4(),

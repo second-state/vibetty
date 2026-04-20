@@ -8,7 +8,7 @@ mod theme;
 mod utils;
 
 pub use canvas::Canvas;
-pub use font::{load_font_with_size, FontData};
+pub use font::{FontData, load_font_with_size};
 pub use theme::Theme;
 
 use ab_glyph::Font;
@@ -66,8 +66,8 @@ pub fn capture_screen(
     config: &ScreenshotConfig,
 ) -> Result<image::RgbaImage, ScreenshotError> {
     // Try to load font, fallback to built-in if not available
-    let font_data = load_font_with_size(config.font_size)
-        .unwrap_or_else(|_| FontData::new(config.font_size));
+    let font_data =
+        load_font_with_size(config.font_size).unwrap_or_else(|_| FontData::new(config.font_size));
 
     let theme = Theme::default();
 
@@ -78,8 +78,10 @@ pub fn capture_screen(
     let char_width = ((advance_unscaled / units_per_em) * font_data.scale.x).round() as u32;
 
     // Use proper line height = ascent + descent
-    let ascent = (font_data.font.ascent_unscaled() / units_per_em * font_data.scale.y).round() as u32;
-    let descent = (font_data.font.descent_unscaled() / units_per_em * font_data.scale.y).round() as u32;
+    let ascent =
+        (font_data.font.ascent_unscaled() / units_per_em * font_data.scale.y).round() as u32;
+    let descent =
+        (font_data.font.descent_unscaled() / units_per_em * font_data.scale.y).round() as u32;
     let char_height = ascent + descent;
 
     let (rows, cols) = screen.size();
@@ -126,13 +128,7 @@ pub fn capture_screen(
                 let bg = cell.bgcolor();
                 if bg != vt100::Color::Default {
                     let color = theme.color_to_rgba(bg);
-                    canvas.fill_rect(
-                        x as i32,
-                        y as i32,
-                        char_width,
-                        char_height,
-                        color,
-                    );
+                    canvas.fill_rect(x as i32, y as i32, char_width, char_height, color);
                 }
 
                 // Draw text - imageproc's draw_text_mut y param is the top of the text
@@ -152,7 +148,9 @@ pub fn capture_screen(
         }
     }
 
-    canvas.to_image().map_err(|e| ScreenshotError::CanvasError(e.to_string()))
+    canvas
+        .to_image()
+        .map_err(|e| ScreenshotError::CanvasError(e.to_string()))
 }
 
 /// Save a vt100::Screen to a PNG file

@@ -12,23 +12,23 @@ impl Default for Theme {
         Self {
             colors: [
                 // Normal colors
-                [0, 0, 0, 255],           // Black
-                [194, 54, 33, 255],       // Red
-                [37, 188, 36, 255],       // Green
-                [173, 173, 39, 255],      // Yellow
-                [73, 46, 225, 255],       // Blue
-                [211, 56, 211, 255],      // Magenta
-                [51, 187, 200, 255],      // Cyan
-                [203, 204, 205, 255],     // White
+                [0, 0, 0, 255],       // Black
+                [194, 54, 33, 255],   // Red
+                [37, 188, 36, 255],   // Green
+                [173, 173, 39, 255],  // Yellow
+                [73, 46, 225, 255],   // Blue
+                [211, 56, 211, 255],  // Magenta
+                [51, 187, 200, 255],  // Cyan
+                [203, 204, 205, 255], // White
                 // Bright colors
-                [128, 128, 128, 255],     // Bright Black (Gray)
-                [255, 85, 85, 255],       // Bright Red
-                [85, 255, 85, 255],       // Bright Green
-                [255, 255, 85, 255],      // Bright Yellow
-                [85, 85, 255, 255],       // Bright Blue
-                [255, 85, 255, 255],      // Bright Magenta
-                [85, 255, 255, 255],      // Bright Cyan
-                [255, 255, 255, 255],     // Bright White
+                [128, 128, 128, 255], // Bright Black (Gray)
+                [255, 85, 85, 255],   // Bright Red
+                [85, 255, 85, 255],   // Bright Green
+                [255, 255, 85, 255],  // Bright Yellow
+                [85, 85, 255, 255],   // Bright Blue
+                [255, 85, 255, 255],  // Bright Magenta
+                [85, 255, 255, 255],  // Bright Cyan
+                [255, 255, 255, 255], // Bright White
             ],
         }
     }
