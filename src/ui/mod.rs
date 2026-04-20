@@ -68,14 +68,18 @@ pub fn render_frame(
         ])
         .split(size);
 
-    let header = Paragraph::new(header_text)
+    let header_display = if title.is_empty() {
+        header_text.to_string()
+    } else {
+        format!("{} - {}", header_text, title)
+    };
+    let header = Paragraph::new(header_display)
         .block(Block::new().borders(Borders::ALL))
         .alignment(Alignment::Center);
     f.render_widget(header, chunks[0]);
 
     {
-        let pseudo_term =
-            PseudoTerminal::new(screen).block(Block::new().borders(Borders::ALL).title(title));
+        let pseudo_term = PseudoTerminal::new(screen).block(Block::new().borders(Borders::ALL));
         f.render_widget(pseudo_term, chunks[1]);
     }
 
