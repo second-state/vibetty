@@ -337,6 +337,16 @@ pub async fn run_command(
                 log::info!("UI Input: {:?}", String::from_utf8_lossy(&input));
                 terminal.send_bytes(&input).await?;
             }
+            TerminalEvent::UIEvent(crate::ui::UIEvent::ResizePtyWidth(i)) => {
+                log::info!("UI ResizePtyWidth: {}", i);
+                let (rows, cols) = vt_parser.screen().size();
+                let new_cols = (cols as i16 + i).max(10) as u16;
+                vt_parser.screen_mut().set_size(rows, new_cols);
+                let _ = terminal.resize(rows, new_cols);
+                log::debug!("Resized PTY to {} rows and {} cols", rows, new_cols);
+                let screen = Arc::new(vt_parser.screen().clone());
+                send_screen(&tx, screen);
+            }
             TerminalEvent::UIEvent(crate::ui::UIEvent::ScrollUp)
             | TerminalEvent::Input(ClientMessage::ScrollUp) => {
                 log::info!("ScrollUp");

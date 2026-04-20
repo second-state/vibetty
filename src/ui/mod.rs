@@ -25,6 +25,7 @@ pub enum UIEvent {
     ScrollUp,
     ScrollDown,
     Resize(u16, u16),
+    ResizePtyWidth(i16),
 }
 
 pub type UITx = mpsc::Sender<UIEvent>;
@@ -108,6 +109,18 @@ fn event_loop_thread(tx_to_pty: UITx) -> anyhow::Result<()> {
                         KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             let _ = tx_to_pty.blocking_send(UIEvent::Input(Vec::from(&[0x04][..])));
                         }
+                        KeyCode::Char('+') if key.modifiers.contains(KeyModifiers::ALT) => {
+                            log::debug!("ALT + '+' detected, sending ResizePtyWidth(5)");
+                            let _ = tx_to_pty.blocking_send(UIEvent::ResizePtyWidth(5));
+                        }
+                        KeyCode::Char('=') if key.modifiers.contains(KeyModifiers::ALT) => {
+                            log::debug!("ALT + '=' detected, sending ResizePtyWidth(5)");
+                            let _ = tx_to_pty.blocking_send(UIEvent::ResizePtyWidth(5));
+                        }
+                        KeyCode::Char('-') if key.modifiers.contains(KeyModifiers::ALT) => {
+                            log::debug!("ALT + '-' detected, sending ResizePtyWidth(-5)");
+                            let _ = tx_to_pty.blocking_send(UIEvent::ResizePtyWidth(-5));
+                        }
                         _ => {
                             if let Some(bytes) = bytes_from_key(key) {
                                 let _ = tx_to_pty.blocking_send(UIEvent::Input(bytes));
@@ -133,8 +146,6 @@ fn event_loop_thread(tx_to_pty: UITx) -> anyhow::Result<()> {
             }
         }
     }
-
-    Ok(())
 }
 
 fn bytes_from_key(key: KeyEvent) -> Option<Vec<u8>> {
