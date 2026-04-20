@@ -144,7 +144,12 @@ pub fn capture_screen(
                 let bg = cell.bgcolor();
                 if bg != vt100::Color::Default {
                     let color = theme.color_to_rgba(bg);
-                    canvas.fill_rect(x as i32, y as i32, char_width, char_height, color);
+                    let w = if cell.is_wide() {
+                        char_width * 2
+                    } else {
+                        char_width
+                    };
+                    canvas.fill_rect(x as i32, y as i32, w, char_height, color);
                 }
 
                 // Draw text - imageproc's draw_text_mut y param is the top of the text
