@@ -16,7 +16,7 @@ use crate::{
 };
 
 /// Image broadcast frame interval (ms)
-const IMAGE_FRAME_INTERVAL_MS: u64 = 500;
+const IMAGE_FRAME_INTERVAL_MS: u64 = 300;
 /// Image chunk size (bytes)
 const IMAGE_CHUNK_SIZE: usize = 10 * 1024;
 /// Columns reserved for TUI decorations (borders)
@@ -859,28 +859,39 @@ fn render_screen_to_jpeg(
         let y_offset = *window_h_offset as u32;
         let crop_height = height as u32;
 
-        if y_offset + crop_height > new_height {
-            if crop_height > new_height {
-                log::warn!(
-                    "Requested crop height {} exceeds image height {}, adjusting to fit",
-                    crop_height,
-                    new_height
-                );
-                *window_h_offset = 0;
-            } else {
-                log::warn!(
-                    "Vertical offset {} + crop height {} exceeds image height {}, adjusting offset",
-                    y_offset,
-                    crop_height,
-                    new_height
-                );
-                *window_h_offset = (new_height - crop_height) as u16;
+        if crop_height > new_height {
+            // 在顶部填充缺失的部分（图片高度不足）
+            log::debug!(
+                "Padding image: crop_height {} > new_height {}, padding {} pixels at top",
+                crop_height,
+                new_height,
+                crop_height - new_height
+            );
+            let padding_top = crop_height - new_height;
+            let mut padded = image::RgbImage::new(width as u32, crop_height);
+            // 填充背景色（深色背景）
+            for pixel in padded.pixels_mut() {
+                *pixel = image::Rgb([30, 30, 30]);
             }
+            // 把原图放在底部
+            image::imageops::overlay(&mut padded, &rgb_image, 0, padding_top as i64);
+            rgb_image = padded;
+        } else if y_offset + crop_height > new_height {
+            // 偏移量过大，调整到对齐底部
+            log::warn!(
+                "Vertical offset {} + crop height {} exceeds image height {}, adjusting offset",
+                y_offset,
+                crop_height,
+                new_height
+            );
+            *window_h_offset = (new_height - crop_height) as u16;
             return Ok(Vec::new());
+        } else {
+            // 正常截取
+            rgb_image =
+                image::imageops::crop(&mut rgb_image, 0, y_offset, width as u32, crop_height)
+                    .to_image();
         }
-
-        rgb_image = image::imageops::crop(&mut rgb_image, 0, y_offset, width as u32, crop_height)
-            .to_image();
     }
 
     let mut jpeg_buf = std::io::Cursor::new(Vec::new());
