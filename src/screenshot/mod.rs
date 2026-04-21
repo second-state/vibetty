@@ -16,8 +16,10 @@ use image::ImageError;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
+#[allow(clippy::enum_variant_names)]
 pub enum ScreenshotError {
     #[error("Failed to load font: {0}")]
+    #[allow(dead_code)]
     FontLoadError(String),
 
     #[error("Canvas error: {0}")]
@@ -92,11 +94,11 @@ pub fn capture_screen(
     let mut last_content_row = 0;
     'b: for row in (0..rows).rev() {
         for col in 0..cols {
-            if let Some(cell) = screen.cell(row, col) {
-                if cell.has_contents() && cell.contents() != " " {
-                    last_content_row = row;
-                    break 'b;
-                }
+            if let Some(cell) = screen.cell(row, col)
+                && cell.has_contents() && cell.contents() != " "
+            {
+                last_content_row = row;
+                break 'b;
             }
         }
     }
@@ -170,7 +172,7 @@ pub fn capture_screen(
     }
 
     canvas
-        .to_image()
+        .into_image()
         .map_err(|e| ScreenshotError::CanvasError(e.to_string()))
 }
 

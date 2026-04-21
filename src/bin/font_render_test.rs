@@ -24,7 +24,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
-    screenshot::save_screen_png(&parser.screen(), "font_render_test.png", &config)?;
+    screenshot::save_screen_png(parser.screen(), "font_render_test.png", &config)?;
 
     println!("✓ Screenshot saved to font_render_test.png");
 

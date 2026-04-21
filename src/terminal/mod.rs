@@ -106,7 +106,7 @@ impl EchokitChild {
     pub fn resize(&mut self, rows: u16, cols: u16) -> std::io::Result<()> {
         self.pty
             .resize(PtySize::new(rows, cols))
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+            .map_err(std::io::Error::other)
     }
 
     pub async fn read_pty_output(&mut self) -> std::io::Result<String> {
@@ -122,7 +122,7 @@ impl EchokitChild {
         // Drain remaining buffered data
         loop {
             let s = str::from_utf8(&string_buffer);
-            if let Ok(_) = s {
+            if s.is_ok() {
                 break;
             }
 

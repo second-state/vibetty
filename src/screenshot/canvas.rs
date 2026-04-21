@@ -36,11 +36,13 @@ impl Canvas {
     }
 
     /// Get character width
+    #[allow(dead_code)]
     pub fn char_width(&self) -> u32 {
         self.char_width
     }
 
     /// Get character height
+    #[allow(dead_code)]
     pub fn char_height(&self) -> u32 {
         self.char_height
     }
@@ -56,14 +58,13 @@ impl Canvas {
         if let Some(rect) = Rect::from_xywh(x as f32, y as f32, width as f32, height as f32) {
             let mut paint = Paint::default();
             paint.set_color(Color::from_rgba8(color[0], color[1], color[2], color[3]));
-            let _ = self
-                .background
+            self.background
                 .fill_rect(rect, &paint, Transform::identity(), None);
         }
     }
 
     /// Draw a title bar background at the top
-    pub fn draw_title_bar(&mut self, _title: &str, padding: u32) {
+    pub fn draw_title_bar(&mut self, _title: &str, _padding: u32) {
         let height = 32;
         let bg = [40, 40, 45, 255];
         self.fill_rect(0, 0, self.width(), height, bg);
@@ -71,6 +72,7 @@ impl Canvas {
     }
 
     /// Draw text at the specified position (simple placeholder)
+    #[allow(dead_code)]
     pub fn draw_text(
         &mut self,
         text: &str,
@@ -84,6 +86,7 @@ impl Canvas {
     }
 
     /// Draw text at the specified position (simple version without font)
+    #[allow(dead_code)]
     pub fn draw_text_simple(&mut self, text: &str, x: i32, y: i32, color: [u8; 4]) {
         for (i, ch) in text.chars().enumerate() {
             let px_x = x + i as i32 * 8;
@@ -114,12 +117,13 @@ impl Canvas {
     }
 
     /// Get the canvas height
+    #[allow(dead_code)]
     pub fn height(&self) -> u32 {
         self.background.height()
     }
 
     /// Convert the canvas to a final image
-    pub fn to_image(self) -> Result<RgbaImage, String> {
+    pub fn into_image(self) -> Result<RgbaImage, String> {
         let mut final_image = RgbaImage::from_raw(
             self.background.width(),
             self.background.height(),

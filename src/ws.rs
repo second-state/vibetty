@@ -1,4 +1,3 @@
-use core::sync;
 use std::sync::Arc;
 
 use axum::{
@@ -102,7 +101,7 @@ impl ASRInterface {
         match self {
             ASRInterface::Whisper { client, config } => {
                 let r = retry_whisper(
-                    &client,
+                    client,
                     &config.url,
                     &config.api_key,
                     &config.model,
@@ -155,7 +154,7 @@ impl ASRInterface {
 fn send_screen(tx: &ServerTx, screen: Arc<vt100::Screen>) {
     // if let Ok(jpeg) = render_screen_to_jpeg(&screen) {
     //     let chunk_size = IMAGE_CHUNK_SIZE;
-    //     let total_chunks = (jpeg.len() + chunk_size - 1) / chunk_size;
+    //     let total_chunks = jpeg.len().div_ceil(chunk_size);
     //     for (i, chunk) in jpeg.chunks(chunk_size).enumerate() {
     //         let is_last = i == total_chunks - 1;
     //         let _ = tx.send(ServerMessage::screen_image_chunk(
@@ -514,7 +513,7 @@ async fn send_screen_to_client(
     window_size: Option<(u16, u16)>, // (width, height)
     window_h_offset: &mut u16,
 ) -> anyhow::Result<()> {
-    let jpeg = render_screen_to_jpeg(&screen, window_size, window_h_offset)?;
+    let jpeg = render_screen_to_jpeg(screen, window_size, window_h_offset)?;
     if jpeg.is_empty() {
         state
             .cli_tx
@@ -532,7 +531,7 @@ async fn send_screen_to_client(
         jpeg.len() / 1024
     );
     let chunk_size = IMAGE_CHUNK_SIZE;
-    let total_chunks = (jpeg.len() + chunk_size - 1) / chunk_size;
+    let total_chunks = jpeg.len().div_ceil(chunk_size);
     for (i, chunk) in jpeg.chunks(chunk_size).enumerate() {
         let is_last = i == total_chunks - 1;
         let msg = ServerMessage::screen_image_chunk(

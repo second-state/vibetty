@@ -44,14 +44,14 @@ impl Theme {
                     self.colors[i as usize]
                 } else if i >= 232 {
                     // Grayscale
-                    let shade = ((i - 232) * 10 + 8) as u8;
+                    let shade = (i - 232) * 10 + 8;
                     [shade, shade, shade, 255]
                 } else {
                     // 216-color cube
                     let i = i - 16;
-                    let r = ((i / 36) * 51) as u8;
-                    let g = (((i / 6) % 6) * 51) as u8;
-                    let b = ((i % 6) * 51) as u8;
+                    let r = (i / 36) * 51;
+                    let g = ((i / 6) % 6) * 51;
+                    let b = (i % 6) * 51;
                     [r, g, b, 255]
                 }
             }
@@ -89,6 +89,7 @@ impl Theme {
     }
 
     /// Get background color
+    #[allow(dead_code)]
     pub fn get_background(&self, color: vt100::Color) -> [u8; 4] {
         self.color_to_rgba(color)
     }

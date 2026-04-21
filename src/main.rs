@@ -189,7 +189,7 @@ async fn main() {
 
     // Init TUI
     let mut tui = ui::init_terminal().expect("Failed to initialize terminal");
-    let _event_loop = ui::spawn_event_loop(ui_tx);
+    ui::spawn_event_loop(ui_tx);
 
     let server_url = if let Ok(addr) = std::net::TcpListener::bind(&args.bind_addr) {
         let addr = addr.local_addr().unwrap();
