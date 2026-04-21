@@ -1,173 +1,28 @@
+use std::sync::Arc;
+
 use axum::{
     extract::{
-        State,
+        Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     response::IntoResponse,
 };
-use serde::Deserialize;
 use tokio::sync::{broadcast, mpsc};
+use vt100::Callbacks;
 
 use crate::{
     config::AsrConfig,
-    protocol::{ChoicesData, ClientMessage, ServerMessage, VoiceInputStart},
-    terminal::claude::{ClaudeCodeResult, ClaudeCodeState, UseTool},
+    protocol::{ClientMessage, ServerMessage, VoiceInputStart},
 };
 
-/// AskUserQuestion 工具输入结构
-#[derive(Debug, Clone, Deserialize)]
-struct AskUserQuestionInput {
-    questions: Vec<Question>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct Question {
-    question: String,
-    #[serde(rename = "header")]
-    _header: Option<String>,
-    #[serde(rename = "multiSelect", default)]
-    multi_select: bool,
-    options: Vec<QuestionOption>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct QuestionOption {
-    label: String,
-    #[serde(rename = "description")]
-    _description: Option<String>,
-}
-
-/// 将 UseTool 转换为 ChoicesData
-fn use_tool_to_choices(tool: &UseTool) -> ChoicesData {
-    let tool_id = if !tool.id.is_empty() {
-        Some(tool.id.clone())
-    } else {
-        None
-    };
-
-    // 检测 AskUserQuestion 并转换成 choices
-    if tool.name == "AskUserQuestion"
-        && let Ok(input) = serde_json::from_value::<AskUserQuestionInput>(tool.input.clone())
-        && let Some(first_q) = input.questions.first()
-    {
-        let options: Vec<String> = first_q.options.iter().map(|o| o.label.clone()).collect();
-
-        return ChoicesData {
-            id: tool_id,
-            title: first_q.question.clone(),
-            options,
-            multi_select: first_q.multi_select,
-            allow_custom_input: true,
-        };
-    }
-
-    // 其他工具，显示基本信息
-    let title = match &tool.input {
-        serde_json::Value::Object(map) => {
-            let mut keys: Vec<_> = map.keys().collect();
-            keys.sort();
-            let tool_name = format!("\x1b[96mTool: {}\x1b[30m", tool.name);
-            let mut title_str = vec![tool_name];
-            for k in keys {
-                let v = &map[k];
-                let value_str = match v {
-                    serde_json::Value::String(s) => s.clone(),
-                    serde_json::Value::Number(n) => n.to_string(),
-                    serde_json::Value::Bool(b) => b.to_string(),
-                    serde_json::Value::Null => "null".to_string(),
-                    serde_json::Value::Array(arr) => serde_json::to_string(arr).unwrap_or_default(),
-                    serde_json::Value::Object(obj) => {
-                        serde_json::to_string(obj).unwrap_or_default()
-                    }
-                };
-                title_str.push(format!("{}: {}", k, value_str));
-            }
-            title_str.join("\n\n")
-        }
-        _ => format!(
-            "\x1b[35m{}\x1b[30m",
-            serde_json::to_string_pretty(&tool.input)
-                .unwrap_or(format!("Tool call: {:?}", tool.name))
-        ),
-    };
-
-    ChoicesData {
-        id: tool_id,
-        title,
-        options: vec![],
-        multi_select: false,
-        allow_custom_input: false,
-    }
-}
-
-/// 根据终端状态生成要发送的消息
-fn state_to_message(state: &ClaudeCodeState, session_id: &str) -> Option<ServerMessage> {
-    match state {
-        ClaudeCodeState::PreUseTool {
-            request,
-            is_pending,
-            ..
-        } => {
-            if *is_pending {
-                for r in request {
-                    if r.done {
-                        continue;
-                    }
-
-                    log::info!(
-                        "[{}] Claude is requesting to use a tool: {:?}",
-                        session_id,
-                        r
-                    );
-
-                    let choice_data = use_tool_to_choices(r);
-                    return Some(ServerMessage::Choices(choice_data));
-                }
-            }
-            None
-        }
-        ClaudeCodeState::Output {
-            output,
-            is_thinking,
-        } => {
-            if *is_thinking {
-                log::info!("[{}] Claude is thinking...", session_id);
-                Some(ServerMessage::notification(
-                    crate::protocol::NotificationLevel::Info,
-                    format!("\x1b[38;5;245m{output}\x1b[0m",),
-                ))
-            } else {
-                Some(ServerMessage::notification(
-                    crate::protocol::NotificationLevel::Success,
-                    output.clone(),
-                ))
-            }
-        }
-        ClaudeCodeState::StopUseTool { is_error } => {
-            if *is_error {
-                log::error!("[{}] Tool execution error", session_id);
-                Some(ServerMessage::notification(
-                    crate::protocol::NotificationLevel::Error,
-                    "Tool execution failed.".to_string(),
-                ))
-            } else {
-                log::info!("[{}] Tool execution completed", session_id);
-                Some(ServerMessage::coustom_notification(
-                    String::new(),
-                    None,
-                    0x3CB371,
-                ))
-            }
-        }
-        ClaudeCodeState::Working { prompt } => Some(ServerMessage::notification(
-            crate::protocol::NotificationLevel::Success,
-            prompt.clone(),
-        )),
-        ClaudeCodeState::Idle => Some(ServerMessage::get_input(
-            "Claude is waiting for user input...".to_string(),
-        )),
-    }
-}
+/// Image broadcast frame interval (ms)
+const IMAGE_FRAME_INTERVAL_MS: u64 = 300;
+/// Image chunk size (bytes)
+const IMAGE_CHUNK_SIZE: usize = 10 * 1024;
+/// Columns reserved for TUI decorations (borders)
+const TUI_COLS_PADDING: u16 = 4;
+/// Rows reserved for TUI decorations (title + footer)
+const TUI_ROWS_PADDING: u16 = 6;
 
 type ServerTx = broadcast::Sender<ServerMessage>;
 
@@ -180,39 +35,41 @@ type WebVoskReqTx = OneshotSender<(bytes::Bytes, OneshotSender<String>)>;
 type WebVoskTx = mpsc::Sender<WebVoskReqTx>;
 type WebVoskRx = mpsc::Receiver<WebVoskReqTx>;
 
+struct WindowCallbacks {
+    title: String,
+    update_title: bool,
+}
+
+impl WindowCallbacks {
+    fn new() -> Self {
+        Self {
+            title: String::new(),
+            update_title: false,
+        }
+    }
+}
+
+impl Callbacks for WindowCallbacks {
+    fn set_window_title(&mut self, _: &mut vt100::Screen, title: &[u8]) {
+        self.title = std::str::from_utf8(title).unwrap().to_string();
+        self.update_title = true;
+    }
+}
+
+/// Screenshot request: send a oneshot sender to get the rendered JPEG bytes
+type ScreenshotTx = mpsc::Sender<tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>>;
+
 #[derive(Clone)]
 pub struct AppState {
     pub tx: ServerTx,
     pub cli_tx: ClientTx,
     pub web_vosk_tx: Option<WebVoskTx>,
+    pub screenshot_tx: ScreenshotTx,
 }
 
 fn t2s<S: AsRef<str>>(s: S) -> String {
     let s = hanconv::tw2sp(s.as_ref());
     s.replace("幺", "么")
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum ClaudeMode {
-    Normal,
-    Plan,
-    AcceptEdits,
-}
-
-impl std::fmt::Display for ClaudeMode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ClaudeMode::Normal => write!(f, "normal"),
-            ClaudeMode::Plan => write!(f, "plan"),
-            ClaudeMode::AcceptEdits => write!(f, "accept_edits"),
-        }
-    }
-}
-
-/// 会话状态，包含所有可扩展的状态标记
-#[derive(Debug)]
-struct SessionState {
-    mode: ClaudeMode,
 }
 
 pub enum ASRInterface {
@@ -244,7 +101,7 @@ impl ASRInterface {
         match self {
             ASRInterface::Whisper { client, config } => {
                 let r = retry_whisper(
-                    &client,
+                    client,
                     &config.url,
                     &config.api_key,
                     &config.model,
@@ -294,30 +151,30 @@ impl ASRInterface {
     }
 }
 
-impl Default for SessionState {
-    fn default() -> Self {
-        Self {
-            mode: ClaudeMode::Normal,
-        }
-    }
-}
+fn send_screen(tx: &ServerTx, screen: Arc<vt100::Screen>) {
+    // if let Ok(jpeg) = render_screen_to_jpeg(&screen) {
+    //     let chunk_size = IMAGE_CHUNK_SIZE;
+    //     let total_chunks = jpeg.len().div_ceil(chunk_size);
+    //     for (i, chunk) in jpeg.chunks(chunk_size).enumerate() {
+    //         let is_last = i == total_chunks - 1;
+    //         let _ = tx.send(ServerMessage::screen_image_chunk(
+    //             crate::protocol::ImageFormat::Jpeg,
+    //             is_last,
+    //             chunk.to_vec(),
+    //         ));
+    //     }
+    // }
 
-impl SessionState {
-    fn to_state_string(&self) -> String {
-        let mut result = String::new();
-        // mode 状态
-        match self.mode {
-            ClaudeMode::Normal => result.push_str("[N]"),
-            ClaudeMode::Plan => result.push_str("[P]"),
-            ClaudeMode::AcceptEdits => result.push_str("[E]"),
-        }
-        result
-    }
+    let _ = tx.send(ServerMessage::Screen(screen));
 }
 
 pub enum RunCommandResult {
     Done,
-    ChangeDir(String, ClientRx, mpsc::Receiver<crate::ui::UIEvent>),
+    ChangeDir(
+        String,
+        ClientRx,
+        mpsc::Receiver<tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>>,
+    ),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -325,11 +182,14 @@ pub async fn run_command(
     command: Vec<String>,
     asr_interface: &mut ASRInterface,
     mut rx: ClientRx,
-    mut ui_rx: mpsc::Receiver<crate::ui::UIEvent>,
+    ui_rx: &mut mpsc::Receiver<crate::ui::UIEvent>,
     tx: ServerTx,
-    pty_output_tx: tokio::sync::mpsc::Sender<bytes::Bytes>,
     current_dir: Option<std::path::PathBuf>,
     listen_port: u16,
+    mut screenshot_rx: mpsc::Receiver<tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>>,
+    tui: &mut crate::ui::TuiTerminal,
+    ui_title: &mut String,
+    ui_footer: &str,
 ) -> anyhow::Result<RunCommandResult> {
     let dir_path = current_dir
         .as_ref()
@@ -347,32 +207,43 @@ pub async fn run_command(
 
         UIEvent(crate::ui::UIEvent),
 
-        ClaudeResult(Box<ClaudeCodeResult>),
+        PtyOutput(String),
+
+        ScreenGetter(tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>),
 
         Error,
     }
 
-    let mut terminal = crate::terminal::claude::new_with_command(
+    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+    let vt_cols = cols - TUI_COLS_PADDING;
+    let vt_rows = rows - TUI_ROWS_PADDING;
+
+    let mut terminal = crate::terminal::pty::new_with_command(
         command.first().unwrap().as_str(),
         &command[1..],
         &[("VIBETTY_PORT".to_string(), listen_port.to_string())],
-        (24, 80),
+        (vt_rows, vt_cols),
         current_dir,
     )
     .await?;
 
-    let mut input_received = false;
-    let mut session_state = SessionState::default();
     let mut wav_buffer = Vec::new();
     let mut wav_sample_rate = 16000;
 
+    let mut vt_parser =
+        vt100::Parser::new_with_callbacks(vt_rows, vt_cols, 8096, WindowCallbacks::new());
+
+    // Frame rate limit for image broadcast (default 2 fps)
+    let frame_interval = std::time::Duration::from_millis(IMAGE_FRAME_INTERVAL_MS);
+    let mut last_frame_time = std::time::Instant::now() - frame_interval;
+
     loop {
-        let terminal_read_event = terminal.read_pty_output_and_history_line();
+        let terminal_read_event = terminal.read_pty_output();
 
         let event = tokio::select! {
             result = terminal_read_event => {
                 match result {
-                    Ok(r) => TerminalEvent::ClaudeResult(Box::new(r)),
+                    Ok(r) => TerminalEvent::PtyOutput(r),
                     Err(e) => {
                         log::error!("[{}] Error reading PTY output: {:?}", terminal.session_id(), e);
                         TerminalEvent::Error
@@ -395,46 +266,55 @@ pub async fn run_command(
                         TerminalEvent::Error
                     }
                 }
+            },
+
+            req = screenshot_rx.recv() => {
+                match req {
+                    Some(resp_tx) => TerminalEvent::ScreenGetter(resp_tx),
+                    None => {
+                        log::error!("[{}] Screenshot request channel closed", terminal.session_id());
+                        TerminalEvent::Error
+                    }
+                }
             }
         };
 
         match event {
-            TerminalEvent::ClaudeResult(r)
-                if matches!(r.as_ref(), ClaudeCodeResult::PtyOutput(_)) =>
-            {
-                let ClaudeCodeResult::PtyOutput(output) = *r else {
-                    unreachable!()
+            TerminalEvent::ScreenGetter(getter) => {
+                let screen = vt_parser.screen().clone();
+                let mut window_scrollback = 0;
+                let result = render_screen_to_jpeg(&screen, None, &mut window_scrollback);
+
+                let jpeg = match result {
+                    Ok(data) => Ok(data),
+                    Err(e) => Err(e.to_string()),
                 };
+                let _ = getter.send(jpeg);
+            }
+            TerminalEvent::PtyOutput(output) => {
                 log::trace!("[{}] PTY output: {}", terminal.session_id(), output.len());
-                if output.contains("accept edits on") {
-                    log::info!("[{}] Detected 'accept edits on'", terminal.session_id());
-                    if session_state.mode != ClaudeMode::AcceptEdits {
-                        session_state.mode = ClaudeMode::AcceptEdits;
-                        let _ = tx.send(ServerMessage::status(session_state.to_state_string()));
-                    }
-                } else if output.contains("plan mode on") {
-                    log::info!("[{}] Detected 'plan mode on'", terminal.session_id());
-                    if session_state.mode != ClaudeMode::Plan {
-                        session_state.mode = ClaudeMode::Plan;
-                        let _ = tx.send(ServerMessage::status(session_state.to_state_string()));
-                    }
-                } else if output.contains("? for shortcuts") {
-                    log::info!("[{}] Detected 'normal mode on'", terminal.session_id());
-                    if session_state.mode != ClaudeMode::Normal {
-                        session_state.mode = ClaudeMode::Normal;
-                        let _ = tx.send(ServerMessage::status(session_state.to_state_string()));
-                    }
-                }
+                vt_parser.process(output.as_bytes());
 
-                if pty_output_tx
-                    .send(bytes::Bytes::from(output.clone()))
-                    .await
-                    .is_err()
+                // Check for title update from callbacks
                 {
-                    log::warn!("[{}] No active PTY output receiver", terminal.session_id());
-                    return Ok(RunCommandResult::Done);
+                    let cb = vt_parser.callbacks_mut();
+                    if cb.update_title {
+                        cb.update_title = false;
+                        let new_title = cb.title.clone();
+                        let _ = cb;
+                        *ui_title = new_title.clone();
+
+                        // Send title change to client
+                        let _ = tx.send(ServerMessage::title(new_title));
+                    }
                 }
 
+                // Render directly to TUI
+                let screen = Arc::new(vt_parser.screen().clone());
+                let title = ui_title.clone();
+                let footer = ui_footer.to_string();
+                let _ =
+                    tui.draw(|f| crate::ui::render_frame(f, &screen, &title, "Vibetty", &footer));
                 if tx
                     .send(ServerMessage::PtyOutput(output.into_bytes()))
                     .is_err()
@@ -442,92 +322,69 @@ pub async fn run_command(
                     log::warn!("[{}] no active PTY subscribers", terminal.session_id());
                     continue;
                 }
-            }
 
-            TerminalEvent::ClaudeResult(r)
-                if matches!(r.as_ref(), ClaudeCodeResult::WaitForUserInput) =>
-            {
-                log::info!("[{}] Waiting for user input", terminal.session_id());
-
-                terminal.update_state(&r);
-
-                if let Err(_e) = tx.send(ServerMessage::get_input(
-                    "Claude is waiting for user input...".to_string(),
-                )) {
-                    log::error!("[{}] No client waiting for data", terminal.session_id());
-                }
-
-                if input_received {
-                    terminal.send_enter().await?;
+                // Generate JPEG and broadcast chunks for img subscribers (rate limited)
+                let now = std::time::Instant::now();
+                if now.duration_since(last_frame_time) >= frame_interval || title.starts_with("✳")
+                {
+                    last_frame_time = now;
+                    send_screen(&tx, screen);
                 }
             }
-            TerminalEvent::ClaudeResult(r) => {
-                input_received = false;
-                if terminal.update_state(&r) {
-                    log::info!(
-                        "[{}] Terminal state updated: {:?}",
-                        terminal.session_id(),
-                        terminal.state()
-                    );
-                    if let Some(msg) =
-                        state_to_message(terminal.state(), &terminal.session_id().to_string())
-                        && let Err(_e) = tx.send(msg)
-                    {
-                        log::error!("[{}] No client waiting for data", terminal.session_id());
-                    }
 
-                    // Handle Idle state input_received separately
-                    match terminal.state() {
-                        ClaudeCodeState::Idle => {
-                            if input_received {
-                                terminal.send_enter().await?;
-                            }
-                        }
-                        ClaudeCodeState::Working { .. } => {
-                            input_received = false;
-                        }
-                        _ => {}
-                    }
-                }
-            }
             TerminalEvent::UIEvent(crate::ui::UIEvent::Input(input)) => {
+                log::info!("UI Input: {:?}", String::from_utf8_lossy(&input));
                 terminal.send_bytes(&input).await?;
-                if input == b"\x1b[5~" || input == b"\x1b[6~" {
-                    log::debug!("Received Page Up/Down input from UI");
-                    pty_output_tx.send(bytes::Bytes::from_owner(input)).await?;
-                    continue;
-                }
             }
-            TerminalEvent::UIEvent(crate::ui::UIEvent::Title(title)) => {
-                log::debug!(
-                    "[{}] Terminal title updated: {:?}",
-                    terminal.session_id(),
-                    title
-                );
-                if let Some(r) = terminal.update_title(title) {
-                    log::info!(
-                        "[{}] Terminal state updated from title: {:?}",
-                        terminal.session_id(),
-                        terminal.state()
-                    );
+            TerminalEvent::UIEvent(crate::ui::UIEvent::ResizePtyWidth(i)) => {
+                log::info!("UI ResizePtyWidth: {}", i);
+                let (rows, cols) = vt_parser.screen().size();
+                let new_cols = (cols as i16 + i).max(10) as u16;
+                vt_parser.screen_mut().set_size(rows, new_cols);
+                let _ = terminal.resize(rows, new_cols);
+                log::debug!("Resized PTY to {} rows and {} cols", rows, new_cols);
+                let screen = Arc::new(vt_parser.screen().clone());
+                send_screen(&tx, screen);
+            }
+            TerminalEvent::UIEvent(crate::ui::UIEvent::ScrollUp)
+            | TerminalEvent::Input(ClientMessage::ScrollUp) => {
+                log::info!("ScrollUp");
+                let s = vt_parser.screen().scrollback();
+                vt_parser.screen_mut().set_scrollback(s + 5);
+                let screen = Arc::new(vt_parser.screen().clone());
+                let title = ui_title.clone();
+                let footer = ui_footer.to_string();
+                let _ =
+                    tui.draw(|f| crate::ui::render_frame(f, &screen, &title, "Vibetty", &footer));
 
-                    if terminal.update_state(&r)
-                        && let Some(msg) =
-                            state_to_message(terminal.state(), &terminal.session_id().to_string())
-                        && let Err(_e) = tx.send(msg)
-                    {
-                        log::error!("[{}] No client waiting for data", terminal.session_id());
-                    }
-                }
+                send_screen(&tx, screen);
+            }
+            TerminalEvent::UIEvent(crate::ui::UIEvent::ScrollDown)
+            | TerminalEvent::Input(ClientMessage::ScrollDown) => {
+                log::info!("ScrollDown");
+                let s = vt_parser.screen().scrollback();
+                vt_parser.screen_mut().set_scrollback(s.saturating_sub(5));
+                let screen = Arc::new(vt_parser.screen().clone());
+                let title = ui_title.clone();
+                let footer = ui_footer.to_string();
+                let _ =
+                    tui.draw(|f| crate::ui::render_frame(f, &screen, &title, "Vibetty", &footer));
+
+                send_screen(&tx, screen);
+            }
+            TerminalEvent::UIEvent(crate::ui::UIEvent::Resize(cols, rows)) => {
+                log::info!("Resize: cols={}, rows={}", cols, rows);
+                let vt_cols = cols.saturating_sub(TUI_COLS_PADDING);
+                let vt_rows = rows.saturating_sub(TUI_ROWS_PADDING);
+                vt_parser.screen_mut().set_size(vt_rows, vt_cols);
+                let _ = terminal.resize(vt_rows, vt_cols);
+                let screen = Arc::new(vt_parser.screen().clone());
+                send_screen(&tx, screen);
             }
             TerminalEvent::Input(ClientMessage::Sync) => {
-                log::info!("Received Sync message from client");
-                if let Some(msg) =
-                    state_to_message(terminal.state(), &terminal.session_id().to_string())
-                    && let Err(_e) = tx.send(msg)
-                {
-                    log::error!("[{}] No client waiting for data", terminal.session_id());
-                }
+                log::info!("Received Sync message from client, sending screen");
+                let screen = Arc::new(vt_parser.screen().clone());
+                send_screen(&tx, screen);
             }
             TerminalEvent::Input(ClientMessage::PtyInput(input)) => {
                 log::info!(
@@ -540,60 +397,7 @@ pub async fn run_command(
             TerminalEvent::Input(ClientMessage::Input(text)) => {
                 log::info!("Sending text input to terminal: {:?}", text);
                 terminal.send_text(&text).await?;
-                input_received = true;
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                terminal.send_enter().await?;
-            }
-            TerminalEvent::Input(ClientMessage::Choice { index }) => {
-                log::info!("Sending choice input to terminal: {:?}", index);
-                if index < 0 {
-                    terminal.send_esc().await?;
-                    continue;
-                }
-
-                terminal.send_key_iter(&[(index + 1).to_string()]).await?;
-            }
-            TerminalEvent::Input(ClientMessage::Choices {
-                index,
-                custom_input,
-                multi_select,
-            }) => {
-                log::info!("Sending choice input to terminal: {:?}", index);
-                let mut keys = Vec::new();
-                for i in index {
-                    if i < 0 {
-                        terminal.send_esc().await?;
-                        continue;
-                    }
-                    keys.push((i + 1).to_string());
-                }
-
-                if let Some(input) = custom_input
-                    && !input.trim().is_empty()
-                {
-                    terminal.send_up_arrow().await?;
-                    log::info!("Sending custom input to terminal: {:?}", input);
-                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                    terminal.send_text(&input).await?;
-                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                    if multi_select {
-                        terminal.send_up_arrow().await?;
-                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                    } else {
-                        terminal.send_enter().await?;
-                        continue;
-                    }
-                }
-
-                log::info!("Submitting choice input");
-
-                terminal.send_key_iter(&keys).await?;
-
-                if multi_select {
-                    terminal.send_right_arrow().await?;
-                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                    terminal.send_enter().await?;
-                }
+                vt_parser.screen_mut().set_scrollback(0);
             }
             TerminalEvent::Input(ClientMessage::ChangeDir(path)) => {
                 log::info!("Change directory requested: {}", path);
@@ -601,7 +405,7 @@ pub async fn run_command(
                     crate::protocol::NotificationLevel::Info,
                     format!("Changing directory to: {}", path),
                 ));
-                return Ok(RunCommandResult::ChangeDir(path, rx, ui_rx));
+                return Ok(RunCommandResult::ChangeDir(path, rx, screenshot_rx));
             }
             TerminalEvent::Input(ClientMessage::VoiceInputStart(VoiceInputStart {
                 sample_rate,
@@ -663,11 +467,170 @@ pub async fn run_command(
     Ok(RunCommandResult::Done)
 }
 
-pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct WsParams {
+    #[serde(default = "default_true")]
+    pub pty: bool,
+    #[serde(default)]
+    pub img: bool,
+    /// Client screen width (columns)
+    #[serde(default = "default_width")]
+    pub width: u16,
+    /// Client screen height (rows)
+    #[serde(default = "default_height")]
+    pub height: u16,
 }
 
-async fn handle_socket(mut socket: WebSocket, state: AppState) {
+fn default_true() -> bool {
+    true
+}
+
+fn default_height() -> u16 {
+    240
+}
+
+fn default_width() -> u16 {
+    240
+}
+
+pub async fn ws_handler(
+    ws: WebSocketUpgrade,
+    Query(params): Query<WsParams>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    log::info!(
+        "WebSocket connection params: pty={}, img={}",
+        params.pty,
+        params.img
+    );
+    ws.on_upgrade(move |socket| handle_socket(socket, state, params))
+}
+
+async fn send_screen_to_client(
+    state: &AppState,
+    socket: &mut WebSocket,
+    screen: &vt100::Screen,
+    window_size: Option<(u16, u16)>, // (width, height)
+    window_h_offset: &mut u16,
+) -> anyhow::Result<()> {
+    let jpeg = render_screen_to_jpeg(screen, window_size, window_h_offset)?;
+    if jpeg.is_empty() {
+        state
+            .cli_tx
+            .send(ClientMessage::ScrollDown)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to send ScrollDown message to cli_tx after empty JPEG: {}",
+                    e
+                )
+            })?;
+    }
+    log::debug!(
+        "Sending screen JPEG to client, size: {} KB",
+        jpeg.len() / 1024
+    );
+    let chunk_size = IMAGE_CHUNK_SIZE;
+    let total_chunks = jpeg.len().div_ceil(chunk_size);
+    for (i, chunk) in jpeg.chunks(chunk_size).enumerate() {
+        let is_last = i == total_chunks - 1;
+        let msg = ServerMessage::screen_image_chunk(
+            crate::protocol::ImageFormat::Jpeg,
+            is_last,
+            chunk.to_vec(),
+        );
+        let data = msg.to_msgpack()?;
+        socket.send(Message::Binary(data.into())).await?;
+    }
+    Ok(())
+}
+
+async fn handle_client_message(
+    state: &AppState,
+    msg: ClientMessage,
+    socket: &mut WebSocket,
+    screen: Option<&vt100::Screen>,
+    width: u16,
+    height: u16,
+    window_h_offset: &mut u16,
+) -> anyhow::Result<()> {
+    log::debug!("Handling client message: {:?}", msg);
+    match msg {
+        ClientMessage::ScrollUp => {
+            if *window_h_offset == 0 {
+                state
+                    .cli_tx
+                    .send(ClientMessage::ScrollUp)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to send client message: {}", e))?;
+                return Ok(());
+            }
+            if *window_h_offset > height / 4 {
+                *window_h_offset -= height / 4
+            } else {
+                *window_h_offset = 0
+            };
+
+            log::debug!("ScrollUp, new window_h_offset: {}", window_h_offset);
+            if let Some(screen) = screen {
+                send_screen_to_client(
+                    state,
+                    socket,
+                    screen,
+                    Some((width, height)),
+                    window_h_offset,
+                )
+                .await?;
+            } else {
+                state
+                    .cli_tx
+                    .send(ClientMessage::Sync)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to send client message: {}", e))?;
+            }
+        }
+        ClientMessage::ScrollDown => {
+            *window_h_offset += height / 4;
+
+            log::debug!("ScrollDown, new window_h_offset: {}", window_h_offset);
+
+            if let Some(screen) = screen {
+                send_screen_to_client(
+                    state,
+                    socket,
+                    screen,
+                    Some((width, height)),
+                    window_h_offset,
+                )
+                .await?;
+            } else {
+                state
+                    .cli_tx
+                    .send(ClientMessage::Sync)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to send client message: {}", e))?;
+            }
+        }
+        ClientMessage::Input(text) => {
+            *window_h_offset = u16::MAX; // reset offset on new input
+            state
+                .cli_tx
+                .send(ClientMessage::Input(text))
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to send client message: {}", e))?;
+        }
+        msg => {
+            state
+                .cli_tx
+                .send(msg)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to send client message: {}", e))?;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_socket(mut socket: WebSocket, state: AppState, params: WsParams) {
     let mut server_rx = state.tx.subscribe();
     if state.cli_tx.send(ClientMessage::Sync).await.is_err() {
         log::error!("Failed to send Sync message to cli_tx");
@@ -676,6 +639,10 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
 
     let mut wait_pong = false;
     let mut ticker = tokio::time::interval(std::time::Duration::from_secs(30));
+
+    let window_size = (params.width, params.height);
+    let mut window_h_offset = 0;
+    let mut screen = None; // default size, will be resized by client message
 
     loop {
         tokio::select! {
@@ -694,6 +661,22 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
             result = server_rx.recv() => {
                 match result {
                     Ok(msg) => {
+                        // Filter based on subscription params
+                        match &msg {
+                            ServerMessage::PtyOutput(_) if !params.pty => continue,
+                            ServerMessage::ScreenImage(_) => {
+                                log::warn!("unexpected ScreenImage message");
+                                continue
+                            },
+                            ServerMessage::Screen(screen_) => {
+                                screen = Some(screen_.clone());
+                                if let Err(e) = send_screen_to_client(&state, &mut socket, screen_, Some(window_size), &mut window_h_offset).await {
+                                    log::error!("Failed to send screen to client: {}", e);
+                                }
+                                continue;
+                            },
+                            _ => {}
+                        }
                         let data = msg.to_msgpack().unwrap();
                         if socket.send(Message::Binary(data.into())).await.is_err() {
                             log::error!("Failed to send message to WebSocket");
@@ -711,18 +694,17 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
             }
             // 接收来自 WebSocket 客户端的消息
             result = socket.recv() => {
+                let screen_ref = screen.as_ref().map(|s|s.as_ref());
                 match result {
                     Some(Ok(msg)) => match msg {
                         Message::Binary(data) => {
                             log::trace!("Received binary message, length: {}", data.len());
                             match ClientMessage::from_msgpack(&data) {
                                 Ok(client_msg) => {
-                                    log::debug!("Parsed client message: {:?}", client_msg);
-                                    if let Err(e) = state.cli_tx.send(client_msg).await {
-                                        log::error!("Failed to send client message: {}", e);
+                                    if let Err(e) = handle_client_message(&state, client_msg, &mut socket, screen_ref, window_size.0, window_size.1, &mut window_h_offset).await {
+                                        log::error!("Failed to handle client message: {}", e);
                                         break;
                                     }
-                                    log::debug!("Successfully sent client message to cli_tx");
                                 }
                                 Err(e) => {
                                     log::error!("Failed to parse message: {}", e);
@@ -733,9 +715,8 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                         Message::Text(text) => {
                             match ClientMessage::from_json(&text) {
                                 Ok(client_msg) => {
-                                    log::info!("Received: {:?}", client_msg);
-                                    if let Err(e) = state.cli_tx.send(client_msg).await {
-                                        log::error!("Failed to send client message: {}", e);
+                                    if let Err(e) = handle_client_message(&state, client_msg, &mut socket, screen_ref, window_size.0, window_size.1, &mut window_h_offset).await {
+                                        log::error!("Failed to handle client message: {}", e);
                                         break;
                                     }
                                 }
@@ -883,5 +864,140 @@ async fn handle_web_vosk_socket(mut socket: WebSocket, vosk_tx: WebVoskTx) {
                 continue;
             }
         }
+    }
+}
+
+/// Render a vt100 screen to JPEG bytes
+fn render_screen_to_jpeg(
+    screen: &vt100::Screen,
+    window_size: Option<(u16, u16)>, // (width, height)
+    window_h_offset: &mut u16,
+) -> anyhow::Result<Vec<u8>> {
+    let config = crate::screenshot::ScreenshotConfig {
+        show_decorations: false,
+        ..Default::default()
+    };
+
+    let image = crate::screenshot::capture_screen(screen, &config)
+        .map_err(|e| anyhow::anyhow!("Failed to capture screen: {}", e))?;
+
+    // Convert RGBA to RGB for JPEG
+    let mut rgb_image = image::DynamicImage::ImageRgba8(image).to_rgb8();
+
+    if let Some((width, height)) = window_size {
+        let orig_width = rgb_image.width();
+        let orig_height = rgb_image.height();
+        log::debug!(
+            "Original image size: {}x{}, requested window size: {}x{}",
+            orig_width,
+            orig_height,
+            width,
+            height
+        );
+        let scale = width as f32 / orig_width as f32;
+        let new_height = (orig_height as f32 * scale).round() as u32;
+
+        rgb_image = image::imageops::resize(
+            &rgb_image,
+            width as u32,
+            new_height,
+            image::imageops::FilterType::Lanczos3,
+        );
+
+        // 根据垂直偏移截取
+        let crop_height = height as u32;
+        if *window_h_offset == u16::MAX {
+            *window_h_offset = (new_height - crop_height) as u16;
+        }
+
+        let y_offset = *window_h_offset as u32;
+
+        if crop_height > new_height {
+            // 在顶部填充缺失的部分（图片高度不足）
+            log::debug!(
+                "Padding image: crop_height {} > new_height {}, padding {} pixels at top",
+                crop_height,
+                new_height,
+                crop_height - new_height
+            );
+            let padding_top = crop_height - new_height;
+            let mut padded = image::RgbImage::new(width as u32, crop_height);
+            // 填充背景色（深色背景）
+            for pixel in padded.pixels_mut() {
+                *pixel = image::Rgb([30, 30, 30]);
+            }
+            // 把原图放在底部
+            image::imageops::overlay(&mut padded, &rgb_image, 0, padding_top as i64);
+            rgb_image = padded;
+        } else if y_offset + crop_height > new_height {
+            // 偏移量过大，调整到对齐底部
+            log::warn!(
+                "Vertical offset {} + crop height {} exceeds image height {}, adjusting offset",
+                y_offset,
+                crop_height,
+                new_height
+            );
+            *window_h_offset = (new_height - crop_height) as u16;
+            return Ok(Vec::new());
+        } else {
+            // 正常截取
+            rgb_image =
+                image::imageops::crop(&mut rgb_image, 0, y_offset, width as u32, crop_height)
+                    .to_image();
+        }
+    }
+
+    let mut jpeg_buf = std::io::Cursor::new(Vec::new());
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_buf, 100);
+    encoder
+        .encode(
+            rgb_image.as_raw(),
+            rgb_image.width(),
+            rgb_image.height(),
+            image::ExtendedColorType::Rgb8,
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to encode JPEG: {}", e))?;
+
+    Ok(jpeg_buf.into_inner())
+}
+
+/// HTTP handler for /screenshot.jpeg
+pub async fn screenshot_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+
+    if state.screenshot_tx.send(resp_tx).await.is_err() {
+        return (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            axum::http::HeaderMap::new(),
+            "Screenshot service unavailable".to_string(),
+        )
+            .into_response();
+    }
+
+    match resp_rx.await {
+        Ok(Ok(jpeg_data)) => {
+            let mut headers = axum::http::HeaderMap::new();
+            headers.insert(
+                axum::http::header::CONTENT_TYPE,
+                "image/jpeg".parse().unwrap(),
+            );
+            headers.insert(
+                axum::http::header::CACHE_CONTROL,
+                "no-cache".parse().unwrap(),
+            );
+            (axum::http::StatusCode::OK, headers, jpeg_data).into_response()
+        }
+        Ok(Err(e)) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            axum::http::HeaderMap::new(),
+            format!("Failed to render screenshot: {}", e),
+        )
+            .into_response(),
+        Err(_) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            axum::http::HeaderMap::new(),
+            "Screenshot request timed out".to_string(),
+        )
+            .into_response(),
     }
 }

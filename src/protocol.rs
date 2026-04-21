@@ -32,19 +32,11 @@ pub enum ClientMessage {
     #[serde(rename = "input_text")]
     Input(String),
 
-    /// 客户端选择
-    #[serde(rename = "choice")]
-    Choice {
-        /// 选项索引（choices 数组的索引）
-        index: i32,
-    },
+    #[serde(rename = "scroll_up")]
+    ScrollUp,
 
-    #[serde(rename = "choices")]
-    Choices {
-        index: Vec<i32>,
-        custom_input: Option<String>,
-        multi_select: bool,
-    },
+    #[serde(rename = "scroll_down")]
+    ScrollDown,
 
     /// 切换工作目录
     #[serde(rename = "change_dir")]
@@ -68,19 +60,8 @@ impl Debug for ClientMessage {
                 .finish(),
             ClientMessage::VoiceInputEnd(_) => f.debug_tuple("VoiceInputEnd").finish(),
             ClientMessage::Input(text) => f.debug_tuple("Input").field(text).finish(),
-            ClientMessage::Choice { index } => {
-                f.debug_struct("Choice").field("index", index).finish()
-            }
-            ClientMessage::Choices {
-                index,
-                custom_input,
-                multi_select,
-            } => f
-                .debug_struct("Choices")
-                .field("index", index)
-                .field("custom_input", custom_input)
-                .field("multi_select", multi_select)
-                .finish(),
+            ClientMessage::ScrollUp => f.debug_tuple("ScrollUp").finish(),
+            ClientMessage::ScrollDown => f.debug_tuple("ScrollDown").finish(),
             ClientMessage::ChangeDir(path) => f.debug_tuple("ChangeDir").field(path).finish(),
         }
     }
@@ -108,39 +89,37 @@ pub enum ServerMessage {
     #[serde(rename = "pty_out")]
     PtyOutput(Vec<u8>),
 
-    /// 屏幕显示图片
+    #[serde(skip)]
+    Screen(std::sync::Arc<vt100::Screen>),
+
+    /// 屏幕显示图片（分片）
     #[serde(rename = "screen_image")]
-    ScreenImage(ScreenImageData),
+    ScreenImage(ScreenImageChunk),
 
     /// 通知消息
     #[serde(rename = "notification")]
     Notification(NotificationData),
 
-    /// 请求输入
-    #[serde(rename = "get_input")]
-    GetInput(GetInputData),
-
     /// ASR 结果
     #[serde(rename = "asr_result")]
     AsrResult(String),
 
-    /// 提供选择项
-    #[serde(rename = "choices")]
-    Choices(ChoicesData),
-
-    /// 设置状态栏
-    #[serde(rename = "status")]
-    Status(String),
+    /// 终端标题变化
+    #[serde(rename = "title")]
+    Title(String),
 }
 
-/// 屏幕显示图片数据
+/// 屏幕图片分片数据
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScreenImageData {
-    /// 图片数据（原始字节）
-    pub data: Vec<u8>,
-
+pub struct ScreenImageChunk {
     /// 图片格式
     pub format: ImageFormat,
+
+    /// 是否为最后一个分片
+    pub is_last: bool,
+
+    /// 分片数据
+    pub data: Vec<u8>,
 }
 
 /// 通知消息数据
@@ -160,33 +139,6 @@ pub struct NotificationData {
     /// BE BIG-ENDIAN: 0xRRGGBB
     #[serde(default)]
     pub color: u32,
-}
-
-/// 请求输入数据
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GetInputData {
-    /// 提示语
-    pub prompt: String,
-}
-
-/// 提供选择项数据
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChoicesData {
-    /// 工具调用 ID（用于识别是否是同一个 tool 请求）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
-
-    /// 标题/问题
-    pub title: String,
-
-    /// 选择项列表, 如果是空则表示选择 confirm/cancel
-    pub options: Vec<String>,
-
-    /// 是否允许多选（如果为 true，客户端可以选择多个选项，index 将是一个数组）
-    pub multi_select: bool,
-
-    /// 是否允许用户输入自定义选项（如果为 true，客户端可以提供一个文本输入，文本输入内容将通过 input 消息发送）
-    pub allow_custom_input: bool,
 }
 
 // ========== 辅助类型 ==========
@@ -241,11 +193,6 @@ impl ClientMessage {
         Self::VoiceInputEnd(VoiceInputEnd {})
     }
 
-    /// 创建客户端选择消息
-    pub fn choice(index: i32) -> Self {
-        Self::Choice { index }
-    }
-
     /// 创建文本输入消息
     pub fn input(text: impl Into<String>) -> Self {
         Self::Input(text.into())
@@ -267,8 +214,12 @@ impl ServerMessage {
     }
 
     /// 创建屏幕图片消息
-    pub fn screen_image(data: Vec<u8>, format: ImageFormat) -> Self {
-        Self::ScreenImage(ScreenImageData { data, format })
+    pub fn screen_image_chunk(format: ImageFormat, is_last: bool, data: Vec<u8>) -> Self {
+        Self::ScreenImage(ScreenImageChunk {
+            format,
+            is_last,
+            data,
+        })
     }
 
     /// 创建通知消息
@@ -295,54 +246,14 @@ impl ServerMessage {
         })
     }
 
-    /// 创建请求输入消息
-    pub fn get_input(prompt: impl Into<String>) -> Self {
-        Self::GetInput(GetInputData {
-            prompt: prompt.into(),
-        })
-    }
-
-    /// 创建提供选择项消息
-    pub fn choices(
-        title: impl Into<String>,
-        options: Vec<String>,
-        multi_select: bool,
-        allow_custom_input: bool,
-    ) -> Self {
-        Self::Choices(ChoicesData {
-            id: None,
-            title: title.into(),
-            options,
-            multi_select,
-            allow_custom_input,
-        })
-    }
-
-    /// 创建提供选择项消息（带 ID）
-    pub fn choices_with_id(
-        id: impl Into<String>,
-        title: impl Into<String>,
-        options: Vec<String>,
-        multi_select: bool,
-        allow_custom_input: bool,
-    ) -> Self {
-        Self::Choices(ChoicesData {
-            id: Some(id.into()),
-            title: title.into(),
-            options,
-            multi_select,
-            allow_custom_input,
-        })
-    }
-
     /// 创建 ASR 结果消息
     pub fn asr_result(text: impl Into<String>) -> Self {
         Self::AsrResult(text.into())
     }
 
     /// 创建状态栏消息
-    pub fn status(text: impl Into<String>) -> Self {
-        Self::Status(text.into())
+    pub fn title(text: impl Into<String>) -> Self {
+        Self::Title(text.into())
     }
 }
 
@@ -449,33 +360,6 @@ mod tests {
     }
 
     #[test]
-    fn test_client_choice_json() {
-        let msg = ClientMessage::choice(2);
-        let json = msg.to_json().unwrap();
-        println!("JSON: {}", json);
-        let decoded = ClientMessage::from_json(&json).unwrap();
-        match decoded {
-            ClientMessage::Choice { index } => {
-                assert_eq!(index, 2);
-            }
-            _ => panic!("Wrong message type"),
-        }
-    }
-
-    #[test]
-    fn test_client_choice_msgpack() {
-        let msg = ClientMessage::choice(2);
-        let bytes = msg.to_msgpack().unwrap();
-        let decoded = ClientMessage::from_msgpack(&bytes).unwrap();
-        match decoded {
-            ClientMessage::Choice { index } => {
-                assert_eq!(index, 2);
-            }
-            _ => panic!("Wrong message type"),
-        }
-    }
-
-    #[test]
     fn test_client_input_msgpack() {
         let msg = ClientMessage::input("Hello, world!");
         let bytes = msg.to_msgpack().unwrap();
@@ -503,51 +387,12 @@ mod tests {
     }
 
     #[test]
-    fn test_server_get_input_msgpack() {
-        let msg = ServerMessage::get_input("请说话");
-        let bytes = msg.to_msgpack().unwrap();
-        let decoded = ServerMessage::from_msgpack(&bytes).unwrap();
-        match decoded {
-            ServerMessage::GetInput(data) => {
-                assert_eq!(data.prompt, "请说话");
-            }
-            _ => panic!("Wrong message type"),
-        }
-    }
-
-    #[test]
-    fn test_server_choices_msgpack() {
-        let msg = ServerMessage::choices(
-            "请选择",
-            vec![
-                "选项A".to_string(),
-                "选项B".to_string(),
-                "选项C".to_string(),
-            ],
-            false,
-            false,
-        );
-        let bytes = msg.to_msgpack().unwrap();
-        let decoded = ServerMessage::from_msgpack(&bytes).unwrap();
-        match decoded {
-            ServerMessage::Choices(data) => {
-                assert_eq!(data.title, "请选择");
-                assert_eq!(data.options.len(), 3);
-                assert_eq!(data.options[0], "选项A");
-                assert_eq!(data.options[1], "选项B");
-                assert_eq!(data.options[2], "选项C");
-            }
-            _ => panic!("Wrong message type"),
-        }
-    }
-
-    #[test]
     fn test_server_status_msgpack() {
-        let msg = ServerMessage::status("Connected");
+        let msg = ServerMessage::title("Connected");
         let bytes = msg.to_msgpack().unwrap();
         let decoded = ServerMessage::from_msgpack(&bytes).unwrap();
         match decoded {
-            ServerMessage::Status(text) => {
+            ServerMessage::Title(text) => {
                 assert_eq!(text, "Connected");
             }
             _ => panic!("Wrong message type"),
@@ -625,28 +470,13 @@ mod tests {
     }
 
     #[test]
-    fn test_server_choices_json() {
-        let msg = ServerMessage::choices("请选择", vec!["A".into(), "B".into()], false, false);
-        let json = msg.to_json().unwrap();
-        println!("JSON: {}", json);
-        let decoded = ServerMessage::from_json(&json).unwrap();
-        match decoded {
-            ServerMessage::Choices(data) => {
-                assert_eq!(data.title, "请选择");
-                assert_eq!(data.options, vec!["A", "B"]);
-            }
-            _ => panic!("Wrong message type"),
-        }
-    }
-
-    #[test]
     fn test_server_status_json() {
-        let msg = ServerMessage::status("Ready");
+        let msg = ServerMessage::title("Ready");
         let json = msg.to_json().unwrap();
         println!("JSON: {}", json);
         let decoded = ServerMessage::from_json(&json).unwrap();
         match decoded {
-            ServerMessage::Status(text) => {
+            ServerMessage::Title(text) => {
                 assert_eq!(text, "Ready");
             }
             _ => panic!("Wrong message type"),

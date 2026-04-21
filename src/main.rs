@@ -14,9 +14,10 @@ mod util;
 mod ws;
 
 mod terminal;
-mod types;
 
 mod ui;
+
+pub mod screenshot;
 
 use config::{Args, AsrConfig};
 
@@ -132,7 +133,6 @@ async fn main() {
     let (tx, rx) = tokio::sync::broadcast::channel(100);
     drop(rx);
 
-    let (pty_output_tx, pty_output_rx) = tokio::sync::mpsc::channel(100);
     let (ui_tx, ui_rx) = tokio::sync::mpsc::channel(100);
 
     let asr_config = args.asr_config();
@@ -143,10 +143,13 @@ async fn main() {
 
     let (mut asr_interface, web_vosk_tx) = ws::ASRInterface::from_config(asr_config);
 
+    let (screenshot_tx, screenshot_rx) = tokio::sync::mpsc::channel(4);
+
     let state = ws::AppState {
         tx: tx.clone(),
         cli_tx,
         web_vosk_tx,
+        screenshot_tx: screenshot_tx.clone(),
     };
 
     let listener = tokio::net::TcpListener::bind(&args.bind_addr)
@@ -155,73 +158,14 @@ async fn main() {
 
     let listen_port = listener.local_addr().unwrap().port();
 
-    tokio::spawn(async move {
-        let command = args.command;
-        let mut cli_rx = cli_rx;
-        let mut current_dir: Option<std::path::PathBuf> = None;
-        let mut ui_rx = ui_rx;
-
-        loop {
-            let r = ws::run_command(
-                command.clone(),
-                &mut asr_interface,
-                cli_rx,
-                ui_rx,
-                tx.clone(),
-                pty_output_tx.clone(),
-                current_dir,
-                listen_port,
-            )
-            .await;
-            match r {
-                Ok(ws::RunCommandResult::ChangeDir(new_path, returned_rx, returned_ui_rx)) => {
-                    log::info!("Changing directory to: {}", new_path);
-
-                    current_dir = Some(new_path.into());
-                    cli_rx = returned_rx;
-                    ui_rx = returned_ui_rx;
-                }
-                Ok(ws::RunCommandResult::Done) => {
-                    log::info!("Command execution finished");
-                    break;
-                }
-                Err(e) => {
-                    log::error!("Error in command execution: {}", e);
-                    break;
-                }
-            }
-        }
-    });
-
-    let server_url = if let Ok(addr) = listener.local_addr() {
-        let port = addr.port();
-        let addr_ip = addr.ip();
-        if addr_ip.is_loopback() {
-            Some(format!(
-                "http://localhost:{}        Warning: Server only bind on loopback dev. ",
-                port
-            ))
-        } else {
-            Some(format!("http://{}:{}\n", addr.ip(), port))
-        }
-    } else {
-        None
-    }
-    .unwrap_or("Warning: Failed to get a valid server URL\n".to_string());
-
-    let mut ui_app = ui::App::new("Vibetty".to_string(), "Footer".to_string(), pty_output_rx);
-    let r = tokio::task::spawn_blocking(move || {
-        if let Err(e) = ui_app.run(ui_tx, server_url) {
-            log::error!("UI error: {}", e);
-        }
-    });
-
+    // Spawn HTTP server
     let app = Router::new()
         .route("/", get(static_page::index_handler))
         .route("/app.js", get(static_page::app_js_handler))
         .route("/setup", get(static_page::setup_handler))
         .route("/vosk", get(static_page::vosk_handler))
         .route("/ws", get(ws::ws_handler))
+        .route("/screenshot.jpeg", get(ws::screenshot_handler))
         .route("/api/change-dir", post(static_page::change_dir_handler))
         .route("/vosk_ws", get(ws::web_vosk_ws_handler))
         .nest_service(
@@ -233,19 +177,73 @@ async fn main() {
     log::info!("WebSocket server listening on ws://{}/ws", args.bind_addr);
     log::info!("HTTP server listening on http://{}", args.bind_addr);
 
-    let serve = axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    );
+    tokio::spawn(async move {
+        let serve = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        );
+        if let Err(e) = serve.await {
+            log::error!("Server error: {}", e);
+        }
+    });
 
-    tokio::select! {
-        res = serve => {
-            if let Err(e) = res {
-                log::error!("Server error: {}", e);
+    // Init TUI
+    let mut tui = ui::init_terminal().expect("Failed to initialize terminal");
+    ui::spawn_event_loop(ui_tx);
+
+    let server_url = if let Ok(addr) = std::net::TcpListener::bind(&args.bind_addr) {
+        let addr = addr.local_addr().unwrap();
+        if addr.ip().is_loopback() {
+            format!(
+                "http://localhost:{}        Warning: Server only bind on loopback dev. ",
+                listen_port
+            )
+        } else {
+            format!("http://{}:{}", addr.ip(), listen_port)
+        }
+    } else {
+        format!("http://localhost:{}", listen_port)
+    };
+
+    let mut ui_title = String::new();
+    let mut current_dir: Option<std::path::PathBuf> = None;
+    let mut cli_rx = cli_rx;
+    let mut ui_rx = ui_rx;
+    let mut screenshot_rx = screenshot_rx;
+
+    let command = args.command;
+    loop {
+        let r = ws::run_command(
+            command.clone(),
+            &mut asr_interface,
+            cli_rx,
+            &mut ui_rx,
+            tx.clone(),
+            current_dir,
+            listen_port,
+            screenshot_rx,
+            &mut tui,
+            &mut ui_title,
+            &server_url,
+        )
+        .await;
+        match r {
+            Ok(ws::RunCommandResult::ChangeDir(new_path, returned_rx, returned_screenshot_rx)) => {
+                log::info!("Changing directory to: {}", new_path);
+                current_dir = Some(new_path.into());
+                cli_rx = returned_rx;
+                screenshot_rx = returned_screenshot_rx;
+            }
+            Ok(ws::RunCommandResult::Done) => {
+                log::info!("Command execution finished");
+                break;
+            }
+            Err(e) => {
+                log::error!("Error in command execution: {}", e);
+                break;
             }
         }
-        _ = r => {
-            log::info!("UI thread finished");
-        }
     }
+
+    ui::cleanup_terminal(&mut tui).ok();
 }
