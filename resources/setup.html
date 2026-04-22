@@ -38,7 +38,7 @@
 
                     <div class="card bg-base-100 border border-base-300">
                         <div class="card-body">
-                            <h3 class="card-title text-lg" id="ssidTitle">WiFi (MUST be 2.4GHz)</h3>
+                            <h3 class="card-title text-lg" id="wifiTitle">WiFi (MUST be 2.4GHz)</h3>
                             <label class="form-control">
                                 <div class="label">
                                     <span class="label-text">Network Name</span>
@@ -92,7 +92,8 @@
                                         <label class="label cursor-pointer gap-2">
                                             <input type="radio" name="micMode" value="1" id="micModeToggle"
                                                 class="radio radio-primary radio-xs" />
-                                            <span class="label-text tooltip" data-tip="Press to toggle on/off">Toggle</span>
+                                            <span class="label-text tooltip"
+                                                data-tip="Press to toggle on/off">Toggle</span>
                                         </label>
                                     </div>
                                 </label>
@@ -179,8 +180,7 @@
         const ssidInput = document.getElementById('ssidInput');
         const passInput = document.getElementById('passInput');
         const serverUrlInput = document.getElementById('serverUrlInput');
-        const ssidTitle = document.getElementById('ssidTitle');
-        const passTitle = document.getElementById('passTitle');
+        const wifiTitle = document.getElementById('wifiTitle');
         const urlTitle = document.getElementById('urlTitle');
         const backgroundImage = document.getElementById('backgroundImage');
         const bgPreview = document.getElementById('bgPreview');
@@ -205,7 +205,7 @@
         // Mark field as modified
         function markFieldAsModified(fieldName, titleElement) {
             modifiedFields[fieldName] = true;
-            if (!titleElement.textContent.endsWith(' *')) {
+            if (titleElement && !titleElement.textContent.endsWith(' *')) {
                 titleElement.textContent += ' *';
             }
             updateSaveButtonState();
@@ -428,8 +428,8 @@
                 await readMicMode();
 
                 // Clear all modification marks
-                clearFieldModification('ssid', ssidTitle);
-                clearFieldModification('pass', passTitle);
+                clearFieldModification('ssid', wifiTitle);
+                clearFieldModification('pass', wifiTitle);
                 clearFieldModification('url', urlTitle);
 
                 showNotification('Success', 'All configuration loaded');
@@ -467,13 +467,13 @@
                     // If there are modifications, only send modified fields
                     if (modifiedFields.ssid) {
                         await writeCharacteristic(SSID_ID, ssidInput.value);
-                        clearFieldModification('ssid', ssidTitle);
+                        clearFieldModification('ssid', wifiTitle);
                         savedCount++;
                     }
 
                     if (modifiedFields.pass) {
                         await writeCharacteristic(PASS_ID, passInput.value);
-                        clearFieldModification('pass', passTitle);
+                        clearFieldModification('pass', wifiTitle);
                         savedCount++;
                     }
 
@@ -676,11 +676,11 @@
 
         // Listen for input changes
         ssidInput.addEventListener('input', () => {
-            markFieldAsModified('ssid', ssidTitle);
+            markFieldAsModified('ssid', wifiTitle);
         });
 
         passInput.addEventListener('input', () => {
-            markFieldAsModified('pass', passTitle);
+            markFieldAsModified('pass', wifiTitle);
         });
 
         serverUrlInput.addEventListener('input', () => {
@@ -740,12 +740,12 @@
         const passParam = urlParams.get('pass');
         if (ssidParam) {
             ssidInput.value = ssidParam;
-            markFieldAsModified('ssid', ssidTitle);
+            markFieldAsModified('ssid', wifiTitle);
             skipAutoLoad = true;
         }
         if (passParam) {
             passInput.value = passParam;
-            markFieldAsModified('pass', passTitle);
+            markFieldAsModified('pass', wifiTitle);
             skipAutoLoad = true;
         }
 
