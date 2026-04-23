@@ -145,12 +145,14 @@ async fn main() {
 
     let (screenshot_tx, screenshot_rx) = tokio::sync::mpsc::channel(4);
 
+    let image_format = args.image_format();
+
     let state = ws::AppState {
         tx: tx.clone(),
         cli_tx,
         web_vosk_tx,
         screenshot_tx: screenshot_tx.clone(),
-        image_format: args.image_format(),
+        image_format,
     };
 
     let listener = tokio::net::TcpListener::bind(&args.bind_addr)
@@ -226,7 +228,7 @@ async fn main() {
             &mut tui,
             &mut ui_title,
             &server_url,
-            state.image_format,
+            image_format,
         )
         .await;
         match r {

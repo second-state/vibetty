@@ -44,3 +44,4 @@ vt100 = "0.16"
 
 # Screenshot / Image rendering
 vibetty-screenshot = { git = "https://github.com/second-state/vibetty-screenshot", tag = "v0.1.0" }
+image = "0.25"
