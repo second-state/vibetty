@@ -39,9 +39,20 @@ pub struct Args {
     /// Command to execute on PTY start (e.g., -- bash -l)
     #[arg(last = true)]
     pub command: Vec<String>,
+
+    /// Image format for screen rendering (png or jpeg)
+    #[arg(short = 'f', long, default_value = "jpeg", value_name = "FORMAT")]
+    pub image_format: String,
 }
 
 impl Args {
+    pub fn image_format(&self) -> crate::protocol::ImageFormat {
+        match self.image_format.to_lowercase().as_str() {
+            "jpeg" | "jpg" => crate::protocol::ImageFormat::Jpeg,
+            _ => crate::protocol::ImageFormat::Png,
+        }
+    }
+
     pub fn asr_config(&self) -> AsrConfig {
         // 如果指定了配置文件，从文件读取
         if let Some(path) = &self.asr_config_path {

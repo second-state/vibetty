@@ -66,6 +66,7 @@ pub struct AppState {
     pub cli_tx: ClientTx,
     pub web_vosk_tx: Option<WebVoskTx>,
     pub screenshot_tx: ScreenshotTx,
+    pub image_format: crate::protocol::ImageFormat,
 }
 
 fn t2s<S: AsRef<str>>(s: S) -> String {
@@ -178,6 +179,7 @@ pub async fn run_command(
     tui: &mut crate::ui::TuiTerminal,
     ui_title: &mut String,
     ui_footer: &str,
+    image_format: crate::protocol::ImageFormat,
 ) -> anyhow::Result<RunCommandResult> {
     let dir_path = current_dir
         .as_ref()
@@ -275,7 +277,7 @@ pub async fn run_command(
                     &screen,
                     None,
                     &mut window_scrollback,
-                    crate::protocol::ImageFormat::Jpeg,
+                    image_format,
                 );
 
                 let jpeg = match result {
@@ -570,7 +572,7 @@ async fn handle_client_message(
                     screen,
                     Some((width, height)),
                     window_h_offset,
-                    crate::protocol::ImageFormat::Png,
+                    state.image_format,
                 )
                 .await?;
             } else {
@@ -593,7 +595,7 @@ async fn handle_client_message(
                     screen,
                     Some((width, height)),
                     window_h_offset,
-                    crate::protocol::ImageFormat::Png,
+                    state.image_format,
                 )
                 .await?;
             } else {
@@ -663,7 +665,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, params: WsParams)
                             },
                             ServerMessage::Screen(screen_) => {
                                 screen = Some(screen_.clone());
-                                if let Err(e) = send_screen_to_client(&state, &mut socket, screen_, Some(window_size), &mut window_h_offset, crate::protocol::ImageFormat::Png).await {
+                                if let Err(e) = send_screen_to_client(&state, &mut socket, screen_, Some(window_size), &mut window_h_offset, state.image_format).await {
                                     log::error!("Failed to send screen to client: {}", e);
                                 }
                                 continue;
