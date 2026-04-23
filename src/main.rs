@@ -17,7 +17,7 @@ mod terminal;
 
 mod ui;
 
-pub mod screenshot;
+pub use vibetty_screenshot as screenshot;
 
 use config::{Args, AsrConfig};
 
