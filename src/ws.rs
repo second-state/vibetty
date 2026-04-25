@@ -383,8 +383,14 @@ pub async fn run_command(
             }
             TerminalEvent::Input(ClientMessage::Sync) => {
                 log::info!("Received Sync message from client, sending screen");
-                let screen = Arc::new(vt_parser.screen().clone());
-                send_screen(&tx, screen);
+                let (rows, cols) = vt_parser.screen().size();
+                if cols > 35 {
+                    vt_parser.screen_mut().set_size(rows, 35);
+                    let _ = terminal.resize(rows, 35);
+                } else {
+                    let screen = Arc::new(vt_parser.screen().clone());
+                    send_screen(&tx, screen);
+                }
             }
             TerminalEvent::Input(ClientMessage::PtyInput(input)) => {
                 log::info!(
