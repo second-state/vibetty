@@ -19,7 +19,7 @@ Vibetty supports two speech recognition modes:
 
 #### Option 1: Whisper API (Server-side)
 
-Create a `.env` file and configure the Whisper API (Groq recommended):
+Create a `.env` file and configure the Whisper API (Groq recommended). Alternatively, you can set these environment variables directly in your shell configuration file (e.g., `~/.bashrc` or `~/.zshrc`):
 
 ```bash
 ASR_API_KEY=your_api_key_here
@@ -31,22 +31,90 @@ ASR_PROMPT=
 
 Then start the service:
 
-```bash
-# Run directly with cargo
-cargo run -- -- claude
+**Option A: Download pre-built binary**
 
-# Or build and run
+Download the latest release from the [releases page](https://github.com/second-state/vibetty/releases):
+
+```bash
+# After downloading
+./vibetty -- claude
+```
+
+**Option B: Build from source**
+
+```bash
+# Build the release binary
 cargo build --release
 ./target/release/vibetty -- claude
+```
+
+**Tip:** To run `vibetty` from any directory, place the binary in a directory on your `PATH`. If it exists, we recommend `~/.cargo/bin`:
+
+
+<details>
+<summary>What is PATH?</summary>
+
+`PATH` is an environment variable that tells your shell which directories to search for executable programs. When you type a command like `ls` or `cargo`, the shell looks through each directory in `PATH` (in order) until it finds a matching executable.
+
+For example, if your `PATH` is:
+
+```bash
+/usr/local/bin:/usr/bin:/bin:/home/user/.cargo/bin
+```
+
+When you run `vibetty`, the shell searches:
+1. `/usr/local/bin/vibetty` (not found)
+2. `/usr/bin/vibetty` (not found)
+3. `/bin/vibetty` (not found)
+4. `/home/user/.cargo/bin/vibetty` (found!) ← executes this
+
+To check your current `PATH`:
+
+```bash
+echo $PATH
+```
+
+To see if a directory is on your `PATH`:
+
+```bash
+echo $PATH | grep -q "$HOME/.cargo/bin" && echo "Yes" || echo "No"
+```
+</details>
+
+
+```bash
+# For pre-built binary
+mv vibetty ~/.cargo/bin/
+
+# Or for self-compiled binary
+mv target/release/vibetty ~/.cargo/bin/
+```
+
+
+```bash
+# For pre-built binary
+mv vibetty ~/.cargo/bin/
+
+# Or for self-compiled binary
+mv target/release/vibetty ~/.cargo/bin/
 ```
 
 #### Option 2: WebVosk (Browser-side)
 
 Speech recognition runs entirely in the browser using Vosk models. No API key required.
 
+**Option A: Download pre-built binary**
+
 ```bash
-# Set ASR platform to WebVosk
-ASR_PLATFORM=web_vosk cargo run -- -- claude
+# Set ASR platform and run
+ASR_PLATFORM=web_vosk ./vibetty -- claude
+```
+
+**Option B: Build from source**
+
+```bash
+# Set ASR platform and run
+ASR_PLATFORM=web_vosk ./vibetty -- -- claude
 ```
 
 Then visit the WebVosk interface at: http://localhost:3000/vosk
@@ -55,7 +123,7 @@ Then visit the WebVosk interface at: http://localhost:3000/vosk
 
 For more options, use `--help`:
 ```bash
-cargo run -- --help
+./vibetty --help
 ```
 
 Visit: http://localhost:3000 after starting the service.
