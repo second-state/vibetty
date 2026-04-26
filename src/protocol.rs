@@ -144,7 +144,7 @@ pub struct NotificationData {
 // ========== 辅助类型 ==========
 
 /// 图片格式
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ImageFormat {
     Png,

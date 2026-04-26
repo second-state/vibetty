@@ -7,6 +7,7 @@ use axum::{
     },
     response::IntoResponse,
 };
+use image::ImageEncoder;
 use tokio::sync::{broadcast, mpsc};
 use vt100::Callbacks;
 
@@ -65,6 +66,7 @@ pub struct AppState {
     pub cli_tx: ClientTx,
     pub web_vosk_tx: Option<WebVoskTx>,
     pub screenshot_tx: ScreenshotTx,
+    pub image_format: crate::protocol::ImageFormat,
 }
 
 fn t2s<S: AsRef<str>>(s: S) -> String {
@@ -152,19 +154,6 @@ impl ASRInterface {
 }
 
 fn send_screen(tx: &ServerTx, screen: Arc<vt100::Screen>) {
-    // if let Ok(jpeg) = render_screen_to_jpeg(&screen) {
-    //     let chunk_size = IMAGE_CHUNK_SIZE;
-    //     let total_chunks = jpeg.len().div_ceil(chunk_size);
-    //     for (i, chunk) in jpeg.chunks(chunk_size).enumerate() {
-    //         let is_last = i == total_chunks - 1;
-    //         let _ = tx.send(ServerMessage::screen_image_chunk(
-    //             crate::protocol::ImageFormat::Jpeg,
-    //             is_last,
-    //             chunk.to_vec(),
-    //         ));
-    //     }
-    // }
-
     let _ = tx.send(ServerMessage::Screen(screen));
 }
 
@@ -190,6 +179,7 @@ pub async fn run_command(
     tui: &mut crate::ui::TuiTerminal,
     ui_title: &mut String,
     ui_footer: &str,
+    image_format: crate::protocol::ImageFormat,
 ) -> anyhow::Result<RunCommandResult> {
     let dir_path = current_dir
         .as_ref()
@@ -283,7 +273,8 @@ pub async fn run_command(
             TerminalEvent::ScreenGetter(getter) => {
                 let screen = vt_parser.screen().clone();
                 let mut window_scrollback = 0;
-                let result = render_screen_to_jpeg(&screen, None, &mut window_scrollback);
+                let result =
+                    render_screen_to_image(&screen, None, &mut window_scrollback, image_format);
 
                 let jpeg = match result {
                     Ok(data) => Ok(data),
@@ -518,33 +509,31 @@ async fn send_screen_to_client(
     screen: &vt100::Screen,
     window_size: Option<(u16, u16)>, // (width, height)
     window_h_offset: &mut u16,
+    format: crate::protocol::ImageFormat,
 ) -> anyhow::Result<()> {
-    let jpeg = render_screen_to_jpeg(screen, window_size, window_h_offset)?;
-    if jpeg.is_empty() {
+    let image_data = render_screen_to_image(screen, window_size, window_h_offset, format)?;
+    if image_data.is_empty() {
         state
             .cli_tx
             .send(ClientMessage::ScrollDown)
             .await
             .map_err(|e| {
                 anyhow::anyhow!(
-                    "Failed to send ScrollDown message to cli_tx after empty JPEG: {}",
+                    "Failed to send ScrollDown message to cli_tx after empty image: {}",
                     e
                 )
             })?;
     }
     log::debug!(
-        "Sending screen JPEG to client, size: {} KB",
-        jpeg.len() / 1024
+        "Sending screen image to client, format: {:?}, size: {} KB",
+        format,
+        image_data.len() / 1024
     );
     let chunk_size = IMAGE_CHUNK_SIZE;
-    let total_chunks = jpeg.len().div_ceil(chunk_size);
-    for (i, chunk) in jpeg.chunks(chunk_size).enumerate() {
+    let total_chunks = image_data.len().div_ceil(chunk_size);
+    for (i, chunk) in image_data.chunks(chunk_size).enumerate() {
         let is_last = i == total_chunks - 1;
-        let msg = ServerMessage::screen_image_chunk(
-            crate::protocol::ImageFormat::Jpeg,
-            is_last,
-            chunk.to_vec(),
-        );
+        let msg = ServerMessage::screen_image_chunk(format, is_last, chunk.to_vec());
         let data = msg.to_msgpack()?;
         socket.send(Message::Binary(data.into())).await?;
     }
@@ -585,6 +574,7 @@ async fn handle_client_message(
                     screen,
                     Some((width, height)),
                     window_h_offset,
+                    state.image_format,
                 )
                 .await?;
             } else {
@@ -607,6 +597,7 @@ async fn handle_client_message(
                     screen,
                     Some((width, height)),
                     window_h_offset,
+                    state.image_format,
                 )
                 .await?;
             } else {
@@ -676,7 +667,7 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, params: WsParams)
                             },
                             ServerMessage::Screen(screen_) => {
                                 screen = Some(screen_.clone());
-                                if let Err(e) = send_screen_to_client(&state, &mut socket, screen_, Some(window_size), &mut window_h_offset).await {
+                                if let Err(e) = send_screen_to_client(&state, &mut socket, screen_, Some(window_size), &mut window_h_offset, state.image_format).await {
                                     log::error!("Failed to send screen to client: {}", e);
                                 }
                                 continue;
@@ -873,11 +864,12 @@ async fn handle_web_vosk_socket(mut socket: WebSocket, vosk_tx: WebVoskTx) {
     }
 }
 
-/// Render a vt100 screen to JPEG bytes
-fn render_screen_to_jpeg(
+/// Render a vt100 screen to image bytes (JPEG or PNG)
+fn render_screen_to_image(
     screen: &vt100::Screen,
     window_size: Option<(u16, u16)>, // (width, height)
     window_h_offset: &mut u16,
+    format: crate::protocol::ImageFormat,
 ) -> anyhow::Result<Vec<u8>> {
     let config = crate::screenshot::ScreenshotConfig {
         show_decorations: false,
@@ -887,12 +879,12 @@ fn render_screen_to_jpeg(
     let image = crate::screenshot::capture_screen(screen, &config)
         .map_err(|e| anyhow::anyhow!("Failed to capture screen: {}", e))?;
 
-    // Convert RGBA to RGB for JPEG
-    let mut rgb_image = image::DynamicImage::ImageRgba8(image).to_rgb8();
+    let mut dyn_image = image::DynamicImage::ImageRgba8(image);
+    let is_png = matches!(format, crate::protocol::ImageFormat::Png);
 
     if let Some((width, height)) = window_size {
-        let orig_width = rgb_image.width();
-        let orig_height = rgb_image.height();
+        let orig_width = dyn_image.width();
+        let orig_height = dyn_image.height();
         log::debug!(
             "Original image size: {}x{}, requested window size: {}x{}",
             orig_width,
@@ -903,12 +895,12 @@ fn render_screen_to_jpeg(
         let scale = width as f32 / orig_width as f32;
         let new_height = (orig_height as f32 * scale).round() as u32;
 
-        rgb_image = image::imageops::resize(
-            &rgb_image,
+        dyn_image = image::DynamicImage::ImageRgba8(image::imageops::resize(
+            &dyn_image,
             width as u32,
             new_height,
             image::imageops::FilterType::Lanczos3,
-        );
+        ));
 
         // 根据垂直偏移截取
         let crop_height = height as u32;
@@ -927,14 +919,22 @@ fn render_screen_to_jpeg(
                 crop_height - new_height
             );
             let padding_top = crop_height - new_height;
-            let mut padded = image::RgbImage::new(width as u32, crop_height);
-            // 填充背景色（深色背景）
-            for pixel in padded.pixels_mut() {
-                *pixel = image::Rgb([30, 30, 30]);
+
+            if is_png {
+                let mut padded = image::RgbaImage::new(width as u32, crop_height);
+                for pixel in padded.pixels_mut() {
+                    *pixel = image::Rgba([30, 30, 30, 255]);
+                }
+                image::imageops::overlay(&mut padded, &dyn_image.to_rgba8(), 0, padding_top as i64);
+                dyn_image = image::DynamicImage::ImageRgba8(padded);
+            } else {
+                let mut padded = image::RgbImage::new(width as u32, crop_height);
+                for pixel in padded.pixels_mut() {
+                    *pixel = image::Rgb([30, 30, 30]);
+                }
+                image::imageops::overlay(&mut padded, &dyn_image.to_rgb8(), 0, padding_top as i64);
+                dyn_image = image::DynamicImage::ImageRgb8(padded);
             }
-            // 把原图放在底部
-            image::imageops::overlay(&mut padded, &rgb_image, 0, padding_top as i64);
-            rgb_image = padded;
         } else if y_offset + crop_height > new_height {
             // 偏移量过大，调整到对齐底部
             log::warn!(
@@ -947,24 +947,46 @@ fn render_screen_to_jpeg(
             return Ok(Vec::new());
         } else {
             // 正常截取
-            rgb_image =
-                image::imageops::crop(&mut rgb_image, 0, y_offset, width as u32, crop_height)
-                    .to_image();
+            dyn_image =
+                image::imageops::crop(&mut dyn_image, 0, y_offset, width as u32, crop_height)
+                    .to_image()
+                    .into();
         }
     }
 
-    let mut jpeg_buf = std::io::Cursor::new(Vec::new());
-    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_buf, 100);
-    encoder
-        .encode(
-            rgb_image.as_raw(),
-            rgb_image.width(),
-            rgb_image.height(),
-            image::ExtendedColorType::Rgb8,
-        )
-        .map_err(|e| anyhow::anyhow!("Failed to encode JPEG: {}", e))?;
+    // Encode based on format
+    let mut buf = std::io::Cursor::new(Vec::new());
+    match format {
+        crate::protocol::ImageFormat::Png => {
+            let encoder = image::codecs::png::PngEncoder::new(&mut buf);
+            encoder
+                .write_image(
+                    dyn_image.as_bytes(),
+                    dyn_image.width(),
+                    dyn_image.height(),
+                    image::ExtendedColorType::from(dyn_image.color()),
+                )
+                .map_err(|e| anyhow::anyhow!("Failed to encode PNG: {}", e))?;
+        }
+        crate::protocol::ImageFormat::Jpeg => {
+            // Convert to RGB for JPEG
+            let rgb_image = dyn_image.to_rgb8();
+            let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 100);
+            encoder
+                .encode(
+                    rgb_image.as_raw(),
+                    rgb_image.width(),
+                    rgb_image.height(),
+                    image::ExtendedColorType::Rgb8,
+                )
+                .map_err(|e| anyhow::anyhow!("Failed to encode JPEG: {}", e))?;
+        }
+        _ => {
+            return Err(anyhow::anyhow!("Unsupported image format: {:?}", format));
+        }
+    }
 
-    Ok(jpeg_buf.into_inner())
+    Ok(buf.into_inner())
 }
 
 /// HTTP handler for /screenshot.jpeg

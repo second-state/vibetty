@@ -4079,7 +4079,6 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 name = "vibetty"
 version = "0.3.0"
 dependencies = [
- "ab_glyph",
  "anyhow",
  "axum",
  "axum-extra",
@@ -4092,7 +4091,6 @@ dependencies = [
  "futures-util",
  "hanconv",
  "image",
- "imageproc",
  "log",
  "pty-process",
  "ratatui",
@@ -4102,14 +4100,26 @@ dependencies = [
  "serde",
  "serde_json",
  "strip-ansi-escapes",
- "thiserror 2.0.18",
- "tiny-skia",
  "tokio",
  "tower-http 0.5.2",
  "tui-term",
  "uuid",
+ "vibetty-screenshot",
  "vt100",
  "wav_io",
+]
+
+[[package]]
+name = "vibetty-screenshot"
+version = "0.2.0"
+source = "git+https://github.com/second-state/vibetty-screenshot?tag=v0.2.0#3f6a2e69da8db29253b9f619bd71b29865d563f3"
+dependencies = [
+ "ab_glyph",
+ "image",
+ "imageproc",
+ "thiserror 2.0.18",
+ "tiny-skia",
+ "vt100",
 ]
 
 [[package]]

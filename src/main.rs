@@ -17,7 +17,7 @@ mod terminal;
 
 mod ui;
 
-pub mod screenshot;
+pub use vibetty_screenshot as screenshot;
 
 use config::{Args, AsrConfig};
 
@@ -145,11 +145,14 @@ async fn main() {
 
     let (screenshot_tx, screenshot_rx) = tokio::sync::mpsc::channel(4);
 
+    let image_format = args.image_format();
+
     let state = ws::AppState {
         tx: tx.clone(),
         cli_tx,
         web_vosk_tx,
         screenshot_tx: screenshot_tx.clone(),
+        image_format,
     };
 
     let listener = tokio::net::TcpListener::bind(&args.bind_addr)
@@ -165,7 +168,7 @@ async fn main() {
         .route("/setup", get(static_page::setup_handler))
         .route("/vosk", get(static_page::vosk_handler))
         .route("/ws", get(ws::ws_handler))
-        .route("/screenshot.jpeg", get(ws::screenshot_handler))
+        .route("/screenshot", get(ws::screenshot_handler))
         .route("/api/change-dir", post(static_page::change_dir_handler))
         .route("/vosk_ws", get(ws::web_vosk_ws_handler))
         .nest_service(
@@ -225,6 +228,7 @@ async fn main() {
             &mut tui,
             &mut ui_title,
             &server_url,
+            image_format,
         )
         .await;
         match r {
