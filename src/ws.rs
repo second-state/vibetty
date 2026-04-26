@@ -273,12 +273,8 @@ pub async fn run_command(
             TerminalEvent::ScreenGetter(getter) => {
                 let screen = vt_parser.screen().clone();
                 let mut window_scrollback = 0;
-                let result = render_screen_to_image(
-                    &screen,
-                    None,
-                    &mut window_scrollback,
-                    image_format,
-                );
+                let result =
+                    render_screen_to_image(&screen, None, &mut window_scrollback, image_format);
 
                 let jpeg = match result {
                     Ok(data) => Ok(data),

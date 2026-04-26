@@ -4111,8 +4111,8 @@ dependencies = [
 
 [[package]]
 name = "vibetty-screenshot"
-version = "0.1.0"
-source = "git+https://github.com/second-state/vibetty-screenshot?tag=v0.1.0#260b7615774601f007ed80f0ea6eaf19bc2ba9f9"
+version = "0.2.0"
+source = "git+https://github.com/second-state/vibetty-screenshot?tag=v0.2.0#3f6a2e69da8db29253b9f619bd71b29865d563f3"
 dependencies = [
  "ab_glyph",
  "image",
