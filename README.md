@@ -158,6 +158,21 @@ curl -X POST http://localhost:3000/api/change-dir \
 
 **Note:** This endpoint only accepts requests from localhost for security reasons.
 
+## Environment Variables
+
+| Variable | Description | Default |
+|---|---|---|
+| `VIBECODE_ASR_PLATFORM` | ASR platform to use: `whisper` or `web_vosk` | `whisper` |
+| `VIBECODE_ASR_URL` | Whisper API endpoint URL | `https://api.openai.com/v1/audio/transcriptions` |
+| `VIBECODE_ASR_API_KEY` | Whisper API key (Groq recommended) | _(empty)_ |
+| `VIBECODE_ASR_MODEL` | Whisper model name | `whisper-1` |
+| `VIBECODE_ASR_LANG` | ASR language (e.g. `en`, `zh`) | _(empty, auto-detected by API)_ |
+| `VIBECODE_ASR_PROMPT` | Prompt passed to the Whisper API to guide transcription | _(empty)_ |
+| `VIBECODE_ASR_DEBUG_WAV` | Set to any value to save recorded audio as `debug_<session_id>.wav` for debugging | _(unset)_ |
+| `VIBECODE_EXIT_COMMAND` | Custom voice exit command. When ASR result matches this value (case-insensitive), it is replaced with `/exit` | _(unset)_ |
+
+> **Note:** Legacy environment variables (e.g. `ASR_URL`, `ASR_API_KEY`, `VIBETTY_EXIT_COMMAND`, etc.) have been renamed with the `VIBECODE_` prefix. Using old names will trigger a warning but still work. Please migrate to the new names.
+
 ## Platform Support
 
 Currently supports **Linux** and **macOS**. Windows is not supported because the [`pty-process`](https://crates.io/crates/pty-process) library (used for pseudo-terminal handling) is Unix-only and does not support Windows ConPTY.
