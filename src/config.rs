@@ -67,7 +67,9 @@ impl Args {
             );
         }
 
-        if std::env::var("VIBECODE_ASR_PLATFORM").unwrap_or_else(|_| "whisper".to_string()) == "web_vosk" {
+        if std::env::var("VIBECODE_ASR_PLATFORM").unwrap_or_else(|_| "whisper".to_string())
+            == "web_vosk"
+        {
             return AsrConfig::WebVosk;
         }
 
