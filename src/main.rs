@@ -4,6 +4,7 @@ use axum::{
 };
 use clap::Parser;
 use std::env;
+use std::io::IsTerminal;
 use std::net::SocketAddr;
 use tower_http::services::ServeDir;
 
@@ -115,10 +116,52 @@ fn logger_init() -> anyhow::Result<flexi_logger::LoggerHandle> {
     Ok(logger)
 }
 
+fn check_deprecated_env_vars() {
+    let deprecated = [
+        ("ASR_PLATFORM", "VIBECODE_ASR_PLATFORM"),
+        ("ASR_URL", "VIBECODE_ASR_URL"),
+        ("ASR_API_KEY", "VIBECODE_ASR_API_KEY"),
+        ("ASR_LANG", "VIBECODE_ASR_LANG"),
+        ("ASR_MODEL", "VIBECODE_ASR_MODEL"),
+        ("ASR_PROMPT", "VIBECODE_ASR_PROMPT"),
+        ("ASR_DEBUG_WAV", "VIBECODE_ASR_DEBUG_WAV"),
+        ("VIBETTY_EXIT_COMMAND", "VIBECODE_EXIT_COMMAND"),
+    ];
+
+    let found: Vec<_> = deprecated
+        .iter()
+        .filter(|(old, _)| std::env::var(old).is_ok())
+        .collect();
+
+    if found.is_empty() {
+        return;
+    }
+
+    let use_color = std::io::stderr().is_terminal()
+        && std::env::var("NO_COLOR").is_err()
+        && std::env::var("TERM").as_deref() != Ok("dumb");
+    let yellow = if use_color { "\x1b[33m" } else { "" };
+    let bold = if use_color { "\x1b[1m" } else { "" };
+    let reset = if use_color { "\x1b[0m" } else { "" };
+
+    eprintln!("{yellow}=========================================={reset}");
+    eprintln!("{bold}{yellow}WARNING: Deprecated environment variables detected!{reset}");
+    eprintln!("{yellow}The following env vars have been renamed:{reset}");
+    for (old, new) in &found {
+        eprintln!("{yellow}  {} -> {}{reset}", old, new);
+    }
+    eprintln!("{yellow}Please update your configuration.{reset}");
+    eprintln!("{yellow}Continuing in 3 seconds...{reset}");
+    eprintln!("{yellow}=========================================={reset}");
+    std::thread::sleep(std::time::Duration::from_secs(3));
+}
+
 #[tokio::main]
 async fn main() {
     dotenv::dotenv().ok();
     let _logger = logger_init().expect("Failed to initialize logger");
+
+    check_deprecated_env_vars();
 
     let args = Args::parse();
 

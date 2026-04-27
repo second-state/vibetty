@@ -22,11 +22,11 @@ Vibetty supports two speech recognition modes:
 Create a `.env` file and configure the Whisper API (Groq recommended). Alternatively, you can set these environment variables directly in your shell configuration file (e.g., `~/.bashrc` or `~/.zshrc`):
 
 ```bash
-ASR_API_KEY=your_api_key_here
-ASR_URL=https://api.groq.com/openai/v1/audio/transcriptions
-ASR_MODEL=whisper-large-v3
-ASR_LANG=en
-ASR_PROMPT=
+VIBECODE_ASR_API_KEY=your_api_key_here
+VIBECODE_ASR_URL=https://api.groq.com/openai/v1/audio/transcriptions
+VIBECODE_ASR_MODEL=whisper-large-v3
+VIBECODE_ASR_LANG=en
+VIBECODE_ASR_PROMPT=
 ```
 
 Then start the service:
@@ -107,14 +107,14 @@ Speech recognition runs entirely in the browser using Vosk models. No API key re
 
 ```bash
 # Set ASR platform and run
-ASR_PLATFORM=web_vosk ./vibetty -- claude
+VIBECODE_ASR_PLATFORM=web_vosk ./vibetty -- claude
 ```
 
 **Option B: Build from source**
 
 ```bash
 # Set ASR platform and run
-ASR_PLATFORM=web_vosk ./vibetty -- -- claude
+VIBECODE_ASR_PLATFORM=web_vosk ./vibetty -- -- claude
 ```
 
 Then visit the WebVosk interface at: http://localhost:3000/vosk

@@ -422,7 +422,7 @@ pub async fn run_command(
                     bits_per_sample: 16,
                 };
                 let wav_data = crate::util::pcm_to_wav(&wav_buffer, config);
-                if std::env::var("ASR_DEBUG_WAV").is_ok() {
+                if std::env::var("VIBECODE_ASR_DEBUG_WAV").is_ok() {
                     let debug_path = format!("debug_{}.wav", terminal.session_id());
                     if let Err(e) = std::fs::write(&debug_path, &wav_data) {
                         log::error!("Failed to write debug WAV file: {}", e);
@@ -443,8 +443,8 @@ pub async fn run_command(
                     }
                 };
 
-                // 如果 ASR 结果等于环境变量 VIBETTY_EXIT_COMMAND 的值，替换为 "/exit"（大小写不敏感）
-                if let Ok(exit_trigger) = std::env::var("VIBETTY_EXIT_COMMAND")
+                // 如果 ASR 结果等于环境变量 VIBECODE_EXIT_COMMAND 的值，替换为 "/exit"（大小写不敏感）
+                if let Ok(exit_trigger) = std::env::var("VIBECODE_EXIT_COMMAND")
                     && asr_text.trim().to_lowercase() == exit_trigger.trim().to_lowercase()
                 {
                     asr_text = "/exit".to_string();

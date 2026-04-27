@@ -67,18 +67,18 @@ impl Args {
             );
         }
 
-        if std::env::var("ASR_PLATFORM").unwrap_or_else(|_| "whisper".to_string()) == "web_vosk" {
+        if std::env::var("VIBECODE_ASR_PLATFORM").unwrap_or_else(|_| "whisper".to_string()) == "web_vosk" {
             return AsrConfig::WebVosk;
         }
 
         // 否则从环境变量读取
         AsrConfig::Whisper(WhisperASRConfig {
-            url: std::env::var("ASR_URL")
+            url: std::env::var("VIBECODE_ASR_URL")
                 .unwrap_or_else(|_| "https://api.openai.com/v1/audio/transcriptions".to_string()),
-            api_key: std::env::var("ASR_API_KEY").unwrap_or_default(),
-            lang: std::env::var("ASR_LANG").unwrap_or_else(|_| "".to_string()),
-            model: std::env::var("ASR_MODEL").unwrap_or_else(|_| "whisper-1".to_string()),
-            prompt: std::env::var("ASR_PROMPT").unwrap_or_default(),
+            api_key: std::env::var("VIBECODE_ASR_API_KEY").unwrap_or_default(),
+            lang: std::env::var("VIBECODE_ASR_LANG").unwrap_or_else(|_| "".to_string()),
+            model: std::env::var("VIBECODE_ASR_MODEL").unwrap_or_else(|_| "whisper-1".to_string()),
+            prompt: std::env::var("VIBECODE_ASR_PROMPT").unwrap_or_default(),
         })
     }
 }

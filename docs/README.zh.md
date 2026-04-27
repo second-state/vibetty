@@ -22,11 +22,11 @@ Vibetty 支持两种语音识别模式：
 创建 `.env` 文件并配置 Whisper API（推荐使用 Groq）：
 
 ```bash
-ASR_API_KEY=your_api_key_here
-ASR_URL=https://api.groq.com/openai/v1/audio/transcriptions
-ASR_MODEL=whisper-large-v3
-ASR_LANG=zh
-ASR_PROMPT=
+VIBECODE_ASR_API_KEY=your_api_key_here
+VIBECODE_ASR_URL=https://api.groq.com/openai/v1/audio/transcriptions
+VIBECODE_ASR_MODEL=whisper-large-v3
+VIBECODE_ASR_LANG=zh
+VIBECODE_ASR_PROMPT=
 ```
 
 然后启动服务：
@@ -46,7 +46,7 @@ cargo build --release
 
 ```bash
 # 设置 ASR 平台为 WebVosk
-ASR_PLATFORM=web_vosk cargo run -- -- claude
+VIBECODE_ASR_PLATFORM=web_vosk cargo run -- -- claude
 ```
 
 然后访问 WebVosk 界面：http://localhost:3000/vosk
