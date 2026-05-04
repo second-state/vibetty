@@ -35,6 +35,7 @@ impl Platform {
 }
 
 #[derive(Clone, Copy, PartialEq)]
+#[allow(clippy::upper_case_acronyms)]
 enum Provider {
     OpenAI,
     ByteFuture,
