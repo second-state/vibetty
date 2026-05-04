@@ -26,7 +26,7 @@ pub enum AsrConfig {
 
 #[derive(Parser, Debug)]
 #[command(name = "vibetty")]
-#[command(about = "WebSocket terminal server", long_about = None)]
+#[command(about = "WebSocket terminal server", long_about = None, version)]
 pub struct Args {
     /// Listen address (e.g., "0.0.0.0:3000")
     #[arg(short, long, default_value = "0.0.0.0:3000")]
