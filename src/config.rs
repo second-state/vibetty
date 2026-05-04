@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WhisperASRConfig {
@@ -27,7 +27,11 @@ pub enum AsrConfig {
 #[derive(Parser, Debug)]
 #[command(name = "vibetty")]
 #[command(about = "WebSocket terminal server", long_about = None, version)]
-pub struct Args {
+#[command(args_conflicts_with_subcommands = true)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<Commands>,
+
     /// Listen address (e.g., "0.0.0.0:3000")
     #[arg(short, long, default_value = "0.0.0.0:3000")]
     pub bind_addr: String,
@@ -41,14 +45,41 @@ pub struct Args {
 
     /// Command to execute on PTY start (e.g., -- bash -l)
     #[arg(last = true)]
-    pub command: Vec<String>,
+    pub command_args: Vec<String>,
 
     /// Image format for screen rendering (png or jpeg)
     #[arg(short = 'f', long, default_value = "jpeg", value_name = "FORMAT")]
     pub image_format: String,
 }
 
-impl Args {
+#[derive(Subcommand, Debug)]
+pub enum Commands {
+    /// Setup ASR configuration via TUI
+    Setup,
+}
+
+impl Cli {
+    pub fn run_args(&self) -> RunArgs {
+        RunArgs {
+            bind_addr: self.bind_addr.clone(),
+            auto_submit: self.auto_submit,
+            asr_config_path: self.asr_config_path.clone(),
+            command: self.command_args.clone(),
+            image_format: self.image_format.clone(),
+        }
+    }
+}
+
+/// Separate struct for run-mode args, used by asr_config() logic.
+pub struct RunArgs {
+    pub bind_addr: String,
+    pub auto_submit: bool,
+    pub asr_config_path: Option<String>,
+    pub command: Vec<String>,
+    pub image_format: String,
+}
+
+impl RunArgs {
     pub fn image_format(&self) -> crate::protocol::ImageFormat {
         match self.image_format.to_lowercase().as_str() {
             "jpeg" | "jpg" => crate::protocol::ImageFormat::Jpeg,

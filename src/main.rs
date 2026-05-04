@@ -20,8 +20,9 @@ mod ui;
 
 pub use vibetty_screenshot as screenshot;
 
-use config::{Args, AsrConfig};
+use config::{AsrConfig, Cli, Commands};
 
+mod setup;
 mod static_page;
 
 fn check_vosk_models(asr_config: &AsrConfig) {
@@ -163,14 +164,28 @@ async fn main() {
 
     check_deprecated_env_vars();
 
-    let args = Args::parse();
+    let cli = Cli::parse();
+
+    match cli.command {
+        Some(Commands::Setup) => {
+            if let Err(e) = setup::run_setup() {
+                eprintln!("Setup error: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        None => {}
+    }
+
+    // Default: Run mode
+    let args = cli.run_args();
 
     if args.command.is_empty() {
         eprintln!("Error: No command specified. Use -- to separate options and command.");
         std::process::exit(1);
     }
 
-    log::info!("Starting Vibetty with command: {:?}", args);
+    log::info!("Starting Vibetty with command: {:?}", args.command);
 
     let (cli_tx, cli_rx) = tokio::sync::mpsc::channel(100);
     let (tx, rx) = tokio::sync::broadcast::channel(100);
