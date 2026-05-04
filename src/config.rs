@@ -60,7 +60,7 @@ impl Args {
         // 如果指定了配置文件，从文件读取
         if let Some(path) = &self.asr_config_path {
             if let Ok(content) = std::fs::read_to_string(path)
-                && let Ok(config) = serde_json::from_str::<AsrConfig>(&content)
+                && let Ok(config) = toml::from_str::<AsrConfig>(&content)
             {
                 return config;
             }
@@ -68,6 +68,19 @@ impl Args {
                 "Failed to parse ASR config from {}, falling back to env",
                 path
             );
+        } else if let Some(home) = dirs::home_dir() {
+            let default_config = home.join(".vibetty").join("config.toml");
+            if default_config.exists() {
+                if let Ok(content) = std::fs::read_to_string(&default_config)
+                    && let Ok(config) = toml::from_str::<AsrConfig>(&content)
+                {
+                    return config;
+                }
+                log::warn!(
+                    "Failed to parse ASR config from {}, falling back to env",
+                    default_config.display()
+                );
+            }
         }
 
         if std::env::var("VIBECODE_ASR_PLATFORM").unwrap_or_else(|_| "whisper".to_string())
