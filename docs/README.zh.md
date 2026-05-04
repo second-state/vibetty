@@ -17,7 +17,25 @@ WebSocket 终端服务器，支持语音输入和 Claude AI 智能交互。
 
 Vibetty 支持两种语音识别模式：
 
-#### 选项 1：Whisper API（服务器端）
+#### 交互式配置（推荐）
+
+运行配置向导来交互式配置 ASR：
+
+```bash
+vibetty setup
+```
+
+启动后会进入 TUI 界面，可以：
+1. 选择平台：**Whisper** 或 **WebVosk**
+2. 如果选择 Whisper，可以选择提供商预设：**OpenAI**、**ByteFuture**、**Groq**、**GLM** 或 **Custom**
+3. 填写 API Key 等配置项
+4. 配置保存到 `~/.vibetty/config.toml`
+
+#### 手动配置
+
+也可以通过环境变量手动配置 ASR。
+
+##### 选项 1：Whisper API（服务器端）
 
 创建 `.env` 文件并配置 Whisper API（推荐使用 Groq）：
 
@@ -40,7 +58,7 @@ cargo build --release
 ./target/release/vibetty -- claude
 ```
 
-#### 选项 2：WebVosk（浏览器端）
+##### 选项 2：WebVosk（浏览器端）
 
 语音识别完全在浏览器中使用 Vosk 模型运行，无需 API 密钥。
 
