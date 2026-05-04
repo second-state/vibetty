@@ -32,6 +32,9 @@ pub struct Args {
     #[arg(short, long, default_value = "0.0.0.0:3000")]
     pub bind_addr: String,
 
+    #[arg(short, long, default_value = "true")]
+    pub auto_submit: bool,
+
     /// ASR config file path (JSON format)
     #[arg(short = 'c', long)]
     pub asr_config_path: Option<String>,

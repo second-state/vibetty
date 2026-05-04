@@ -272,6 +272,7 @@ async fn main() {
             &mut ui_title,
             &server_url,
             image_format,
+            args.auto_submit,
         )
         .await;
         match r {

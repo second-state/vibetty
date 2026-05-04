@@ -180,6 +180,7 @@ pub async fn run_command(
     ui_title: &mut String,
     ui_footer: &str,
     image_format: crate::protocol::ImageFormat,
+    auto_submit: bool,
 ) -> anyhow::Result<RunCommandResult> {
     let dir_path = current_dir
         .as_ref()
@@ -394,7 +395,12 @@ pub async fn run_command(
             TerminalEvent::Input(ClientMessage::Input(text)) => {
                 log::info!("Sending text input to terminal: {:?}", text);
                 terminal.send_text(&text).await?;
-                vt_parser.screen_mut().set_scrollback(0);
+                if auto_submit {
+                    terminal.send_enter().await?;
+                    vt_parser.screen_mut().set_scrollback(3);
+                } else {
+                    vt_parser.screen_mut().set_scrollback(0);
+                }
             }
             TerminalEvent::Input(ClientMessage::ChangeDir(path)) => {
                 log::info!("Change directory requested: {}", path);
