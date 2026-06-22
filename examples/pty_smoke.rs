@@ -1,10 +1,14 @@
 //! Minimal portable-pty smoke test, isolated from vibetty's TUI/WS stack.
 //!
 //! Spawns a shell, waits for its banner, writes `echo hello-pty`, and prints
-//! everything read back. Run with:
-//!   cargo run --example pty_smoke
+//! everything read back. Crucially, it also responds to the ConPTY
+//! cursor-position-report request (`ESC[6n`) — Windows ConPTY sends this on
+//! startup and stalls until the host replies `ESC[row;colR`.
+//!
+//! Run with: cargo run --example pty_smoke
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::io::{Read, Write};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 fn main() {
@@ -27,8 +31,13 @@ fn main() {
     let mut child = pair.slave.spawn_command(builder).expect("spawn");
     drop(pair.slave);
 
-    // Reader thread: print every chunk we get back.
+    // Shared writer so the reader thread can answer terminal queries.
+    let writer = pair.master.take_writer().expect("writer");
+    let writer = Arc::new(Mutex::new(writer));
+
+    // Reader thread: print every chunk and answer ESC[6n (cursor position report).
     let mut reader = pair.master.try_clone_reader().expect("reader");
+    let writer_for_reader = writer.clone();
     let reader_handle = std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
         loop {
@@ -37,11 +46,17 @@ fn main() {
                     eprintln!("[smoke] reader: EOF");
                     break;
                 }
-                Ok(n) => eprintln!(
-                    "[smoke] reader: {} bytes: {:?}",
-                    n,
-                    String::from_utf8_lossy(&buf[..n])
-                ),
+                Ok(n) => {
+                    let s = String::from_utf8_lossy(&buf[..n]);
+                    eprintln!("[smoke] reader: {} bytes: {:?}", n, s);
+                    if s.contains("\u{1b}[6n") {
+                        if let Ok(mut w) = writer_for_reader.lock() {
+                            let _ = w.write_all(b"\x1b[1;1R");
+                            let _ = w.flush();
+                        }
+                        eprintln!("[smoke] replied to ESC[6n with ESC[1;1R");
+                    }
+                }
                 Err(e) => {
                     eprintln!("[smoke] reader: error {e}");
                     break;
@@ -60,11 +75,11 @@ fn main() {
         "echo hello-pty\n"
     };
     {
-        let mut writer = pair.master.take_writer().expect("writer");
-        writer.write_all(cmd_text.as_bytes()).expect("write");
-        writer.flush().expect("flush");
-        eprintln!("[smoke] wrote {:?}", cmd_text);
+        let mut w = writer.lock().unwrap();
+        w.write_all(cmd_text.as_bytes()).expect("write");
+        w.flush().expect("flush");
     }
+    eprintln!("[smoke] wrote {:?}", cmd_text);
 
     // Let the shell produce output.
     std::thread::sleep(Duration::from_secs(2));
