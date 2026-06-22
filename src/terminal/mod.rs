@@ -1,18 +1,28 @@
-use pty_process::{Command, Pty, Size};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    process::Child,
-};
+use portable_pty::{Child, MasterPty, PtySize};
+use tokio::sync::{mpsc, oneshot};
 
 pub mod pty;
 
-pub type PtyCommand = Command;
-pub type PtySize = Size;
+/// A write request handed off to the blocking writer thread: the bytes to
+/// write plus a one-shot channel used to acknowledge the result.
+pub(crate) type WriteMsg = (Vec<u8>, oneshot::Sender<std::io::Result<()>>);
 
+/// A terminal session backed by a cross-platform PTY.
+///
+/// `portable-pty` exposes blocking `std::io` handles rather than async ones,
+/// so the actual reads and writes happen on dedicated blocking threads and are
+/// bridged to async via tokio channels:
+///
+/// - a reader thread owns the PTY reader and pushes output chunks onto
+///   `read_rx`; `read()` returns them verbatim as owned `Vec<u8>`.
+/// - a writer thread owns the PTY writer and drains `write_rx`; `write_all()`
+///   hands it bytes plus a one-shot ack and awaits the result.
 pub struct EchokitChild {
     uuid: uuid::Uuid,
-    pty: Pty,
-    child: Child,
+    master: Box<dyn MasterPty + Send>,
+    child: Option<Box<dyn Child + Sync + Send>>,
+    read_rx: mpsc::Receiver<Vec<u8>>,
+    write_tx: mpsc::Sender<WriteMsg>,
 }
 
 #[allow(unused)]
@@ -22,8 +32,15 @@ impl EchokitChild {
     }
 
     pub async fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
-        self.pty.write_all(buf).await?;
-        self.pty.flush().await
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.write_tx
+            .send((buf.to_vec(), ack_tx))
+            .await
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::BrokenPipe))?;
+        match ack_rx.await {
+            Ok(res) => res,
+            Err(_) => Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
+        }
     }
 
     pub async fn send_key_iter<S: AsRef<[u8]>>(&mut self, keys: &[S]) -> std::io::Result<()> {
@@ -70,69 +87,87 @@ impl EchokitChild {
         self.write_all(b"\r").await
     }
 
-    pub async fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        self.pty.read(buffer).await
+    /// Pull the next chunk of PTY output off the channel.
+    ///
+    /// Returns the chunk verbatim (whatever the reader thread read in one go).
+    /// An empty `Vec` signals EOF / channel closed (the child exited or the
+    /// reader thread stopped). Because chunks are returned owned and whole,
+    /// there is no caller buffer to underfill — no partial-read buffering.
+    pub async fn read(&mut self) -> std::io::Result<Vec<u8>> {
+        Ok(self.read_rx.recv().await.unwrap_or_default())
     }
 
     pub async fn read_string(&mut self) -> std::io::Result<String> {
-        let mut buffer = [0u8; 1024];
         let mut string_buffer = Vec::with_capacity(512);
 
         loop {
-            let n = self.pty.read(&mut buffer).await?;
-            if n == 0 {
+            let chunk = self.read().await?;
+            if chunk.is_empty() {
                 break;
             }
 
-            string_buffer.extend_from_slice(&buffer[..n]);
+            string_buffer.extend_from_slice(&chunk);
 
-            let s = str::from_utf8(&string_buffer);
-            if let Ok(s) = s {
-                return Ok(s.to_string());
+            if str::from_utf8(&string_buffer).is_ok() {
+                return Ok(String::from_utf8_lossy(&string_buffer).into_owned());
             }
         }
 
-        Ok(String::from_utf8_lossy(&string_buffer).to_string())
+        Ok(String::from_utf8_lossy(&string_buffer).into_owned())
     }
 
-    pub async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
-        self.child.wait().await
+    pub async fn wait(&mut self) -> anyhow::Result<portable_pty::ExitStatus> {
+        let mut child = self
+            .child
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("child process handle already consumed"))?;
+        Ok(tokio::task::spawn_blocking(move || child.wait()).await??)
     }
 
-    pub async fn kill(&mut self) -> std::io::Result<()> {
-        self.child.kill().await
+    pub async fn kill(&mut self) -> anyhow::Result<()> {
+        let child = self
+            .child
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("child process handle already consumed"))?;
+        let mut killer = child.clone_killer();
+        tokio::task::spawn_blocking(move || killer.kill()).await?;
+        Ok(())
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) -> std::io::Result<()> {
-        self.pty
-            .resize(PtySize::new(rows, cols))
+        self.master
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
             .map_err(std::io::Error::other)
     }
 
     pub async fn read_pty_output(&mut self) -> std::io::Result<String> {
-        let mut buffer = [0u8; 1024];
         let mut string_buffer = Vec::with_capacity(512);
 
-        let n = self.pty.read(&mut buffer).await?;
-        if n == 0 {
+        let chunk = self.read().await?;
+        if chunk.is_empty() {
             return Ok(String::new());
         }
-        string_buffer.extend_from_slice(&buffer[..n]);
+        string_buffer.extend_from_slice(&chunk);
 
-        // Drain remaining buffered data
+        // Drain more chunks until we have a complete UTF-8 sequence
+        // (a multi-byte char may be split across chunks).
         loop {
-            let s = str::from_utf8(&string_buffer);
-            if s.is_ok() {
+            if str::from_utf8(&string_buffer).is_ok() {
                 break;
             }
 
-            let n = self.pty.read(&mut buffer).await?;
-            if n == 0 {
+            let chunk = self.read().await?;
+            if chunk.is_empty() {
                 break;
             }
-            string_buffer.extend_from_slice(&buffer[..n]);
+            string_buffer.extend_from_slice(&chunk);
         }
 
-        Ok(String::from_utf8_lossy(&string_buffer).to_string())
+        Ok(String::from_utf8_lossy(&string_buffer).into_owned())
     }
 }
