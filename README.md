@@ -193,4 +193,4 @@ curl -X POST http://localhost:3000/api/change-dir \
 
 ## Platform Support
 
-Currently supports **Linux** and **macOS**. Windows is not supported because the [`pty-process`](https://crates.io/crates/pty-process) library (used for pseudo-terminal handling) is Unix-only and does not support Windows ConPTY.
+Supports **Linux**, **macOS**, and **Windows** (via ConPTY).
