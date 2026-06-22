@@ -74,15 +74,21 @@ pub async fn new_with_command<S: AsRef<str>>(
     // send it, which is why this only manifested on Windows.
     tokio::task::spawn_blocking(move || {
         let mut buf = [0u8; 8192];
+        // ConPTY only sends ESC[6n once, at startup, so only scan the first
+        // read for it — never the steady-state output stream.
+        let mut first = true;
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break, // EOF
                 Ok(n) => {
                     let chunk = &buf[..n];
-                    if chunk.windows(4).any(|w| w == b"\x1b[6n") {
-                        // Reply with cursor position row 1, col 1.
-                        let (ack_tx, _ack_rx) = oneshot::channel();
-                        let _ = query_tx.blocking_send((b"\x1b[1;1R".to_vec(), ack_tx));
+                    if first {
+                        if chunk.windows(4).any(|w| w == b"\x1b[6n") {
+                            // Reply with cursor position row 1, col 1.
+                            let (ack_tx, _ack_rx) = oneshot::channel();
+                            let _ = query_tx.blocking_send((b"\x1b[1;1R".to_vec(), ack_tx));
+                        }
+                        first = false;
                     }
                     if read_tx.blocking_send(chunk.to_vec()).is_err() {
                         break; // receiver dropped -> stop pumping
