@@ -68,13 +68,21 @@ pub async fn new_with_command<S: AsRef<str>>(
         let mut buf = [0u8; 8192];
         loop {
             match reader.read(&mut buf) {
-                Ok(0) => break, // EOF
+                Ok(0) => {
+                    log::debug!("[pty] reader: EOF, thread exiting");
+                    break;
+                }
                 Ok(n) => {
+                    log::debug!("[pty] reader: {} bytes", n);
                     if read_tx.blocking_send(buf[..n].to_vec()).is_err() {
-                        break; // receiver dropped -> stop pumping
+                        log::debug!("[pty] reader: channel closed, thread exiting");
+                        break;
                     }
                 }
-                Err(_) => break,
+                Err(e) => {
+                    log::debug!("[pty] reader: error {e}, thread exiting");
+                    break;
+                }
             }
         }
     });
@@ -86,8 +94,13 @@ pub async fn new_with_command<S: AsRef<str>>(
     tokio::task::spawn_blocking(move || {
         while let Some((buf, ack)) = write_rx.blocking_recv() {
             let res = writer.write_all(&buf).and_then(|_| writer.flush());
+            match &res {
+                Ok(()) => log::debug!("[pty] writer: wrote {} bytes", buf.len()),
+                Err(e) => log::debug!("[pty] writer: error {e}"),
+            }
             let _ = ack.send(res);
         }
+        log::debug!("[pty] writer: channel closed, thread exiting");
     });
 
     Ok(EchokitChild {
