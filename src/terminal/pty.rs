@@ -2,7 +2,7 @@ use std::io::{Read, Write};
 
 use super::{EchokitChild, WriteMsg};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 pub async fn new_with_command<S: AsRef<str>>(
     shell: &str,
@@ -60,29 +60,35 @@ pub async fn new_with_command<S: AsRef<str>>(
     // The parent no longer needs the slave handle; the child holds its own.
     drop(pair.slave);
 
-    // Reader thread: owns the blocking PTY reader, pushes output chunks onto a
-    // channel consumed by the async `read()` path.
     let mut reader = pair.master.try_clone_reader()?;
     let (read_tx, read_rx) = mpsc::channel::<Vec<u8>>(128);
+    let (write_tx, mut write_rx) = mpsc::channel::<WriteMsg>(128);
+    // A second handle on the write channel so the reader thread can answer
+    // terminal queries (e.g. ConPTY's cursor-position report).
+    let query_tx = write_tx.clone();
+
+    // Reader thread: owns the blocking PTY reader, pushes output chunks onto a
+    // channel consumed by the async `read()` path. It also answers the
+    // cursor-position-report request (`ESC[6n`) that Windows ConPTY sends on
+    // startup — ConPTY stalls until the host replies, and Unix shells never
+    // send it, which is why this only manifested on Windows.
     tokio::task::spawn_blocking(move || {
         let mut buf = [0u8; 8192];
         loop {
             match reader.read(&mut buf) {
-                Ok(0) => {
-                    log::debug!("[pty] reader: EOF, thread exiting");
-                    break;
-                }
+                Ok(0) => break, // EOF
                 Ok(n) => {
-                    log::debug!("[pty] reader: {} bytes", n);
-                    if read_tx.blocking_send(buf[..n].to_vec()).is_err() {
-                        log::debug!("[pty] reader: channel closed, thread exiting");
-                        break;
+                    let chunk = &buf[..n];
+                    if chunk.windows(4).any(|w| w == b"\x1b[6n") {
+                        // Reply with cursor position row 1, col 1.
+                        let (ack_tx, _ack_rx) = oneshot::channel();
+                        let _ = query_tx.blocking_send((b"\x1b[1;1R".to_vec(), ack_tx));
+                    }
+                    if read_tx.blocking_send(chunk.to_vec()).is_err() {
+                        break; // receiver dropped -> stop pumping
                     }
                 }
-                Err(e) => {
-                    log::debug!("[pty] reader: error {e}, thread exiting");
-                    break;
-                }
+                Err(_) => break,
             }
         }
     });
@@ -90,17 +96,11 @@ pub async fn new_with_command<S: AsRef<str>>(
     // Writer thread: drains input chunks from a channel and writes them to the
     // PTY, acknowledging each request via a one-shot channel.
     let mut writer = pair.master.take_writer()?;
-    let (write_tx, mut write_rx) = mpsc::channel::<WriteMsg>(128);
     tokio::task::spawn_blocking(move || {
         while let Some((buf, ack)) = write_rx.blocking_recv() {
             let res = writer.write_all(&buf).and_then(|_| writer.flush());
-            match &res {
-                Ok(()) => log::debug!("[pty] writer: wrote {} bytes", buf.len()),
-                Err(e) => log::debug!("[pty] writer: error {e}"),
-            }
             let _ = ack.send(res);
         }
-        log::debug!("[pty] writer: channel closed, thread exiting");
     });
 
     Ok(EchokitChild {
