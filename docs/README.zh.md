@@ -107,3 +107,40 @@ curl -X POST http://localhost:3000/api/change-dir \
 ```
 
 **注意：** 出于安全考虑，此接口仅接受来自 localhost 的请求。
+
+## 平台支持
+
+Vibetty 支持 **Linux**、**macOS** 和 **Windows**。
+
+| 平台 | PTY 后端 | 系统要求 |
+|---|---|---|
+| Linux | Unix PTY | — |
+| macOS | Unix PTY | — |
+| Windows | ConPTY（基于 [`portable-pty-psmux`](https://crates.io/crates/portable-pty-psmux)） | Windows 10（1809+）或 Windows 11 |
+
+### 在 Windows 上运行
+
+预编译版本包含名为 `vibetty-windows-x64.exe` 的 Windows 二进制文件。上面的快速开始命令使用的是 Unix 风格路径；在 Windows 上请在 **PowerShell** 或**命令提示符**中使用 `.exe` 和反斜杠路径：
+
+```powershell
+# 预编译二进制
+.\vibetty-windows-x64.exe -- claude
+
+# 或从源码编译
+cargo build --release
+.\target\release\vibetty.exe -- claude
+```
+
+在 PowerShell 中可用 `$env:` 设置环境变量：
+
+```powershell
+$env:VIBECODE_ASR_API_KEY = "your_api_key_here"
+$env:VIBECODE_ASR_URL     = "https://api.groq.com/openai/v1/audio/transcriptions"
+.\vibetty.exe -- claude
+```
+
+如需在任意目录下运行 `vibetty`，请将二进制文件移动到 `PATH` 中的目录（例如 `%USERPROFILE%\.cargo\bin`）：
+
+```powershell
+move vibetty.exe $env:USERPROFILE\.cargo\bin\
+```

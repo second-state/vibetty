@@ -193,4 +193,40 @@ curl -X POST http://localhost:3000/api/change-dir \
 
 ## Platform Support
 
-Supports **Linux**, **macOS**, and **Windows** (via ConPTY).
+Vibetty runs on **Linux**, **macOS**, and **Windows**.
+
+| Platform | PTY backend | Requirements |
+|---|---|---|
+| Linux | Unix PTY | — |
+| macOS | Unix PTY | — |
+| Windows | ConPTY (via [`portable-pty-psmux`](https://crates.io/crates/portable-pty-psmux)) | Windows 10 (1809+) or Windows 11 |
+
+### Running on Windows
+
+Pre-built releases include a Windows binary named `vibetty-windows-x64.exe`. The
+quick-start commands above use Unix-style paths; on Windows, use the `.exe` and
+backslash paths from **PowerShell** or **Command Prompt**:
+
+```powershell
+# Pre-built binary
+.\vibetty-windows-x64.exe -- claude
+
+# Or build from source
+cargo build --release
+.\target\release\vibetty.exe -- claude
+```
+
+Set environment variables with `$env:` in PowerShell:
+
+```powershell
+$env:VIBECODE_ASR_API_KEY = "your_api_key_here"
+$env:VIBECODE_ASR_URL     = "https://api.groq.com/openai/v1/audio/transcriptions"
+.\vibetty.exe -- claude
+```
+
+To run `vibetty` from any directory, move the binary into a folder on your `PATH`
+(for example `%USERPROFILE%\.cargo\bin`):
+
+```powershell
+move vibetty.exe $env:USERPROFILE\.cargo\bin\
+```
