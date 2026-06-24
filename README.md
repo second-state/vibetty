@@ -1,73 +1,64 @@
 # Vibetty
 
-WebSocket terminal server with voice input support and Claude AI intelligent interaction.
+Voice-driven terminal for AI coding agents. Speak into a **VibeKeys Max** keyboard and Vibetty transcribes your speech straight into Claude Code (or any terminal program), served over the web.
+
+## How it works
+
+You speak into the VibeKeys Max keyboard's built-in microphone (push-to-talk or toggle). The keyboard streams the audio over a WebSocket to the Vibetty server. In the default **Whisper** mode, the server packages the audio as WAV and sends it to a Whisper-compatible API (Groq, OpenAI, GLM…), then injects the transcribed text into your terminal session and the AI agent running in it. A browser view shows the live terminal.
+
+```
+VibeKeys Max mic ──WebSocket──▶ Vibetty server ──WAV──▶ Whisper API ──text──▶ terminal + agent
+ (push-to-talk / toggle)
+```
+
+Prefer not to use a cloud API? **WebVosk** mode runs speech recognition locally in the browser instead, with no API key. See [WebVosk](#webvosk--offline-no-api-key).
 
 ## Features
 
-- **WebSocket Terminal** - Real-time terminal web interface based on Axum framework
-- **Voice Input** - Speech-to-text support for executing commands via voice
-- **Claude AI Integration** - AI-assisted terminal interaction using `echokit_terminal`
-- **Multiple ASR Support**
-  - OpenAI Whisper API
-  - Alibaba Cloud Paraformer real-time speech recognition (todo)
+- **WebSocket Terminal** - Real-time terminal web interface based on the Axum framework
+- **Voice Input** - Speak commands through the VibeKeys Max microphone; speech is transcribed to text
+- **Claude AI Integration** - AI-assisted terminal interaction
+- **Multiple ASR Backends**
+  - Whisper API — OpenAI, Groq, GLM, ByteFuture, or any custom endpoint (default)
+  - WebVosk — offline, in-browser, no API key
+  - Alibaba Cloud Paraformer real-time recognition (todo)
 
-## Quick Start
+## Installation
 
-### ASR Configuration
+### Option A: Download a pre-built binary
 
-Vibetty supports two speech recognition modes:
+Download the latest release for your platform from the [releases page](https://github.com/second-state/vibetty/releases):
 
-#### Interactive Setup (Recommended)
+| Platform | Asset |
+|---|---|
+| Linux | `vibetty-linux-x64` |
+| macOS (Apple Silicon) | `vibetty-macos-arm64` |
+| Windows | `vibetty-windows-x64.exe` |
 
-Run the setup wizard to configure ASR interactively:
-
-```bash
-vibetty setup
-```
-
-This launches a TUI where you can:
-1. Select a platform: **Whisper** or **WebVosk**
-2. If Whisper, choose a provider preset: **OpenAI**, **ByteFuture**, **Groq**, **GLM**, or **Custom**
-3. Fill in API key and other settings
-4. Configuration is saved to `~/.vibetty/config.toml`
-
-#### Manual Configuration
-
-You can also configure ASR manually via environment variables.
-
-##### Option 1: Whisper API (Server-side)
-
-Create a `.env` file and configure the Whisper API (Groq recommended). Alternatively, you can set these environment variables directly in your shell configuration file (e.g., `~/.bashrc` or `~/.zshrc`):
+### Option B: Build from source
 
 ```bash
-VIBECODE_ASR_API_KEY=your_api_key_here
-VIBECODE_ASR_URL=https://api.groq.com/openai/v1/audio/transcriptions
-VIBECODE_ASR_MODEL=whisper-large-v3
-VIBECODE_ASR_LANG=en
-VIBECODE_ASR_PROMPT=
-```
-
-Then start the service:
-
-**Option A: Download pre-built binary**
-
-Download the latest release from the [releases page](https://github.com/second-state/vibetty/releases):
-
-```bash
-# After downloading
-./vibetty -- claude
-```
-
-**Option B: Build from source**
-
-```bash
-# Build the release binary
 cargo build --release
-./target/release/vibetty -- claude
+# binary at ./target/release/vibetty
 ```
 
-**Tip:** To run `vibetty` from any directory, place the binary in a directory on your `PATH`. If it exists, we recommend `~/.cargo/bin`:
+### Add to your PATH (optional)
 
+To run `vibetty` from any directory, place the binary in a directory on your `PATH`. We recommend `~/.cargo/bin`:
+
+```bash
+# Pre-built binary
+mv vibetty ~/.cargo/bin/
+
+# Or self-compiled binary
+mv target/release/vibetty ~/.cargo/bin/
+```
+
+On Windows (PowerShell):
+
+```powershell
+move vibetty-windows-x64.exe $env:USERPROFILE\.cargo\bin\vibetty.exe
+```
 
 <details>
 <summary>What is PATH?</summary>
@@ -99,52 +90,81 @@ echo $PATH | grep -q "$HOME/.cargo/bin" && echo "Yes" || echo "No"
 ```
 </details>
 
+## Quick Start
+
+Vibetty defaults to **Whisper** mode (cloud transcription). The fastest path:
+
+**1. Get a Whisper API key.** Groq is recommended. You can also use OpenAI, GLM, ByteFuture, or any Whisper-compatible endpoint.
+
+**2. Configure ASR** with the interactive wizard (writes `~/.vibetty/config.toml`):
 
 ```bash
-# For pre-built binary
-mv vibetty ~/.cargo/bin/
-
-# Or for self-compiled binary
-mv target/release/vibetty ~/.cargo/bin/
+vibetty setup
 ```
 
+Manual environment-variable configuration is covered in [Configuration](#configuration).
+
+**3. Start the server with your agent:**
 
 ```bash
-# For pre-built binary
-mv vibetty ~/.cargo/bin/
-
-# Or for self-compiled binary
-mv target/release/vibetty ~/.cargo/bin/
+vibetty -- claude
 ```
 
-##### Option 2: WebVosk (Browser-side)
+**4. Pair your VibeKeys Max.** Open `http://localhost:3000/setup` and connect to the keyboard over Bluetooth. Set the **VibeKeys server WebSocket URL** to your Vibetty server (e.g. `ws://<your-host>:3000/ws`) and choose a **Microphone Mode** (PushToTalk or Toggle).
 
-Speech recognition runs entirely in the browser using Vosk models. No API key required.
+**5. Watch the terminal.** Open `http://localhost:3000` to see the live session. Speak into the keyboard and your words run as commands.
 
-**Option A: Download pre-built binary**
+For all options:
 
 ```bash
-# Set ASR platform and run
-VIBECODE_ASR_PLATFORM=web_vosk ./vibetty -- claude
+vibetty --help
 ```
 
-**Option B: Build from source**
+## Configuration
+
+Vibetty supports two speech-recognition backends. Configure either interactively or via environment variables.
+
+### Interactive setup (recommended)
 
 ```bash
-# Set ASR platform and run
-VIBECODE_ASR_PLATFORM=web_vosk ./vibetty -- -- claude
+vibetty setup
 ```
 
-Then visit the WebVosk interface at: http://localhost:3000/vosk
+A TUI walks you through:
+1. Select a platform: **Whisper** or **WebVosk**
+2. If Whisper, choose a provider preset: **OpenAI**, **ByteFuture**, **Groq**, **GLM**, or **Custom**
+3. Fill in the API key and other settings
+4. Settings are saved to `~/.vibetty/config.toml`
 
-**Note:** First-time use requires downloading Vosk model files (~40MB each). The models are cached in your browser.
+### Whisper (default)
 
-For more options, use `--help`:
+Server-side transcription via a Whisper-compatible API. Create a `.env` file (or set these in your shell profile, e.g. `~/.bashrc` / `~/.zshrc`):
+
 ```bash
-./vibetty --help
+VIBECODE_ASR_API_KEY=your_api_key_here
+VIBECODE_ASR_URL=https://api.groq.com/openai/v1/audio/transcriptions
+VIBECODE_ASR_MODEL=whisper-large-v3
+VIBECODE_ASR_LANG=en
+VIBECODE_ASR_PROMPT=
 ```
 
-Visit: http://localhost:3000 after starting the service.
+Then start the service:
+
+```bash
+vibetty -- claude
+```
+
+### WebVosk — offline, no API key
+
+Speech recognition runs entirely in the browser using Vosk models. No API key required, and no audio is sent to a cloud service.
+
+```bash
+VIBECODE_ASR_PLATFORM=web_vosk vibetty -- claude
+```
+
+Then open the WebVosk interface at `http://localhost:3000/vosk`.
+
+**Note:** First-time use downloads Vosk model files (~40MB each). The models are cached in your browser.
 
 ## API Reference
 
@@ -203,9 +223,7 @@ Vibetty runs on **Linux**, **macOS**, and **Windows**.
 
 ### Running on Windows
 
-Pre-built releases include a Windows binary named `vibetty-windows-x64.exe`. The
-quick-start commands above use Unix-style paths; on Windows, use the `.exe` and
-backslash paths from **PowerShell** or **Command Prompt**:
+The quick-start commands above use Unix-style paths; on Windows, use the `.exe` and backslash paths from **PowerShell** or **Command Prompt**:
 
 ```powershell
 # Pre-built binary
@@ -222,11 +240,4 @@ Set environment variables with `$env:` in PowerShell:
 $env:VIBECODE_ASR_API_KEY = "your_api_key_here"
 $env:VIBECODE_ASR_URL     = "https://api.groq.com/openai/v1/audio/transcriptions"
 .\vibetty.exe -- claude
-```
-
-To run `vibetty` from any directory, move the binary into a folder on your `PATH`
-(for example `%USERPROFILE%\.cargo\bin`):
-
-```powershell
-move vibetty.exe $env:USERPROFILE\.cargo\bin\
 ```
