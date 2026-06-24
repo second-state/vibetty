@@ -1,6 +1,6 @@
 # Vibetty
 
-Voice-driven terminal for AI coding agents. Speak into a **VibeKeys Max** keyboard and Vibetty transcribes your speech straight into Claude Code (or any terminal program), served over the web.
+Voice-driven terminal for AI coding agents. Speak into a **VibeKeys Max** keyboard and Vibetty transcribes your speech straight into a coding agent like Claude Code, Codex, or Gemini CLI — or any terminal program — served over the web.
 
 ## How it works
 
@@ -17,7 +17,7 @@ Prefer not to use a cloud API? **WebVosk** mode runs speech recognition locally 
 
 - **WebSocket Terminal** - Real-time terminal web interface based on the Axum framework
 - **Voice Input** - Speak commands through the VibeKeys Max microphone; speech is transcribed to text
-- **Claude AI Integration** - AI-assisted terminal interaction
+- **Agent-agnostic** - wraps any terminal-based coding agent (Claude Code, Codex, Gemini CLI, OpenCode, aider…) or any shell command — Vibetty has no hard dependency on any one agent
 - **Multiple ASR Backends**
   - Whisper API — OpenAI, Groq, GLM, ByteFuture, or any custom endpoint (default)
   - WebVosk — offline, in-browser, no API key
@@ -37,9 +37,11 @@ Download the latest release for your platform from the [releases page](https://g
 
 ### Option B: Build from source
 
+Requires [Rust](https://rustup.rs/).
+
 ```bash
 cargo build --release
-# binary at ./target/release/vibetty
+# binary at ./target/release/vibetty  (vibetty.exe on Windows)
 ```
 
 ### Add to your PATH (optional)
@@ -104,11 +106,18 @@ vibetty setup
 
 Manual environment-variable configuration is covered in [Configuration](#configuration).
 
-**3. Start the server with your agent:**
+**3. Start the server with your agent.** Anything after `--` is launched in the terminal, so Vibetty works with any coding agent CLI:
 
-```bash
-vibetty -- claude
-```
+| Agent | Launch command |
+|---|---|
+| Claude Code | `vibetty -- claude` |
+| OpenAI Codex | `vibetty -- codex` |
+| Gemini CLI | `vibetty -- gemini` |
+| OpenCode | `vibetty -- opencode` |
+| aider | `vibetty -- aider` |
+| Plain shell | `vibetty -- bash` |
+
+The agent CLI must already be installed and on your `PATH`.
 
 **4. Pair your VibeKeys Max.** Open `http://localhost:3000/setup` and connect to the keyboard over Bluetooth. Set the **VibeKeys server WebSocket URL** to your Vibetty server (e.g. `ws://<your-host>:3000/ws`) and choose a **Microphone Mode** (PushToTalk or Toggle).
 

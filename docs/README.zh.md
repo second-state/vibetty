@@ -1,6 +1,6 @@
 # Vibetty
 
-面向 AI 编程 agent 的语音终端。对着 **VibeKeys Max** 键盘说话，Vibetty 会把语音转写后直接送进 Claude Code（或任意终端程序），并通过网页提供访问。
+面向 AI 编程 agent 的语音终端。对着 **VibeKeys Max** 键盘说话，Vibetty 会把语音转写后直接送进你选择的编程 agent —— Claude Code、Codex、Gemini CLI —— 或任意终端程序，并通过网页提供访问。
 
 ## 工作原理
 
@@ -17,7 +17,7 @@ VibeKeys Max 麦克风 ──WebSocket──▶ Vibetty 服务端 ──WAV─�
 
 - **WebSocket 终端** - 基于 Axum 框架的实时终端 Web 接口
 - **语音输入** - 通过 VibeKeys Max 麦克风说话，语音转写为文本
-- **Claude AI 集成** - AI 辅助终端交互
+- **Agent 无关** - 可包裹任意基于终端的编程 agent（Claude Code、Codex、Gemini CLI、OpenCode、aider…）或任意 shell 命令 —— Vibetty 不绑定任何单一 agent
 - **多种 ASR 后端**
   - Whisper API —— OpenAI、Groq、GLM、ByteFuture 或任意自定义端点（默认）
   - WebVosk —— 离线、浏览器内、无需 API Key
@@ -37,9 +37,11 @@ VibeKeys Max 麦克风 ──WebSocket──▶ Vibetty 服务端 ──WAV─�
 
 ### 方式 B：从源码编译
 
+需要安装 [Rust](https://rustup.rs/)。
+
 ```bash
 cargo build --release
-# 二进制位于 ./target/release/vibetty
+# 二进制位于 ./target/release/vibetty（Windows 上为 vibetty.exe）
 ```
 
 ### 加入 PATH（可选）
@@ -74,11 +76,18 @@ vibetty setup
 
 手动通过环境变量配置见 [配置](#配置)。
 
-**3. 启动服务并带上你的 agent：**
+**3. 启动服务并带上你的 agent。** `--` 后面的内容都会在终端里启动，所以 Vibetty 适配任意 coding agent CLI：
 
-```bash
-vibetty -- claude
-```
+| Agent | 启动命令 |
+|---|---|
+| Claude Code | `vibetty -- claude` |
+| OpenAI Codex | `vibetty -- codex` |
+| Gemini CLI | `vibetty -- gemini` |
+| OpenCode | `vibetty -- opencode` |
+| aider | `vibetty -- aider` |
+| 纯 shell | `vibetty -- bash` |
+
+对应的 agent CLI 需要已经安装并在你的 `PATH` 中。
 
 **4. 配对 VibeKeys Max。** 打开 `http://localhost:3000/setup`，通过蓝牙连接键盘。把 **VibeKeys 服务器 WebSocket 地址** 设为你的 Vibetty 服务端（例如 `ws://<你的主机>:3000/ws`），并选择**麦克风模式**（PushToTalk 或 Toggle）。
 
