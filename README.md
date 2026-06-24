@@ -166,36 +166,6 @@ Then open the WebVosk interface at `http://localhost:3000/vosk`.
 
 **Note:** First-time use downloads Vosk model files (~40MB each). The models are cached in your browser.
 
-## API Reference
-
-### Change Directory
-
-Change the current working directory via HTTP API.
-
-**Endpoint:** `POST /api/change-dir`
-
-**Request:**
-```bash
-curl -X POST http://localhost:3000/api/change-dir \
-  -H "Content-Type: application/json" \
-  -d '{"path": "/path/to/directory"}'
-```
-
-**Example:**
-```bash
-# Change to absolute path
-curl -X POST http://localhost:3000/api/change-dir \
-  -H "Content-Type: application/json" \
-  -d '{"path": "/home/user/documents"}'
-
-# Change to relative path
-curl -X POST http://localhost:3000/api/change-dir \
-  -H "Content-Type: application/json" \
-  -d '{"path": "../parent-folder"}'
-```
-
-**Note:** This endpoint only accepts requests from localhost for security reasons.
-
 ## Environment Variables
 
 | Variable | Description | Default |
@@ -241,3 +211,33 @@ $env:VIBECODE_ASR_API_KEY = "your_api_key_here"
 $env:VIBECODE_ASR_URL     = "https://api.groq.com/openai/v1/audio/transcriptions"
 .\vibetty.exe -- claude
 ```
+
+## API Reference
+
+### Change Directory
+
+Change the current working directory via HTTP API.
+
+**Endpoint:** `POST /api/change-dir`
+
+**Request:**
+```bash
+curl -X POST http://localhost:3000/api/change-dir \
+  -H "Content-Type: application/json" \
+  -d '{"path": "/path/to/directory"}'
+```
+
+**Example:**
+```bash
+# Change to absolute path
+curl -X POST http://localhost:3000/api/change-dir \
+  -H "Content-Type: application/json" \
+  -d '{"path": "/home/user/documents"}'
+
+# Change to relative path
+curl -X POST http://localhost:3000/api/change-dir \
+  -H "Content-Type: application/json" \
+  -d '{"path": "../parent-folder"}'
+```
+
+**Note:** This endpoint only accepts requests from localhost for security reasons.

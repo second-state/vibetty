@@ -136,36 +136,6 @@ VIBECODE_ASR_PLATFORM=web_vosk vibetty -- claude
 
 **注意：** 首次使用需要下载 Vosk 模型文件（每个约 40MB）。模型会缓存在浏览器中。
 
-## API 参考
-
-### 更改目录
-
-通过 HTTP API 更改当前工作目录。
-
-**接口地址：** `POST /api/change-dir`
-
-**请求格式：**
-```bash
-curl -X POST http://localhost:3000/api/change-dir \
-  -H "Content-Type: application/json" \
-  -d '{"path": "/path/to/directory"}'
-```
-
-**使用示例：**
-```bash
-# 切换到绝对路径
-curl -X POST http://localhost:3000/api/change-dir \
-  -H "Content-Type: application/json" \
-  -d '{"path": "/home/user/documents"}'
-
-# 切换到相对路径
-curl -X POST http://localhost:3000/api/change-dir \
-  -H "Content-Type: application/json" \
-  -d '{"path": "../parent-folder"}'
-```
-
-**注意：** 出于安全考虑，此接口仅接受来自 localhost 的请求。
-
 ## 环境变量
 
 | 变量 | 说明 | 默认值 |
@@ -211,3 +181,33 @@ $env:VIBECODE_ASR_API_KEY = "your_api_key_here"
 $env:VIBECODE_ASR_URL     = "https://api.groq.com/openai/v1/audio/transcriptions"
 .\vibetty.exe -- claude
 ```
+
+## API 参考
+
+### 更改目录
+
+通过 HTTP API 更改当前工作目录。
+
+**接口地址：** `POST /api/change-dir`
+
+**请求格式：**
+```bash
+curl -X POST http://localhost:3000/api/change-dir \
+  -H "Content-Type: application/json" \
+  -d '{"path": "/path/to/directory"}'
+```
+
+**使用示例：**
+```bash
+# 切换到绝对路径
+curl -X POST http://localhost:3000/api/change-dir \
+  -H "Content-Type: application/json" \
+  -d '{"path": "/home/user/documents"}'
+
+# 切换到相对路径
+curl -X POST http://localhost:3000/api/change-dir \
+  -H "Content-Type: application/json" \
+  -d '{"path": "../parent-folder"}'
+```
+
+**注意：** 出于安全考虑，此接口仅接受来自 localhost 的请求。
