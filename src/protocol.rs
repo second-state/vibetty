@@ -152,6 +152,17 @@ pub enum ImageFormat {
     Gif,
 }
 
+impl ImageFormat {
+    /// 对应的 HTTP MIME 类型
+    pub fn mime_type(&self) -> &'static str {
+        match self {
+            ImageFormat::Png => "image/png",
+            ImageFormat::Jpeg => "image/jpeg",
+            ImageFormat::Gif => "image/gif",
+        }
+    }
+}
+
 /// 通知级别
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

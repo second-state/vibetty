@@ -995,8 +995,10 @@ fn render_screen_to_image(
     Ok(buf.into_inner())
 }
 
-/// HTTP handler for /screenshot.jpeg
+/// HTTP handler for GET /screenshot — returns the current terminal screen
+/// rendered as an image whose format/MIME is determined by `image_format`.
 pub async fn screenshot_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let image_format = state.image_format;
     let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
 
     if state.screenshot_tx.send(resp_tx).await.is_err() {
@@ -1009,17 +1011,17 @@ pub async fn screenshot_handler(State(state): State<AppState>) -> impl IntoRespo
     }
 
     match resp_rx.await {
-        Ok(Ok(jpeg_data)) => {
+        Ok(Ok(image_data)) => {
             let mut headers = axum::http::HeaderMap::new();
             headers.insert(
                 axum::http::header::CONTENT_TYPE,
-                "image/jpeg".parse().unwrap(),
+                image_format.mime_type().parse().unwrap(),
             );
             headers.insert(
                 axum::http::header::CACHE_CONTROL,
                 "no-cache".parse().unwrap(),
             );
-            (axum::http::StatusCode::OK, headers, jpeg_data).into_response()
+            (axum::http::StatusCode::OK, headers, image_data).into_response()
         }
         Ok(Err(e)) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
