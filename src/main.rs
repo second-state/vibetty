@@ -10,10 +10,10 @@ use tower_http::services::ServeDir;
 
 mod asr;
 mod config;
+mod png_encode;
 mod protocol;
 mod util;
 mod ws;
-mod png_encode;
 
 mod terminal;
 

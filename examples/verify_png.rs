@@ -38,7 +38,11 @@ fn main() {
     let paletted = png_encode::encode_paletted_png(&img).expect("encode_paletted_png 失败");
 
     let k = |n: usize| n as f64 / 1024.0;
-    println!("输入                   : {input}  ({}x{})", img.width(), img.height());
+    println!(
+        "输入                   : {input}  ({}x{})",
+        img.width(),
+        img.height()
+    );
     println!("image 默认 PNG (对照)  : {:>6.1}K", k(default_png.len()));
     println!(
         "vibetty palette PNG    : {:>6.1}K  ({:.2}x 压缩)",
