@@ -20,10 +20,12 @@ use crate::{
 const IMAGE_FRAME_INTERVAL_MS: u64 = 300;
 /// Image chunk size (bytes)
 const IMAGE_CHUNK_SIZE: usize = 10 * 1024;
-/// Columns reserved for TUI decorations (borders)
-const TUI_COLS_PADDING: u16 = 4;
-/// Rows reserved for TUI decorations (title + footer)
-const TUI_ROWS_PADDING: u16 = 6;
+/// Columns reserved for TUI decorations: the terminal pane's left + right
+/// borders (1 column each).
+const TUI_COLS_PADDING: u16 = 2;
+/// Rows reserved for TUI decorations: header pane (3) + footer pane (3) +
+/// the terminal pane's top + bottom borders (1 row each).
+const TUI_ROWS_PADDING: u16 = 8;
 
 type ServerTx = broadcast::Sender<ServerMessage>;
 
@@ -206,8 +208,8 @@ pub async fn run_command(
     }
 
     let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-    let vt_cols = cols - TUI_COLS_PADDING;
-    let vt_rows = rows - TUI_ROWS_PADDING;
+    let vt_cols = cols.saturating_sub(TUI_COLS_PADDING);
+    let vt_rows = rows.saturating_sub(TUI_ROWS_PADDING);
 
     let mut terminal = crate::terminal::pty::new_with_command(
         command.first().unwrap().as_str(),
