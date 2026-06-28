@@ -7,7 +7,6 @@ use axum::{
     },
     response::IntoResponse,
 };
-use image::ImageEncoder;
 use tokio::sync::{broadcast, mpsc};
 use vt100::Callbacks;
 
@@ -966,20 +965,14 @@ fn render_screen_to_image(
     let mut buf = std::io::Cursor::new(Vec::new());
     match format {
         crate::protocol::ImageFormat::Png => {
-            let encoder = image::codecs::png::PngEncoder::new(&mut buf);
-            encoder
-                .write_image(
-                    dyn_image.as_bytes(),
-                    dyn_image.width(),
-                    dyn_image.height(),
-                    image::ExtendedColorType::from(dyn_image.color()),
-                )
+            let bytes = crate::png_encode::encode_paletted_png(&dyn_image)
                 .map_err(|e| anyhow::anyhow!("Failed to encode PNG: {}", e))?;
+            buf.get_mut().extend_from_slice(&bytes);
         }
         crate::protocol::ImageFormat::Jpeg => {
             // Convert to RGB for JPEG
             let rgb_image = dyn_image.to_rgb8();
-            let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 100);
+            let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 85);
             encoder
                 .encode(
                     rgb_image.as_raw(),

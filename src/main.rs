@@ -13,6 +13,7 @@ mod config;
 mod protocol;
 mod util;
 mod ws;
+mod png_encode;
 
 mod terminal;
 
