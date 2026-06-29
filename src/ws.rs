@@ -18,7 +18,7 @@ use crate::{
 /// Image broadcast frame interval (ms)
 const IMAGE_FRAME_INTERVAL_MS: u64 = 300;
 /// Image chunk size (bytes)
-const IMAGE_CHUNK_SIZE: usize = 10 * 1024;
+pub(crate) const IMAGE_CHUNK_SIZE: usize = 10 * 1024;
 /// Columns reserved for TUI decorations: the terminal pane's left + right
 /// borders (1 column each).
 const TUI_COLS_PADDING: u16 = 2;
@@ -877,7 +877,7 @@ async fn handle_web_vosk_socket(mut socket: WebSocket, vosk_tx: WebVoskTx) {
 }
 
 /// Render a vt100 screen to image bytes (JPEG or PNG)
-fn render_screen_to_image(
+pub(crate) fn render_screen_to_image(
     screen: &vt100::Screen,
     window_size: Option<(u16, u16)>, // (width, height)
     window_h_offset: &mut u16,

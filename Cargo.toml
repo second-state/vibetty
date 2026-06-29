@@ -54,3 +54,4 @@ vibetty-screenshot = { git = "https://github.com/second-state/vibetty-screenshot
 image = "0.25"
 color_quant = "1.1"
 png = "0.17"
+rumqttc = "0.25.1"

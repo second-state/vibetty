@@ -10,6 +10,7 @@ use tower_http::services::ServeDir;
 
 mod asr;
 mod config;
+mod mqtt;
 mod png_encode;
 mod protocol;
 mod util;
@@ -213,6 +214,14 @@ async fn main() {
         screenshot_tx: screenshot_tx.clone(),
         image_format,
     };
+
+    // 可选 MQTT 传输:配置里有 [mqtt] 段才启用,否则完全不碰(WS/HTTP 不变)。
+    if let Some(cfg) = args.mqtt_config() {
+        mqtt::spawn(cfg, state.cli_tx.clone(), state.tx.clone(), image_format);
+        log::info!("[mqtt] transport enabled");
+    } else {
+        log::debug!("[mqtt] not configured, transport disabled (WebSocket/HTTP only)");
+    }
 
     let listener = tokio::net::TcpListener::bind(&args.bind_addr)
         .await

@@ -24,6 +24,66 @@ pub enum AsrConfig {
     WebVosk,
 }
 
+/// 可选的 MQTT 传输配置。`~/.vibetty/config.toml` 里没有 `[mqtt]` 段时为 None,
+/// 表示完全不启用 MQTT(现有 WebSocket/HTTP 行为不变)。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MqttConfig {
+    /// Broker 主机名/IP,例如 "broker.emqx.io" 或 "192.168.1.10"
+    pub host: String,
+    /// Broker 端口;1883=明文,8883=TLS
+    #[serde(default = "default_mqtt_port")]
+    pub port: u16,
+    /// MQTT client id(broker 内需唯一)。留空则用 `vibetty-{pid}`
+    #[serde(default)]
+    pub client_id: String,
+    /// 是否启用 TLS;留空则当 port==8883 时自动开启
+    #[serde(default)]
+    pub use_tls: Option<bool>,
+    /// 用户名(broker 要求鉴权时填)
+    #[serde(default)]
+    pub username: Option<String>,
+    /// 密码
+    #[serde(default)]
+    pub password: Option<String>,
+    /// Topic 前缀,所有 topic 都在此前缀下。建议每台设备/会话不同
+    #[serde(default = "default_topic_prefix")]
+    pub topic_prefix: String,
+    /// QoS: 0 / 1 / 2,默认 1(AtLeastOnce,适合弱网)
+    #[serde(default = "default_mqtt_qos")]
+    pub qos: u8,
+    /// keep-alive 秒数,默认 30
+    #[serde(default = "default_keep_alive")]
+    pub keep_alive_secs: u64,
+}
+
+fn default_mqtt_port() -> u16 {
+    1883
+}
+fn default_topic_prefix() -> String {
+    "vibetty".to_string()
+}
+fn default_mqtt_qos() -> u8 {
+    1
+}
+fn default_keep_alive() -> u64 {
+    30
+}
+
+impl MqttConfig {
+    /// 解析后的有效 TLS 设置:显式优先,否则 port==8883 自动开
+    pub fn effective_use_tls(&self) -> bool {
+        self.use_tls.unwrap_or(self.port == 8883)
+    }
+    /// client_id 为空时兜底为 `vibetty-{pid}`
+    pub fn effective_client_id(&self) -> String {
+        if self.client_id.is_empty() {
+            format!("vibetty-{}", std::process::id())
+        } else {
+            self.client_id.clone()
+        }
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "vibetty")]
 #[command(about = "WebSocket terminal server", long_about = None, version)]
@@ -129,5 +189,29 @@ impl RunArgs {
             model: std::env::var("VIBECODE_ASR_MODEL").unwrap_or_else(|_| "whisper-1".to_string()),
             prompt: std::env::var("VIBECODE_ASR_PROMPT").unwrap_or_default(),
         })
+    }
+
+    /// 读取可选的 `[mqtt]` 配置。无配置文件 / 无 `[mqtt]` 段 → None(不启用 MQTT,
+    /// 现有 WebSocket/HTTP 路径完全不变)。与 `asr_config()` 用同一份 toml 文件。
+    pub fn mqtt_config(&self) -> Option<MqttConfig> {
+        #[derive(serde::Deserialize)]
+        struct MqttSection {
+            #[serde(default)]
+            mqtt: Option<MqttConfig>,
+        }
+        let read = |path: &str| -> Option<MqttConfig> {
+            let content = std::fs::read_to_string(path).ok()?;
+            toml::from_str::<MqttSection>(&content).ok()?.mqtt
+        };
+        if let Some(path) = &self.asr_config_path {
+            return read(path);
+        }
+        if let Some(home) = dirs::home_dir() {
+            let p = home.join(".vibetty").join("config.toml");
+            if p.exists() {
+                return read(&p.to_string_lossy());
+            }
+        }
+        None
     }
 }
