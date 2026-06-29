@@ -23,36 +23,49 @@ axum 0.8 WebSocket 终端服务器。把一个 PTY 会话同时当成「浏览�
 
 ---
 
-## 可选 MQTT 传输(feat/mqtt-transport 分支,**working tree 未 commit**)
+## 可选 MQTT 传输(feat/mqtt-transport 分支)
 
-给 ESP32/MCU 这类不方便跑 WS 的设备加第二条传输通道。**配置驱动、可选**:只在 `~/.vibetty/config.toml` 有 `[mqtt]` 段时才连外部 broker;没配置就完全不碰 MQTT,WebSocket/HTTP 原样保留。两条通道并存,复用同一个 PTY 会话、`cli_tx` / broadcast `tx`、PTY 逻辑,**零改动**。
+给 ESP32/MCU 这类不方便跑 WS 的设备加第二条传输通道。**配置驱动、可选**:只在 `~/.vibetty/config.toml` 有 `[mqtt]` 段且 `enable != false` 时才连外部 broker;否则完全不碰 MQTT,WebSocket/HTTP 原样保留。两条通道并存,复用同一个 PTY 会话、`cli_tx` / broadcast `tx`、PTY 逻辑,**零改动**。
 
-**协议设计(用户拍板)**:**不用 msgpack**。原始按键走独立 raw 字节 topic(`pty_in`);其余 5 个控制类消息(输入文本/切目录/同步/滚动)合并到一个 `control` topic,payload 是 `ClientMessage` 的 serde JSON(`{"type":...,"data":...}`),靠 `type` 字段区分——ESP32 只解一次 JSON,且 `type` 命名和 WS 协议一致。只桥接终端核心消息(`notification`/`asr_result`/`title`/`voice_*` 不走 MQTT)。
+**协议设计(用户拍板)**:**不用 msgpack**。原始按键走独立 raw 字节 topic(`pty_in`);其余 5 个控制类消息(输入文本/切目录/同步/滚动)合并到一个 `control` topic,payload 是 `ClientMessage` 的 serde JSON(`{"type":...,"data":...}`),靠 `type` 字段区分——ESP32 只解一次 JSON,`type` 命名和 WS 协议一致。出站只发 `PtyOutput`(原始字节)和 `Screen`(整张图);`notification`/`title` 不走 MQTT。
 
 Topic 约定(`{topic_prefix}` 来自 `[mqtt]`,默认 `vibetty`):
 - 入站(ESP32→vibetty,vibetty 订阅):`{p}/pty_in`(原始按键字节→PtyInput)、`{p}/control`(JSON `{"type":...}`,覆盖 input_text/change_dir/sync/scroll_up/scroll_down,见 `mqtt.rs::parse_control`)
 - 出站(vibetty→ESP32):`{p}/pty_out`(PTY 原始输出←PtyOutput)、`{p}/screen`(整张 PNG/JPEG 字节←Screen,无分块,格式靠 magic bytes 区分)
 
-改动文件:
-- `src/mqtt.rs`(新增):`spawn()` + `run_bridge()`。出站任务订阅 broadcast,只转发 `PtyOutput` 和 `Screen`(`Screen`→`ws::render_screen_to_image` 渲染整张图后发布,无分块);入站循环 `eventloop.poll()`→strip topic 前缀→`pty_in` 直构造 `PtyInput`、`control` 走 `parse_control()`(serde JSON,只接受 input/change_dir/sync/scroll_*,其余告警丢弃)→`cli_tx`。`poll()` 出错只 warn+sleep 2s(rumqttc 自动重连,WS/PTY 不受影响)。
-- `src/config.rs`:`MqttConfig{host,port=1883,client_id,use_tls:Option<bool>,username,password,topic_prefix="vibetty",qos=1,keep_alive_secs=30}` + `effective_use_tls()`(port==8883 自动开)、`effective_client_id()`(空则 `vibetty-{pid}`);`RunArgs::mqtt_config()->Option<MqttConfig>` 解析 `[mqtt]` 段,没有就 `None`。
-- `src/main.rs`:解析到 `MqttConfig` 就 `mqtt::spawn(...)`;`None` 整段跳过。
-- `src/ws.rs`:纯可见性改动——`render_screen_to_image` 和 `IMAGE_CHUNK_SIZE` 改 `pub(crate)`。
-- `Cargo.toml`:`rumqttc = "0.25.1"`(+ 之前的 `color_quant`/`png`)。
+改动要点:
+- `src/mqtt.rs`:`spawn()` + `run_bridge()`。出站订阅 broadcast 只转 `PtyOutput`/`Screen`(`Screen`→`ws::render_screen_to_image` 整张渲染);入站 `eventloop.poll()`→strip 前缀→`pty_in` 直构造 `PtyInput`、`control` 走 `parse_control()`(serde JSON,只接受 input/change_dir/sync/scroll_*,其余告警丢弃)→`cli_tx`。`poll()` 出错只 warn+sleep 2s(rumqttc 自动重连)。
+- `src/config.rs`:`MqttConfig{enable=true,host,port=1883,client_id,use_tls:Option<bool>,username,password,topic_prefix="vibetty",qos=1,keep_alive_secs=30}` + `effective_use_tls()`(port==8883 自动开)、`effective_client_id()`(空则 `vibetty-{pid}`);`RunArgs::mqtt_config()` 固定从 `~/.vibetty/config.toml` 读 `[mqtt]` 段(不再支持 `-c`)。
+- `src/main.rs`:解析到且 `enable != false` 才 `mqtt::spawn(...)`。
+- `src/setup.rs`:`vibetty setup` 是 ratatui TUI,编辑 `[mqtt]` 全部字段写回 `~/.vibetty/config.toml`(`save_mqtt` 用 `toml::Table` 保留其它段),预填已有配置。
+- `src/ws.rs`:`render_screen_to_image`、`IMAGE_CHUNK_SIZE` 改 `pub(crate)` 供 mqtt.rs 用。
+
+**`enable` 开关**:`MqttConfig.enable`(serde 默认 `true`)。设 `false` 时保留 `[mqtt]` 配置但不连 broker——临时关 MQTT 不用删整段。`setup` TUI 第一个字段就是它。
 
 **验证状态**:
-- 入站 `pty_in` 已验证(本地 mosquitto + python paho-mqtt 发 `pty_in`→vibetty 收到→`cli_tx`)。`control`(JSON 合并)是新设计,待重验。
-- 出站之前卡在 headless vt80 panic(`grid.rs:26 "attempt to subtract with overflow"`)——根因是无 TTY 时 `crossterm::terminal::size()` 返回 0×0。**已修**:拿不到有效尺寸时默认 80×24(`ws.rs`,commit `f160599`)。出端端到端(本地 broker 收到 `pty_out`/`screen`)仍待验。
+- 入站 `pty_in` 已验证(本地 mosquitto + python paho-mqtt)。`control`(JSON 合并)、出站 `pty_out`/`screen`、`enable=false` 待端到端重验。
+- 出站曾卡 headless vt80 panic(无 TTY 时尺寸 0×0),已修:`ws.rs` 拿不到有效尺寸默认 80×24(`f160599`)。
 
 `config.toml` 示例:
 ```toml
 [mqtt]
-host = "127.0.0.1"     # 或 EMQX/Mosquitto 地址
-port = 1883            # 8883 自动开 TLS
+enable = true           # 设 false 可临时关闭、保留配置
+host = "127.0.0.1"      # 或 EMQX/Mosquitto 地址
+port = 1883             # 8883 自动开 TLS
 topic_prefix = "vibetty/test"
 qos = 1
 # client_id / username / password / use_tls 可选
 ```
+
+---
+
+## ASR 已从服务端移除(`6d5e4b3`)
+
+ASR 改由 **ESP32 本地**完成:ESP32 识别后把**文本**经 `{p}/control` 发回 vibetty(省音频流量)。vibetty 服务端不再做转写/音频处理。
+
+- 删:`src/asr/`(Whisper HTTP + 阿里云百炼实时 WS)、`src/util.rs`(WAV/PCM 音频处理)、依赖 `wav_io`/`reqwest`/`reqwest-websocket`/`hanconv`;以及 `ASRInterface`、`check_deprecated_env_vars`、`check_vosk_models`、`/vosk_ws` 端点。
+- **保留变体(关键)**:`protocol.rs` 一行没动——`ClientMessage::VoiceInputStart/Chunk/End`、`ServerMessage::AsrResult` 都还在。浏览器前端 `index.html`/`app.js` 仍发 voice,后端 `ws.rs` 收到后在一个合并的 match arm **静默丢弃**(不转写、不回 `asr_result`),WS 不会因反序列化失败断连。前端 voice UI 由用户后续清理。
+- `vibetty setup` 从「配 ASR」改成「配 MQTT」TUI(见上节)。
 
 ---
 
