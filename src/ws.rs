@@ -10,10 +10,7 @@ use axum::{
 use tokio::sync::{broadcast, mpsc};
 use vt100::Callbacks;
 
-use crate::{
-    config::AsrConfig,
-    protocol::{ClientMessage, ServerMessage, VoiceInputStart},
-};
+use crate::protocol::{ClientMessage, ServerMessage};
 
 /// Image broadcast frame interval (ms)
 const IMAGE_FRAME_INTERVAL_MS: u64 = 300;
@@ -30,12 +27,6 @@ type ServerTx = broadcast::Sender<ServerMessage>;
 
 type ClientTx = mpsc::Sender<ClientMessage>;
 type ClientRx = mpsc::Receiver<ClientMessage>;
-
-type OneshotSender<T> = tokio::sync::oneshot::Sender<T>;
-
-type WebVoskReqTx = OneshotSender<(bytes::Bytes, OneshotSender<String>)>;
-type WebVoskTx = mpsc::Sender<WebVoskReqTx>;
-type WebVoskRx = mpsc::Receiver<WebVoskReqTx>;
 
 struct WindowCallbacks {
     title: String,
@@ -65,93 +56,8 @@ type ScreenshotTx = mpsc::Sender<tokio::sync::oneshot::Sender<Result<Vec<u8>, St
 pub struct AppState {
     pub tx: ServerTx,
     pub cli_tx: ClientTx,
-    pub web_vosk_tx: Option<WebVoskTx>,
     pub screenshot_tx: ScreenshotTx,
     pub image_format: crate::protocol::ImageFormat,
-}
-
-fn t2s<S: AsRef<str>>(s: S) -> String {
-    let s = hanconv::tw2sp(s.as_ref());
-    s.replace("幺", "么")
-}
-
-pub enum ASRInterface {
-    Whisper {
-        client: reqwest::Client,
-        config: crate::config::WhisperASRConfig,
-    },
-    WebVosk(WebVoskRx),
-}
-
-impl ASRInterface {
-    pub fn from_config(config: AsrConfig) -> (Self, Option<WebVoskTx>) {
-        match config {
-            AsrConfig::Whisper(cfg) => (
-                ASRInterface::Whisper {
-                    client: reqwest::Client::new(),
-                    config: cfg,
-                },
-                None,
-            ),
-            AsrConfig::WebVosk => {
-                let (web_vosk_tx, web_vosk_rx) = mpsc::channel(10);
-                (ASRInterface::WebVosk(web_vosk_rx), Some(web_vosk_tx))
-            }
-        }
-    }
-
-    pub async fn transcribe(&mut self, wav_data: Vec<u8>) -> anyhow::Result<String> {
-        match self {
-            ASRInterface::Whisper { client, config } => {
-                let r = retry_whisper(
-                    client,
-                    &config.url,
-                    &config.api_key,
-                    &config.model,
-                    &config.lang,
-                    &config.prompt,
-                    wav_data,
-                    3,
-                    std::time::Duration::from_secs(5),
-                )
-                .await;
-
-                Ok(t2s(r.join("\n")))
-            }
-            ASRInterface::WebVosk(rx) => {
-                log::info!("Start recv a WebVosk transcription request");
-                let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-                let mut req = (bytes::Bytes::from(wav_data), resp_tx);
-
-                loop {
-                    let tx = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
-                        .await
-                        .map_err(|_| anyhow::anyhow!("Request WebVosk timed out"))?
-                        .ok_or(anyhow::anyhow!("WebVosk channel closed"))?;
-
-                    if tx.is_closed() {
-                        continue;
-                    };
-
-                    if let Err(e) = tx.send(req) {
-                        log::warn!(
-                            "Failed to send WebVosk transcription request, wait next request tx",
-                        );
-                        req = e;
-                        continue;
-                    } else {
-                        break;
-                    }
-                }
-
-                match tokio::time::timeout(std::time::Duration::from_secs(10), resp_rx).await {
-                    Ok(Ok(transcription)) => Ok(transcription),
-                    Ok(Err(_)) => Err(anyhow::anyhow!("WebVosk response channel closed")),
-                    Err(_) => Err(anyhow::anyhow!("WebVosk transcription timed out")),
-                }
-            }
-        }
-    }
 }
 
 fn send_screen(tx: &ServerTx, screen: Arc<vt100::Screen>) {
@@ -170,7 +76,6 @@ pub enum RunCommandResult {
 #[allow(clippy::too_many_arguments)]
 pub async fn run_command(
     command: Vec<String>,
-    asr_interface: &mut ASRInterface,
     mut rx: ClientRx,
     ui_rx: &mut mpsc::Receiver<crate::ui::UIEvent>,
     tx: ServerTx,
@@ -223,9 +128,6 @@ pub async fn run_command(
         current_dir,
     )
     .await?;
-
-    let mut wav_buffer = Vec::new();
-    let mut wav_sample_rate = 16000;
 
     let mut vt_parser =
         vt100::Parser::new_with_callbacks(vt_rows, vt_cols, 8096, WindowCallbacks::new());
@@ -416,55 +318,16 @@ pub async fn run_command(
                 ));
                 return Ok(RunCommandResult::ChangeDir(path, rx, screenshot_rx));
             }
-            TerminalEvent::Input(ClientMessage::VoiceInputStart(VoiceInputStart {
-                sample_rate,
-            })) => {
-                log::info!("Voice input started with sample rate: {:?}", sample_rate);
-                wav_buffer.clear();
-                wav_sample_rate = sample_rate.unwrap_or(16000);
-            }
-            TerminalEvent::Input(ClientMessage::VoiceInputChunk(chunk)) => {
-                wav_buffer.extend_from_slice(&chunk);
-            }
-            TerminalEvent::Input(ClientMessage::VoiceInputEnd(..)) => {
-                log::info!("Voice input ended, total size: {} bytes", wav_buffer.len());
-                let config = crate::util::WavConfig {
-                    sample_rate: wav_sample_rate,
-                    channels: 1,
-                    bits_per_sample: 16,
-                };
-                let wav_data = crate::util::pcm_to_wav(&wav_buffer, config);
-                if std::env::var("VIBECODE_ASR_DEBUG_WAV").is_ok() {
-                    let debug_path = format!("debug_{}.wav", terminal.session_id());
-                    if let Err(e) = std::fs::write(&debug_path, &wav_data) {
-                        log::error!("Failed to write debug WAV file: {}", e);
-                    } else {
-                        log::info!("Saved debug WAV file: {}", debug_path);
-                    }
-                }
-
-                let mut asr_text = match asr_interface.transcribe(wav_data).await {
-                    Ok(mut text) => {
-                        log::info!("ASR transcription result: {}", text);
-                        text.push(' ');
-                        text
-                    }
-                    Err(e) => {
-                        log::error!("ASR transcription failed: {}", e);
-                        format!("ASR Error: {}", e)
-                    }
-                };
-
-                // 如果 ASR 结果等于环境变量 VIBECODE_EXIT_COMMAND 的值，替换为 "/exit"（大小写不敏感）
-                if let Ok(exit_trigger) = std::env::var("VIBECODE_EXIT_COMMAND")
-                    && asr_text.trim().to_lowercase() == exit_trigger.trim().to_lowercase()
-                {
-                    asr_text = "/exit".to_string();
-                }
-
-                if let Err(_e) = tx.send(ServerMessage::asr_result(asr_text)) {
-                    log::error!("[{}] No client waiting for data", terminal.session_id());
-                }
+            // ASR 已移至 ESP32 端;收到旧的 voice_input_* 消息静默丢弃,不转写、不回 asr_result。
+            TerminalEvent::Input(
+                ClientMessage::VoiceInputStart(_)
+                | ClientMessage::VoiceInputChunk(_)
+                | ClientMessage::VoiceInputEnd(_),
+            ) => {
+                log::debug!(
+                    "[{}] voice_input ignored (ASR disabled)",
+                    terminal.session_id()
+                );
             }
             TerminalEvent::InputClosed | TerminalEvent::Error => {
                 log::error!("Input channel closed or error occurred, terminating terminal loop");
@@ -753,124 +616,6 @@ async fn handle_socket(mut socket: WebSocket, state: AppState, params: WsParams)
                         break;
                     }
                 }
-            }
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn retry_whisper(
-    client: &reqwest::Client,
-    url: &str,
-    api_key: &str,
-    model: &str,
-    lang: &str,
-    prompt: &str,
-    wav_audio: Vec<u8>,
-    retry: usize,
-    timeout: std::time::Duration,
-) -> Vec<String> {
-    for i in 0..retry {
-        log::debug!("Attempting ASR request, try {}/{}", i + 1, retry);
-        let r = tokio::time::timeout(
-            timeout,
-            crate::asr::whisper(client, url, api_key, model, lang, prompt, wav_audio.clone()),
-        )
-        .await;
-        match r {
-            Ok(Ok(v)) => {
-                log::info!("ASR successful on try {}/{}, result: {:?}", i + 1, retry, v);
-                return v;
-            }
-            Ok(Err(e)) => {
-                log::error!("asr error: {e}");
-                continue;
-            }
-            Err(_) => {
-                log::error!("asr timeout, retry {i}");
-                continue;
-            }
-        }
-    }
-    vec![]
-}
-
-pub async fn web_vosk_ws_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-) -> impl IntoResponse {
-    if let Some(tx) = state.web_vosk_tx {
-        ws.on_upgrade(move |socket| handle_web_vosk_socket(socket, tx))
-    } else {
-        log::error!("WebVosk ASR interface not configured");
-        // 直接返回一个错误响应
-        axum::response::Response::builder()
-            .status(400)
-            .body("WebVosk ASR interface not configured".into())
-            .unwrap()
-    }
-}
-
-async fn handle_web_vosk_socket(mut socket: WebSocket, vosk_tx: WebVoskTx) {
-    loop {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        if vosk_tx.send(tx).await.is_err() {
-            log::error!("Failed to send WebVosk request channel");
-            break;
-        }
-
-        match rx.await {
-            Ok((wav_data, resp_tx)) => {
-                log::info!(
-                    "Received WebVosk transcription request, data length: {}",
-                    wav_data.len()
-                );
-                socket
-                    .send(Message::Binary(wav_data))
-                    .await
-                    .unwrap_or_else(|e| {
-                        log::error!("Failed to send WAV data to WebVosk client: {}", e);
-                    });
-
-                match socket.recv().await {
-                    Some(Ok(Message::Binary(_))) => {
-                        log::warn!(
-                            "Unexpected binary message from WebVosk client, expected transcription result"
-                        );
-                    }
-                    Some(Ok(Message::Text(text))) => {
-                        log::info!(
-                            "Received transcription result from WebVosk client: {}",
-                            text
-                        );
-                        if resp_tx.send(text.to_string()).is_err() {
-                            log::error!("Failed to send transcription response back to requester");
-                            continue;
-                        }
-                    }
-                    Some(Ok(Message::Ping(_))) => {
-                        log::trace!("Received ping from WebVosk client");
-                    }
-                    Some(Ok(Message::Pong(_))) => {
-                        log::trace!("Received pong from WebVosk client");
-                    }
-                    Some(Ok(Message::Close(_))) => {
-                        log::info!("WebVosk client disconnected");
-                        break;
-                    }
-                    Some(Err(e)) => {
-                        log::error!("WebSocket error while waiting for  result: {}", e);
-                        break;
-                    }
-                    None => {
-                        log::error!("WebSocket connection closed");
-                        break;
-                    }
-                }
-            }
-            Err(e) => {
-                log::error!("Failed to receive WebVosk request: {}", e);
-                continue;
             }
         }
     }

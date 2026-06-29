@@ -1,3 +1,8 @@
+//! `vibetty setup` —— TUI 配置 MQTT 传输,写入 `~/.vibetty/config.toml` 的 `[mqtt]` 段。
+//!
+//! 上下选择字段,Enter 进入编辑,字符直接输入,`s` 保存,`q`/Esc 退出。
+//! 保存时把 `[mqtt]` 段写回 config.toml(保留文件里其它段)。
+
 use crossterm::{
     event::{self, KeyCode, KeyEventKind},
     execute,
@@ -6,152 +11,213 @@ use crossterm::{
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
-    widgets::{Block, Borders, Paragraph},
+    text::Line,
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
+use std::io::Stdout;
 
-use crate::config::{AsrConfig, WhisperASRConfig};
+use crate::config::MqttConfig;
 
-type Term = Terminal<CrosstermBackend<std::io::Stdout>>;
+type Term = Terminal<CrosstermBackend<Stdout>>;
 
-#[derive(Clone, Copy, PartialEq)]
-enum Platform {
-    Whisper,
-    WebVosk,
+fn config_path() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| h.join(".vibetty").join("config.toml"))
 }
 
-impl Platform {
-    fn label(self) -> &'static str {
-        match self {
-            Platform::Whisper => "Whisper",
-            Platform::WebVosk => "WebVosk",
-        }
+/// 读取现有 `[mqtt]` 段,用于预填表单。
+fn load_mqtt() -> Option<MqttConfig> {
+    let path = config_path()?;
+    let content = std::fs::read_to_string(&path).ok()?;
+    #[derive(serde::Deserialize)]
+    struct Section {
+        #[serde(default)]
+        mqtt: Option<MqttConfig>,
     }
-
-    fn all() -> [Platform; 2] {
-        [Platform::Whisper, Platform::WebVosk]
-    }
+    toml::from_str::<Section>(&content).ok()?.mqtt
 }
 
-#[derive(Clone, Copy, PartialEq)]
-#[allow(clippy::upper_case_acronyms)]
-enum Provider {
-    OpenAI,
-    ByteFuture,
-    Groq,
-    GLM,
-    Custom,
+/// 把 `[mqtt]` 段写回 `~/.vibetty/config.toml`,保留文件中已有的其它段。
+fn save_mqtt(mqtt: &MqttConfig) -> anyhow::Result<()> {
+    let path = config_path().ok_or_else(|| anyhow::anyhow!("Cannot find home directory"))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut table: toml::Table = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| toml::from_str(&s).ok())
+        .unwrap_or_default();
+    table.insert("mqtt".to_string(), toml::Value::try_from(mqtt)?);
+    std::fs::write(&path, toml::to_string_pretty(&table)?)?;
+    Ok(())
 }
 
-impl Provider {
-    fn label(self) -> &'static str {
-        match self {
-            Provider::OpenAI => "OpenAI",
-            Provider::ByteFuture => "ByteFuture",
-            Provider::Groq => "Groq",
-            Provider::GLM => "GLM",
-            Provider::Custom => "Custom",
-        }
-    }
-
-    fn all() -> [Provider; 5] {
-        [
-            Provider::OpenAI,
-            Provider::ByteFuture,
-            Provider::Groq,
-            Provider::GLM,
-            Provider::Custom,
-        ]
-    }
-
-    fn defaults(self) -> (&'static str, &'static str) {
-        // (url, model)
-        match self {
-            Provider::OpenAI => (
-                "https://api.openai.com/v1/audio/transcriptions",
-                "whisper-1",
-            ),
-            Provider::ByteFuture => (
-                "https://models.bytefuture.ai/v1/audio/transcriptions",
-                "groq/whisper-large-v3",
-            ),
-            Provider::Groq => (
-                "https://api.groq.com/openai/v1/audio/transcriptions",
-                "whisper-large-v3-turbo",
-            ),
-            Provider::GLM => (
-                "https://open.bigmodel.cn/api/paas/v4/audio/transcriptions",
-                "glm-asr-2512",
-            ),
-            Provider::Custom => ("", ""),
-        }
-    }
-}
-
-/// Field descriptor for the Whisper form.
 struct Field {
     label: &'static str,
-    default: &'static str,
     value: String,
+    hint: &'static str,
 }
 
-impl Field {
-    fn new(label: &'static str, default: &'static str) -> Self {
-        Self {
-            label,
-            default,
-            value: String::new(),
-        }
-    }
+fn fields_from(existing: Option<&MqttConfig>) -> Vec<Field> {
+    let e = existing.cloned();
+    vec![
+        Field {
+            label: "enable",
+            value: e
+                .as_ref()
+                .map(|c| c.enable.to_string())
+                .unwrap_or_else(|| "true".into()),
+            hint: "总开关:true / false(留空=true)",
+        },
+        Field {
+            label: "host",
+            value: e.as_ref().map(|c| c.host.clone()).unwrap_or_default(),
+            hint: "broker 地址,如 broker.emqx.io 或 192.168.1.10",
+        },
+        Field {
+            label: "port",
+            value: e
+                .as_ref()
+                .map(|c| c.port.to_string())
+                .unwrap_or_else(|| "1883".into()),
+            hint: "1883=明文,8883=TLS(自动开 TLS)",
+        },
+        Field {
+            label: "client_id",
+            value: e.as_ref().map(|c| c.client_id.clone()).unwrap_or_default(),
+            hint: "留空则自动 vibetty-{pid}",
+        },
+        Field {
+            label: "use_tls",
+            value: e
+                .as_ref()
+                .and_then(|c| c.use_tls)
+                .map(|b| b.to_string())
+                .unwrap_or_default(),
+            hint: "留空=自动(8883 开);或 true / false",
+        },
+        Field {
+            label: "username",
+            value: e
+                .as_ref()
+                .and_then(|c| c.username.clone())
+                .unwrap_or_default(),
+            hint: "可选",
+        },
+        Field {
+            label: "password",
+            value: e
+                .as_ref()
+                .and_then(|c| c.password.clone())
+                .unwrap_or_default(),
+            hint: "可选",
+        },
+        Field {
+            label: "topic_prefix",
+            value: e
+                .as_ref()
+                .map(|c| c.topic_prefix.clone())
+                .unwrap_or_else(|| "vibetty".into()),
+            hint: "默认 vibetty,建议每台设备不同",
+        },
+        Field {
+            label: "qos",
+            value: e
+                .as_ref()
+                .map(|c| c.qos.to_string())
+                .unwrap_or_else(|| "1".into()),
+            hint: "0 / 1 / 2,默认 1",
+        },
+        Field {
+            label: "keep_alive_secs",
+            value: e
+                .as_ref()
+                .map(|c| c.keep_alive_secs.to_string())
+                .unwrap_or_else(|| "30".into()),
+            hint: "默认 30",
+        },
+    ]
+}
 
-    fn display_value(&self) -> &str {
-        if self.value.is_empty() {
-            self.default
-        } else {
-            &self.value
-        }
+fn field<'a>(fields: &'a [Field], label: &str) -> &'a Field {
+    fields
+        .iter()
+        .find(|f| f.label == label)
+        .expect("MQTT field always present")
+}
+
+/// 由表单字段构建 `MqttConfig`;host 必填,数值/枚举字段非法时报错。
+fn mqtt_from_fields(fields: &[Field]) -> anyhow::Result<MqttConfig> {
+    let enable = match field(fields, "enable").value.trim() {
+        "" | "true" | "1" => true,
+        "false" | "0" => false,
+        s => anyhow::bail!("enable 无效: {s}(true / false)"),
+    };
+    let host = field(fields, "host").value.trim().to_string();
+    if enable && host.is_empty() {
+        anyhow::bail!("enable=true 时 host 不能为空");
     }
+    let port = parse_or(field(fields, "port"), 1883)?;
+    let client_id = field(fields, "client_id").value.clone();
+    let use_tls = match field(fields, "use_tls").value.trim() {
+        "" => None,
+        "true" | "1" => Some(true),
+        "false" | "0" => Some(false),
+        s => anyhow::bail!("use_tls 无效: {s}(留空 / true / false)"),
+    };
+    let username = opt_string(field(fields, "username").value.clone());
+    let password = opt_string(field(fields, "password").value.clone());
+    let topic_prefix = {
+        let raw = field(fields, "topic_prefix").value.trim().to_string();
+        if raw.is_empty() {
+            "vibetty".into()
+        } else {
+            raw
+        }
+    };
+    let qos = parse_or(field(fields, "qos"), 1)?;
+    let keep_alive_secs = parse_or(field(fields, "keep_alive_secs"), 30)?;
+    Ok(MqttConfig {
+        enable,
+        host,
+        port,
+        client_id,
+        use_tls,
+        username,
+        password,
+        topic_prefix,
+        qos,
+        keep_alive_secs,
+    })
+}
+
+fn opt_string(v: String) -> Option<String> {
+    if v.is_empty() { None } else { Some(v) }
+}
+
+fn parse_or<T: std::str::FromStr>(fld: &Field, default: T) -> anyhow::Result<T> {
+    let raw = fld.value.trim();
+    if raw.is_empty() {
+        return Ok(default);
+    }
+    raw.parse::<T>()
+        .map_err(|_| anyhow::anyhow!("{} 无法解析: {raw}", fld.label))
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum Focus {
-    Platform,
-    Provider,
-    Field(usize),
+enum Mode {
+    Select,
+    Edit,
 }
 
 pub fn run_setup() -> anyhow::Result<()> {
-    let existing = load_existing_config();
-
-    let mut platform = match &existing {
-        Some(AsrConfig::Whisper(_)) => Platform::Whisper,
-        Some(AsrConfig::WebVosk) | None => Platform::Whisper,
-    };
-
-    let mut provider = Provider::OpenAI;
-    let mut fields = whisper_fields();
-
-    // If existing config, try to detect provider and load values
-    if let Some(AsrConfig::Whisper(cfg)) = &existing {
-        fields[0].value = cfg.url.clone();
-        fields[1].value = cfg.model.clone();
-        fields[2].value = cfg.api_key.clone();
-        fields[3].value = cfg.lang.clone();
-        fields[4].value = cfg.prompt.clone();
-        // Detect provider by URL
-        for p in Provider::all() {
-            let (url, _) = p.defaults();
-            if cfg.url == url {
-                provider = p;
-                break;
-            }
-        }
-    }
-
-    let mut focus = Focus::Platform;
-    let mut cursor_pos: usize = 0;
-    let mut status_msg: Option<String> = None;
+    let existing = load_mqtt();
+    let mut fields = fields_from(existing.as_ref());
+    let mut state = ListState::default();
+    state.select(Some(0));
+    let mut mode = Mode::Select;
+    let mut status: Option<String> = None;
 
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -161,12 +227,10 @@ pub fn run_setup() -> anyhow::Result<()> {
 
     let result = setup_loop(
         &mut terminal,
-        &mut platform,
-        &mut provider,
         &mut fields,
-        &mut focus,
-        &mut cursor_pos,
-        &mut status_msg,
+        &mut state,
+        &mut mode,
+        &mut status,
     );
 
     disable_raw_mode()?;
@@ -178,188 +242,60 @@ pub fn run_setup() -> anyhow::Result<()> {
 
 fn setup_loop(
     terminal: &mut Term,
-    platform: &mut Platform,
-    provider: &mut Provider,
     fields: &mut [Field],
-    focus: &mut Focus,
-    cursor_pos: &mut usize,
-    status_msg: &mut Option<String>,
+    state: &mut ListState,
+    mode: &mut Mode,
+    status: &mut Option<String>,
 ) -> anyhow::Result<()> {
     loop {
-        terminal.draw(|f| {
-            draw_setup(
-                f,
-                *platform,
-                *provider,
-                fields,
-                *focus,
-                *cursor_pos,
-                status_msg.as_deref(),
-            );
-        })?;
+        terminal.draw(|f| draw(f, fields, state, *mode, status.as_deref()))?;
 
-        if event::poll(std::time::Duration::from_millis(100))? {
-            let evt = event::read()?;
-            if let event::Event::Key(key) = evt {
-                if key.kind != KeyEventKind::Press {
+        if !event::poll(std::time::Duration::from_millis(100))? {
+            continue;
+        }
+        let event::Event::Key(key) = event::read()? else {
+            continue;
+        };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+
+        // 保存/出错后,任意键退出。
+        if status.is_some() {
+            return Ok(());
+        }
+
+        match mode {
+            Mode::Select => match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                KeyCode::Char('s') => match mqtt_from_fields(fields) {
+                    Ok(cfg) => match save_mqtt(&cfg) {
+                        Ok(()) => {
+                            let p = config_path()
+                                .map(|p| p.display().to_string())
+                                .unwrap_or_default();
+                            *status = Some(format!("Saved to {p}. Press any key to exit."));
+                        }
+                        Err(e) => *status = Some(format!("Save failed: {e}")),
+                    },
+                    Err(e) => *status = Some(format!("Invalid input: {e}")),
+                },
+                KeyCode::Up => state.select_previous(),
+                KeyCode::Down => state.select_next(),
+                KeyCode::Enter => *mode = Mode::Edit,
+                _ => {}
+            },
+            Mode::Edit => {
+                let Some(i) = state.selected() else {
+                    *mode = Mode::Select;
                     continue;
-                }
-                if status_msg.is_some() {
-                    return Ok(());
-                }
+                };
                 match key.code {
-                    KeyCode::Esc => match focus {
-                        Focus::Platform => return Ok(()),
-                        Focus::Provider => *focus = Focus::Platform,
-                        Focus::Field(_) => {
-                            *focus = Focus::Provider;
-                        }
-                    },
-                    KeyCode::Enter => {
-                        if let Focus::Platform = focus {
-                            if *platform == Platform::WebVosk {
-                                let config = AsrConfig::WebVosk;
-                                match save_config(&config) {
-                                    Ok(()) => {
-                                        *status_msg = Some("Saved! Press any key to exit.".into())
-                                    }
-                                    Err(e) => *status_msg = Some(format!("Error: {e}")),
-                                }
-                            } else {
-                                *focus = Focus::Provider;
-                            }
-                        } else if let Focus::Provider = focus {
-                            apply_provider_defaults(*provider, fields);
-                            *focus = Focus::Field(0);
-                            *cursor_pos = fields[0].value.len();
-                        } else {
-                            let config = build_config(*platform, fields);
-                            match save_config(&config) {
-                                Ok(()) => {
-                                    *status_msg = Some("Saved! Press any key to exit.".into())
-                                }
-                                Err(e) => *status_msg = Some(format!("Error: {e}")),
-                            }
-                        }
-                    }
-                    KeyCode::Up => match focus {
-                        Focus::Platform => {}
-                        Focus::Provider => {
-                            *focus = Focus::Platform;
-                        }
-                        Focus::Field(0) => {
-                            *focus = Focus::Provider;
-                        }
-                        Focus::Field(i) => {
-                            *i -= 1;
-                            *cursor_pos = fields[*i].value.len();
-                        }
-                    },
-                    KeyCode::Down => match focus {
-                        Focus::Platform => {
-                            if *platform == Platform::Whisper {
-                                *focus = Focus::Provider;
-                            }
-                        }
-                        Focus::Provider => {
-                            *focus = Focus::Field(0);
-                            *cursor_pos = fields[0].value.len();
-                        }
-                        Focus::Field(i) => {
-                            if *i + 1 < fields.len() {
-                                *i += 1;
-                                *cursor_pos = fields[*i].value.len();
-                            }
-                        }
-                    },
-                    KeyCode::Left => match focus {
-                        Focus::Platform => {
-                            let all = Platform::all();
-                            let idx = all.iter().position(|p| *p == *platform).unwrap_or(0);
-                            if idx > 0 {
-                                *platform = all[idx - 1];
-                            }
-                        }
-                        Focus::Provider => {
-                            let all = Provider::all();
-                            let idx = all.iter().position(|p| *p == *provider).unwrap_or(0);
-                            if idx > 0 {
-                                *provider = all[idx - 1];
-                            }
-                        }
-                        Focus::Field(_) => {
-                            if *cursor_pos > 0 {
-                                *cursor_pos -= 1;
-                            }
-                        }
-                    },
-                    KeyCode::Right => match focus {
-                        Focus::Platform => {
-                            let all = Platform::all();
-                            let idx = all.iter().position(|p| *p == *platform).unwrap_or(0);
-                            if idx + 1 < all.len() {
-                                *platform = all[idx + 1];
-                            }
-                        }
-                        Focus::Provider => {
-                            let all = Provider::all();
-                            let idx = all.iter().position(|p| *p == *provider).unwrap_or(0);
-                            if idx + 1 < all.len() {
-                                *provider = all[idx + 1];
-                            }
-                        }
-                        Focus::Field(_) => {
-                            let field = active_field(fields, focus);
-                            let len = if field.value.is_empty() {
-                                0
-                            } else {
-                                field.value.len()
-                            };
-                            if *cursor_pos < len {
-                                *cursor_pos += 1;
-                            }
-                        }
-                    },
-                    KeyCode::Tab => {
-                        *focus = match focus {
-                            Focus::Platform => Focus::Provider,
-                            Focus::Provider => Focus::Field(0),
-                            Focus::Field(i) => {
-                                if *i + 1 < fields.len() {
-                                    Focus::Field(*i + 1)
-                                } else {
-                                    Focus::Platform
-                                }
-                            }
-                        };
-                        *cursor_pos = match focus {
-                            Focus::Field(j) => {
-                                let f = &fields[*j];
-                                if f.value.is_empty() { 0 } else { f.value.len() }
-                            }
-                            _ => 0,
-                        };
-                    }
+                    KeyCode::Esc | KeyCode::Enter => *mode = Mode::Select,
                     KeyCode::Backspace => {
-                        if let Focus::Field(_) = focus {
-                            let field = active_field_mut(fields, focus);
-                            if !field.value.is_empty() {
-                                let pos = (*cursor_pos).min(field.value.len());
-                                if pos > 0 {
-                                    field.value.remove(pos - 1);
-                                    *cursor_pos = pos - 1;
-                                }
-                            }
-                        }
+                        fields[i].value.pop();
                     }
-                    KeyCode::Char(c) => {
-                        if let Focus::Field(_) = focus {
-                            let field = active_field_mut(fields, focus);
-                            let pos = (*cursor_pos).min(field.value.len());
-                            field.value.insert(pos, c);
-                            *cursor_pos = pos + 1;
-                        }
-                    }
+                    KeyCode::Char(c) => fields[i].value.push(c),
                     _ => {}
                 }
             }
@@ -367,260 +303,59 @@ fn setup_loop(
     }
 }
 
-fn active_field<'a>(fields: &'a [Field], focus: &Focus) -> &'a Field {
-    match focus {
-        Focus::Field(i) => &fields[*i],
-        _ => &fields[0],
-    }
-}
-
-fn active_field_mut<'a>(fields: &'a mut [Field], focus: &Focus) -> &'a mut Field {
-    match focus {
-        Focus::Field(i) => &mut fields[*i],
-        _ => &mut fields[0],
-    }
-}
-
-fn whisper_fields() -> Vec<Field> {
-    vec![
-        Field::new("URL", "https://api.openai.com/v1/audio/transcriptions"),
-        Field::new("Model", "whisper-1"),
-        Field::new("API Key", ""),
-        Field::new("Language", ""),
-        Field::new("Prompt", ""),
-    ]
-}
-
-fn apply_provider_defaults(provider: Provider, fields: &mut [Field]) {
-    let (url, model) = provider.defaults();
-    if fields[0].value.is_empty() {
-        fields[0].default = url;
-    }
-    if fields[1].value.is_empty() {
-        fields[1].default = model;
-    }
-}
-
-fn build_config(platform: Platform, fields: &[Field]) -> AsrConfig {
-    match platform {
-        Platform::WebVosk => AsrConfig::WebVosk,
-        Platform::Whisper => AsrConfig::Whisper(WhisperASRConfig {
-            url: if fields[0].value.is_empty() {
-                fields[0].default.to_string()
-            } else {
-                fields[0].value.clone()
-            },
-            api_key: fields[2].value.clone(),
-            lang: fields[3].value.clone(),
-            model: if fields[1].value.is_empty() {
-                fields[1].default.to_string()
-            } else {
-                fields[1].value.clone()
-            },
-            prompt: fields[4].value.clone(),
-        }),
-    }
-}
-
-fn load_existing_config() -> Option<AsrConfig> {
-    let home = dirs::home_dir()?;
-    let path = home.join(".vibetty").join("config.toml");
-    if !path.exists() {
-        return None;
-    }
-    let content = std::fs::read_to_string(&path).ok()?;
-    toml::from_str(&content).ok()
-}
-
-fn save_config(config: &AsrConfig) -> anyhow::Result<()> {
-    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot find home directory"))?;
-    let dir = home.join(".vibetty");
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join("config.toml");
-    let content = toml::to_string_pretty(config)?;
-    std::fs::write(&path, content)?;
-    Ok(())
-}
-
-fn draw_setup(
-    f: &mut Frame,
-    platform: Platform,
-    provider: Provider,
-    fields: &[Field],
-    focus: Focus,
-    cursor_pos: usize,
-    status_msg: Option<&str>,
-) {
-    let size = f.area();
-
-    let outer = Rect::new(
-        size.x + 2,
-        size.y + 1,
-        size.width.saturating_sub(4),
-        size.height.saturating_sub(2),
-    );
-    let block = Block::default()
-        .title("  Vibetty ASR Setup  ")
-        .title_alignment(Alignment::Center)
-        .borders(Borders::ALL);
-    f.render_widget(block, outer);
-
-    let inner = outer.inner(ratatui::layout::Margin::new(2, 1));
-
-    // Split into content area (flexible) and footer (fixed at bottom)
-    let main_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(0),    // content
-            Constraint::Length(3), // footer
-        ])
-        .split(inner);
-
-    // Footer at the bottom
-    let help_text = status_msg
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "[Enter] Confirm  [Esc] Cancel  [\u{2190}\u{2192}] Switch".to_string());
-    f.render_widget(
-        Paragraph::new(help_text)
-            .alignment(Alignment::Center)
-            .block(Block::new().borders(Borders::ALL)),
-        main_chunks[1],
-    );
-
-    // Content area
-    let show_provider = platform == Platform::Whisper;
-
-    let mut constraints = vec![
-        Constraint::Length(1), // Platform label
-        Constraint::Length(1), // Platform selector
-    ];
-
-    if show_provider {
-        constraints.push(Constraint::Length(1)); // Provider label
-        constraints.push(Constraint::Length(1)); // Provider selector
-    }
-
-    constraints.push(Constraint::Length(1)); // blank
-
-    if show_provider {
-        constraints.extend(fields.iter().map(|_| Constraint::Length(1)));
-    }
-
+fn draw(f: &mut Frame, fields: &[Field], state: &mut ListState, mode: Mode, status: Option<&str>) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints(constraints)
-        .split(main_chunks[0]);
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(1),
+            Constraint::Length(3),
+        ])
+        .split(f.area());
 
-    let mut row = 0;
+    let title = Paragraph::new("Vibetty — MQTT setup  (~/.vibetty/config.toml)")
+        .alignment(Alignment::Center)
+        .block(Block::default().borders(Borders::ALL));
+    f.render_widget(title, chunks[0]);
 
-    // Platform label
-    let label_style = if matches!(focus, Focus::Platform) {
-        Style::default().add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-    };
-    f.render_widget(Paragraph::new("Platform:").style(label_style), chunks[row]);
-    row += 1;
-
-    // Platform selector
-    let platform_text = Platform::all()
+    let items: Vec<ListItem<'_>> = fields
         .iter()
-        .map(|p| {
-            if *p == platform {
-                format!("[ {} ]", p.label())
+        .enumerate()
+        .map(|(i, fld)| {
+            let sel = state.selected() == Some(i);
+            let editing = sel && mode == Mode::Edit;
+            let val = if editing {
+                format!("{}▌", fld.value)
+            } else if fld.value.is_empty() {
+                "(empty)".to_string()
             } else {
-                format!("  {}  ", p.label())
-            }
+                fld.value.clone()
+            };
+            ListItem::new(Line::from(format!(
+                " {:<15}: {:<26}  {}",
+                fld.label, val, fld.hint
+            )))
         })
-        .collect::<Vec<_>>()
-        .join("  ");
+        .collect();
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).title("MQTT fields"))
+        .highlight_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▶");
+    f.render_stateful_widget(list, chunks[1], state);
+
+    let footer = match status {
+        Some(s) => s.to_string(),
+        None => match mode {
+            Mode::Select => " ↑/↓ select  ·  Enter edit  ·  s save  ·  q/Esc quit".to_string(),
+            Mode::Edit => " typing edits the field  ·  Enter/Esc done".to_string(),
+        },
+    };
     f.render_widget(
-        Paragraph::new(platform_text).style(if matches!(focus, Focus::Platform) {
-            Style::default()
-                .fg(Color::Rgb(180, 120, 255))
-                .add_modifier(Modifier::BOLD)
-        } else {
-            label_style
-        }),
-        chunks[row],
+        Paragraph::new(footer).alignment(Alignment::Center),
+        chunks[2],
     );
-    row += 1;
-
-    // Provider selector (only for Whisper)
-    if show_provider {
-        let prov_style = if matches!(focus, Focus::Provider) {
-            Style::default().add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        };
-        f.render_widget(Paragraph::new("Provider:").style(prov_style), chunks[row]);
-        row += 1;
-
-        let prov_text = Provider::all()
-            .iter()
-            .map(|p| {
-                if *p == provider {
-                    format!("[ {} ]", p.label())
-                } else {
-                    format!("  {}  ", p.label())
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("  ");
-        f.render_widget(
-            Paragraph::new(prov_text).style(if matches!(focus, Focus::Provider) {
-                Style::default()
-                    .fg(Color::Rgb(180, 120, 255))
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                prov_style
-            }),
-            chunks[row],
-        );
-        row += 1;
-    }
-
-    // blank
-    row += 1;
-
-    // Fields (only show for Whisper)
-    if show_provider {
-        for (i, field) in fields.iter().enumerate() {
-            let is_focused = matches!(focus, Focus::Field(idx) if idx == i);
-            let style = if is_focused {
-                Style::default().add_modifier(Modifier::UNDERLINED)
-            } else {
-                Style::default()
-            };
-
-            let label_col_width: usize = 12;
-            let (display_str, value_style) = if field.value.is_empty() && !field.default.is_empty()
-            {
-                (field.default.to_string(), style.fg(Color::DarkGray))
-            } else {
-                (field.display_value().to_string(), style)
-            };
-
-            let line = format!(
-                "{:width$} {}",
-                field.label,
-                display_str,
-                width = label_col_width
-            );
-            f.render_widget(Paragraph::new(line).style(value_style), chunks[row]);
-
-            if is_focused {
-                let effective_pos = if field.value.is_empty() {
-                    0
-                } else {
-                    cursor_pos
-                };
-                let cursor_x = chunks[row].x + label_col_width as u16 + 1 + effective_pos as u16;
-                let cursor_y = chunks[row].y;
-                f.set_cursor_position((cursor_x, cursor_y));
-            }
-
-            row += 1;
-        }
-    }
 }

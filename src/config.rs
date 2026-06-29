@@ -1,33 +1,12 @@
 use clap::{Parser, Subcommand};
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct WhisperASRConfig {
-    pub url: String,
-    #[serde(default)]
-    pub api_key: String,
-    #[serde(default)]
-    pub lang: String,
-    #[serde(default)]
-    pub model: String,
-    #[serde(default)]
-    pub prompt: String,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "platform")]
-pub enum AsrConfig {
-    Whisper(WhisperASRConfig),
-    /// vosk is a small local ASR engine. And it can run in browser.
-    /// This option uses WebSocket to perform speech recognition in the browser via Vosk,
-    /// sending results to the server. This avoids complex configuration and installation,
-    /// enabling quick deployment and testing.
-    WebVosk,
-}
-
 /// 可选的 MQTT 传输配置。`~/.vibetty/config.toml` 里没有 `[mqtt]` 段时为 None,
 /// 表示完全不启用 MQTT(现有 WebSocket/HTTP 行为不变)。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MqttConfig {
+    /// 是否启用 MQTT 传输;设为 false 可保留配置但关闭(默认 true)
+    #[serde(default = "default_true")]
+    pub enable: bool,
     /// Broker 主机名/IP,例如 "broker.emqx.io" 或 "192.168.1.10"
     pub host: String,
     /// Broker 端口;1883=明文,8883=TLS
@@ -37,13 +16,13 @@ pub struct MqttConfig {
     #[serde(default)]
     pub client_id: String,
     /// 是否启用 TLS;留空则当 port==8883 时自动开启
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub use_tls: Option<bool>,
     /// 用户名(broker 要求鉴权时填)
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
     /// 密码
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
     /// Topic 前缀,所有 topic 都在此前缀下。建议每台设备/会话不同
     #[serde(default = "default_topic_prefix")]
@@ -56,6 +35,9 @@ pub struct MqttConfig {
     pub keep_alive_secs: u64,
 }
 
+fn default_true() -> bool {
+    true
+}
 fn default_mqtt_port() -> u16 {
     1883
 }
@@ -99,10 +81,6 @@ pub struct Cli {
     #[arg(short, long, default_value = "true")]
     pub auto_submit: bool,
 
-    /// ASR config file path (JSON format)
-    #[arg(short = 'c', long)]
-    pub asr_config_path: Option<String>,
-
     /// Command to execute on PTY start (e.g., -- bash -l)
     #[arg(last = true)]
     pub command_args: Vec<String>,
@@ -114,7 +92,7 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Setup ASR configuration via TUI
+    /// Configure MQTT transport via TUI (writes ~/.vibetty/config.toml)
     Setup,
 }
 
@@ -123,18 +101,16 @@ impl Cli {
         RunArgs {
             bind_addr: self.bind_addr.clone(),
             auto_submit: self.auto_submit,
-            asr_config_path: self.asr_config_path.clone(),
             command: self.command_args.clone(),
             image_format: self.image_format.clone(),
         }
     }
 }
 
-/// Separate struct for run-mode args, used by asr_config() logic.
+/// Run-mode args.
 pub struct RunArgs {
     pub bind_addr: String,
     pub auto_submit: bool,
-    pub asr_config_path: Option<String>,
     pub command: Vec<String>,
     pub image_format: String,
 }
@@ -147,71 +123,17 @@ impl RunArgs {
         }
     }
 
-    pub fn asr_config(&self) -> AsrConfig {
-        // 如果指定了配置文件，从文件读取
-        if let Some(path) = &self.asr_config_path {
-            if let Ok(content) = std::fs::read_to_string(path)
-                && let Ok(config) = toml::from_str::<AsrConfig>(&content)
-            {
-                return config;
-            }
-            log::warn!(
-                "Failed to parse ASR config from {}, falling back to env",
-                path
-            );
-        } else if let Some(home) = dirs::home_dir() {
-            let default_config = home.join(".vibetty").join("config.toml");
-            if default_config.exists() {
-                if let Ok(content) = std::fs::read_to_string(&default_config)
-                    && let Ok(config) = toml::from_str::<AsrConfig>(&content)
-                {
-                    return config;
-                }
-                log::warn!(
-                    "Failed to parse ASR config from {}, falling back to env",
-                    default_config.display()
-                );
-            }
-        }
-
-        if std::env::var("VIBECODE_ASR_PLATFORM").unwrap_or_else(|_| "whisper".to_string())
-            == "web_vosk"
-        {
-            return AsrConfig::WebVosk;
-        }
-
-        // 否则从环境变量读取
-        AsrConfig::Whisper(WhisperASRConfig {
-            url: std::env::var("VIBECODE_ASR_URL")
-                .unwrap_or_else(|_| "https://api.openai.com/v1/audio/transcriptions".to_string()),
-            api_key: std::env::var("VIBECODE_ASR_API_KEY").unwrap_or_default(),
-            lang: std::env::var("VIBECODE_ASR_LANG").unwrap_or_else(|_| "".to_string()),
-            model: std::env::var("VIBECODE_ASR_MODEL").unwrap_or_else(|_| "whisper-1".to_string()),
-            prompt: std::env::var("VIBECODE_ASR_PROMPT").unwrap_or_default(),
-        })
-    }
-
-    /// 读取可选的 `[mqtt]` 配置。无配置文件 / 无 `[mqtt]` 段 → None(不启用 MQTT,
-    /// 现有 WebSocket/HTTP 路径完全不变)。与 `asr_config()` 用同一份 toml 文件。
+    /// 读取可选的 `[mqtt]` 配置,固定从 `~/.vibetty/config.toml` 读取。
+    /// 无配置文件 / 无 `[mqtt]` 段 → None(不启用 MQTT,现有 WebSocket/HTTP 路径不变)。
     pub fn mqtt_config(&self) -> Option<MqttConfig> {
         #[derive(serde::Deserialize)]
         struct MqttSection {
             #[serde(default)]
             mqtt: Option<MqttConfig>,
         }
-        let read = |path: &str| -> Option<MqttConfig> {
-            let content = std::fs::read_to_string(path).ok()?;
-            toml::from_str::<MqttSection>(&content).ok()?.mqtt
-        };
-        if let Some(path) = &self.asr_config_path {
-            return read(path);
-        }
-        if let Some(home) = dirs::home_dir() {
-            let p = home.join(".vibetty").join("config.toml");
-            if p.exists() {
-                return read(&p.to_string_lossy());
-            }
-        }
-        None
+        let home = dirs::home_dir()?;
+        let path = home.join(".vibetty").join("config.toml");
+        let content = std::fs::read_to_string(&path).ok()?;
+        toml::from_str::<MqttSection>(&content).ok()?.mqtt
     }
 }

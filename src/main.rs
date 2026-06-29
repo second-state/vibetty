@@ -4,16 +4,13 @@ use axum::{
 };
 use clap::Parser;
 use std::env;
-use std::io::IsTerminal;
 use std::net::SocketAddr;
 use tower_http::services::ServeDir;
 
-mod asr;
 mod config;
 mod mqtt;
 mod png_encode;
 mod protocol;
-mod util;
 mod ws;
 
 mod terminal;
@@ -22,91 +19,10 @@ mod ui;
 
 pub use vibetty_screenshot as screenshot;
 
-use config::{AsrConfig, Cli, Commands};
+use config::{Cli, Commands};
 
 mod setup;
 mod static_page;
-
-fn check_vosk_models(asr_config: &AsrConfig) {
-    if !matches!(asr_config, AsrConfig::WebVosk) {
-        return;
-    }
-
-    let models_dir = match env::home_dir() {
-        Some(home) => home.join(".vibetty/models"),
-        None => {
-            log::warn!("Failed to get home directory");
-            return;
-        }
-    };
-
-    // 检查并创建目录
-    if !models_dir.exists() {
-        if let Err(e) = std::fs::create_dir_all(&models_dir) {
-            log::warn!(
-                "Failed to create models directory {}: {}",
-                models_dir.display(),
-                e
-            );
-            return;
-        }
-        log::info!("Created models directory: {}", models_dir.display());
-    }
-
-    // 检查模型文件
-    let models = [
-        ("vosk-model-small-cn-0.22.zip", "Chinese model"),
-        ("vosk-model-small-en-us-0.15.zip", "English model"),
-    ];
-
-    let mut missing = Vec::new();
-    for (filename, _desc) in models {
-        let path = models_dir.join(filename);
-        if !path.exists() {
-            missing.push((filename, _desc));
-        }
-    }
-
-    if !missing.is_empty() {
-        println!("==========================================");
-        println!("VOSK model files missing:");
-        for (filename, desc) in &missing {
-            println!("  - {} ({})", filename, desc);
-        }
-        println!();
-        println!("Download models to: {}", models_dir.display());
-        println!();
-        println!("Download commands:");
-        println!("  # Chinese model");
-        println!(
-            "  wget -P {} https://alphacephei.com/vosk/models/vosk-model-small-cn-0.22.zip",
-            models_dir.display()
-        );
-        println!(
-            "  # or: curl -o {} https://alphacephei.com/vosk/models/vosk-model-small-cn-0.22.zip",
-            models_dir.join("vosk-model-small-cn-0.22.zip").display()
-        );
-        println!();
-        println!("  # English model");
-        println!(
-            "  wget -P {} https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip",
-            models_dir.display()
-        );
-        println!(
-            "  # or: curl -o {} https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip",
-            models_dir.join("vosk-model-small-en-us-0.15.zip").display()
-        );
-        println!();
-        println!("After download, models will be available at /models/ path");
-        println!("==========================================");
-        std::process::exit(1);
-    } else {
-        log::info!(
-            "VOSK models check passed: all models found in {}",
-            models_dir.display()
-        );
-    }
-}
 
 fn logger_init() -> anyhow::Result<flexi_logger::LoggerHandle> {
     use flexi_logger::{FileSpec, Logger, WriteMode};
@@ -119,52 +35,10 @@ fn logger_init() -> anyhow::Result<flexi_logger::LoggerHandle> {
     Ok(logger)
 }
 
-fn check_deprecated_env_vars() {
-    let deprecated = [
-        ("ASR_PLATFORM", "VIBECODE_ASR_PLATFORM"),
-        ("ASR_URL", "VIBECODE_ASR_URL"),
-        ("ASR_API_KEY", "VIBECODE_ASR_API_KEY"),
-        ("ASR_LANG", "VIBECODE_ASR_LANG"),
-        ("ASR_MODEL", "VIBECODE_ASR_MODEL"),
-        ("ASR_PROMPT", "VIBECODE_ASR_PROMPT"),
-        ("ASR_DEBUG_WAV", "VIBECODE_ASR_DEBUG_WAV"),
-        ("VIBETTY_EXIT_COMMAND", "VIBECODE_EXIT_COMMAND"),
-    ];
-
-    let found: Vec<_> = deprecated
-        .iter()
-        .filter(|(old, _)| std::env::var(old).is_ok())
-        .collect();
-
-    if found.is_empty() {
-        return;
-    }
-
-    let use_color = std::io::stderr().is_terminal()
-        && std::env::var("NO_COLOR").is_err()
-        && std::env::var("TERM").as_deref() != Ok("dumb");
-    let yellow = if use_color { "\x1b[33m" } else { "" };
-    let bold = if use_color { "\x1b[1m" } else { "" };
-    let reset = if use_color { "\x1b[0m" } else { "" };
-
-    eprintln!("{yellow}=========================================={reset}");
-    eprintln!("{bold}{yellow}WARNING: Deprecated environment variables detected!{reset}");
-    eprintln!("{yellow}The following env vars have been renamed:{reset}");
-    for (old, new) in &found {
-        eprintln!("{yellow}  {} -> {}{reset}", old, new);
-    }
-    eprintln!("{yellow}Please update your configuration.{reset}");
-    eprintln!("{yellow}Continuing in 3 seconds...{reset}");
-    eprintln!("{yellow}=========================================={reset}");
-    std::thread::sleep(std::time::Duration::from_secs(3));
-}
-
 #[tokio::main]
 async fn main() {
     dotenv::dotenv().ok();
     let _logger = logger_init().expect("Failed to initialize logger");
-
-    check_deprecated_env_vars();
 
     let cli = Cli::parse();
 
@@ -195,14 +69,6 @@ async fn main() {
 
     let (ui_tx, ui_rx) = tokio::sync::mpsc::channel(100);
 
-    let asr_config = args.asr_config();
-    log::info!("ASR Config: {:?}", asr_config);
-
-    // 检查 VOSK 模型
-    check_vosk_models(&asr_config);
-
-    let (mut asr_interface, web_vosk_tx) = ws::ASRInterface::from_config(asr_config);
-
     let (screenshot_tx, screenshot_rx) = tokio::sync::mpsc::channel(4);
 
     let image_format = args.image_format();
@@ -210,17 +76,18 @@ async fn main() {
     let state = ws::AppState {
         tx: tx.clone(),
         cli_tx,
-        web_vosk_tx,
         screenshot_tx: screenshot_tx.clone(),
         image_format,
     };
 
-    // 可选 MQTT 传输:配置里有 [mqtt] 段才启用,否则完全不碰(WS/HTTP 不变)。
-    if let Some(cfg) = args.mqtt_config() {
-        mqtt::spawn(cfg, state.cli_tx.clone(), state.tx.clone(), image_format);
-        log::info!("[mqtt] transport enabled");
-    } else {
-        log::debug!("[mqtt] not configured, transport disabled (WebSocket/HTTP only)");
+    // 可选 MQTT 传输:配置里有 [mqtt] 段且 enable!=false 才启用,否则完全不碰。
+    match args.mqtt_config() {
+        Some(cfg) if cfg.enable => {
+            mqtt::spawn(cfg, state.cli_tx.clone(), state.tx.clone(), image_format);
+            log::info!("[mqtt] transport enabled");
+        }
+        Some(_) => log::info!("[mqtt] transport disabled by config (enable=false)"),
+        None => log::debug!("[mqtt] not configured, transport disabled (WebSocket/HTTP only)"),
     }
 
     let listener = tokio::net::TcpListener::bind(&args.bind_addr)
@@ -233,12 +100,10 @@ async fn main() {
     let app = Router::new()
         .route("/", get(static_page::index_handler))
         .route("/app.js", get(static_page::app_js_handler))
-        .route("/setup", get(static_page::setup_handler))
         .route("/vosk", get(static_page::vosk_handler))
         .route("/ws", get(ws::ws_handler))
         .route("/screenshot", get(ws::screenshot_handler))
         .route("/api/change-dir", post(static_page::change_dir_handler))
-        .route("/vosk_ws", get(ws::web_vosk_ws_handler))
         .nest_service(
             "/models",
             ServeDir::new(env::home_dir().unwrap().join(".vibetty/models")),
@@ -286,7 +151,6 @@ async fn main() {
     loop {
         let r = ws::run_command(
             command.clone(),
-            &mut asr_interface,
             cli_rx,
             &mut ui_rx,
             tx.clone(),

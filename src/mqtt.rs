@@ -7,8 +7,7 @@
 //! - 控制类消息(输入文本、切目录、同步、滚动)合并到一个 `control` topic,payload 是
 //!   `ClientMessage` 的 serde JSON,靠 `type` 字段区分。
 //!
-//! 只桥接终端核心消息;`notification`/`asr_result`/`title`/`voice_*` 不走 MQTT
-//! (WebSocket 端照常,ESP32 不需要)。
+//! 只桥接终端核心消息;`notification`/`title` 不走 MQTT(WebSocket 端照常,ESP32 不需要)。
 //!
 //! ## Topic 约定(`{topic_prefix}` 来自 `[mqtt]`)
 //! 入站(ESP32 -> vibetty,vibetty 订阅):
@@ -140,7 +139,7 @@ async fn run_bridge(
                     }
                 }
                 Ok(_) => {
-                    // Notification/AsrResult/Title/ScreenImage 不走 MQTT(ESP32 不需要)
+                    // Notification/Title/ScreenImage 不走 MQTT(ESP32 不需要)
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     log::warn!("[mqtt] broadcast lagged {n} messages");
