@@ -206,7 +206,12 @@ pub async fn run_command(
         Error,
     }
 
-    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+    // headless(无 TTY,例如纯 MQTT、无 WS 客户端)时 crossterm 返回 0×0 而非 Err,
+    // unwrap_or 兜不住;尺寸为 0 会让 vt80 渲染时 overflow panic。拿不到有效尺寸时默认 80×24。
+    let (cols, rows) = match crossterm::terminal::size() {
+        Ok((c, r)) if c > 0 && r > 0 => (c, r),
+        _ => (80, 24),
+    };
     let vt_cols = cols.saturating_sub(TUI_COLS_PADDING);
     let vt_rows = rows.saturating_sub(TUI_ROWS_PADDING);
 
