@@ -9,7 +9,6 @@ pub async fn new_with_command<S: AsRef<str>>(
     args: &[S],
     env: &[(S, S)],
     size: (u16, u16),
-    current_dir: Option<std::path::PathBuf>,
 ) -> anyhow::Result<EchokitChild> {
     let (row, col) = size;
 
@@ -49,8 +48,7 @@ pub async fn new_with_command<S: AsRef<str>>(
     // (see CommandBuilder::as_command), whereas pty-process inherited the
     // parent's cwd. Fall back to vibetty's own cwd so the spawned program
     // launches in the directory the user started vibetty from.
-    let cwd = current_dir.or_else(|| std::env::current_dir().ok());
-    if let Some(cwd) = cwd {
+    if let Ok(cwd) = std::env::current_dir() {
         cmd.cwd(cwd);
     }
 

@@ -1,7 +1,4 @@
-use axum::{
-    Router,
-    routing::{get, post},
-};
+use axum::{Router, routing::get};
 use clap::Parser;
 use std::env;
 use std::net::SocketAddr;
@@ -103,7 +100,6 @@ async fn main() {
         .route("/vosk", get(static_page::vosk_handler))
         .route("/ws", get(ws::ws_handler))
         .route("/screenshot", get(ws::screenshot_handler))
-        .route("/api/change-dir", post(static_page::change_dir_handler))
         .nest_service(
             "/models",
             ServeDir::new(env::home_dir().unwrap().join(".vibetty/models")),
@@ -142,44 +138,25 @@ async fn main() {
     };
 
     let mut ui_title = String::new();
-    let mut current_dir: Option<std::path::PathBuf> = None;
-    let mut cli_rx = cli_rx;
     let mut ui_rx = ui_rx;
-    let mut screenshot_rx = screenshot_rx;
 
     let command = args.command;
-    loop {
-        let r = ws::run_command(
-            command.clone(),
-            cli_rx,
-            &mut ui_rx,
-            tx.clone(),
-            current_dir,
-            listen_port,
-            screenshot_rx,
-            &mut tui,
-            &mut ui_title,
-            &server_url,
-            image_format,
-            args.auto_submit,
-        )
-        .await;
-        match r {
-            Ok(ws::RunCommandResult::ChangeDir(new_path, returned_rx, returned_screenshot_rx)) => {
-                log::info!("Changing directory to: {}", new_path);
-                current_dir = Some(new_path.into());
-                cli_rx = returned_rx;
-                screenshot_rx = returned_screenshot_rx;
-            }
-            Ok(ws::RunCommandResult::Done) => {
-                log::info!("Command execution finished");
-                break;
-            }
-            Err(e) => {
-                log::error!("Error in command execution: {}", e);
-                break;
-            }
-        }
+    if let Err(e) = ws::run_command(
+        command,
+        cli_rx,
+        &mut ui_rx,
+        tx.clone(),
+        listen_port,
+        screenshot_rx,
+        &mut tui,
+        &mut ui_title,
+        &server_url,
+        image_format,
+        args.auto_submit,
+    )
+    .await
+    {
+        log::error!("Error in command execution: {}", e);
     }
 
     ui::cleanup_terminal(&mut tui).ok();

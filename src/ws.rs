@@ -64,22 +64,12 @@ fn send_screen(tx: &ServerTx, screen: Arc<vt100::Screen>) {
     let _ = tx.send(ServerMessage::Screen(screen));
 }
 
-pub enum RunCommandResult {
-    Done,
-    ChangeDir(
-        String,
-        ClientRx,
-        mpsc::Receiver<tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>>,
-    ),
-}
-
 #[allow(clippy::too_many_arguments)]
 pub async fn run_command(
     command: Vec<String>,
     mut rx: ClientRx,
     ui_rx: &mut mpsc::Receiver<crate::ui::UIEvent>,
     tx: ServerTx,
-    current_dir: Option<std::path::PathBuf>,
     listen_port: u16,
     mut screenshot_rx: mpsc::Receiver<tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>>,
     tui: &mut crate::ui::TuiTerminal,
@@ -87,17 +77,7 @@ pub async fn run_command(
     ui_footer: &str,
     image_format: crate::protocol::ImageFormat,
     auto_submit: bool,
-) -> anyhow::Result<RunCommandResult> {
-    let dir_path = current_dir
-        .as_ref()
-        .and_then(|p| p.to_str())
-        .unwrap_or(".")
-        .to_string();
-    let _ = tx.send(ServerMessage::notification(
-        crate::protocol::NotificationLevel::Info,
-        format!("Working in: {}", dir_path),
-    ));
-
+) -> anyhow::Result<()> {
     enum TerminalEvent {
         Input(crate::protocol::ClientMessage),
         InputClosed,
@@ -125,7 +105,6 @@ pub async fn run_command(
         &command[1..],
         &[("VIBETTY_PORT".to_string(), listen_port.to_string())],
         (vt_rows, vt_cols),
-        current_dir,
     )
     .await?;
 
@@ -310,14 +289,6 @@ pub async fn run_command(
                     vt_parser.screen_mut().set_scrollback(0);
                 }
             }
-            TerminalEvent::Input(ClientMessage::ChangeDir(path)) => {
-                log::info!("Change directory requested: {}", path);
-                let _ = tx.send(ServerMessage::notification(
-                    crate::protocol::NotificationLevel::Info,
-                    format!("Changing directory to: {}", path),
-                ));
-                return Ok(RunCommandResult::ChangeDir(path, rx, screenshot_rx));
-            }
             // ASR 已移至 ESP32 端;收到旧的 voice_input_* 消息静默丢弃,不转写、不回 asr_result。
             TerminalEvent::Input(
                 ClientMessage::VoiceInputStart(_)
@@ -336,7 +307,7 @@ pub async fn run_command(
         }
     }
 
-    Ok(RunCommandResult::Done)
+    Ok(())
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]

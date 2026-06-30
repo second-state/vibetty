@@ -37,10 +37,6 @@ pub enum ClientMessage {
 
     #[serde(rename = "scroll_down")]
     ScrollDown,
-
-    /// 切换工作目录
-    #[serde(rename = "change_dir")]
-    ChangeDir(String),
 }
 
 impl Debug for ClientMessage {
@@ -62,7 +58,6 @@ impl Debug for ClientMessage {
             ClientMessage::Input(text) => f.debug_tuple("Input").field(text).finish(),
             ClientMessage::ScrollUp => f.debug_tuple("ScrollUp").finish(),
             ClientMessage::ScrollDown => f.debug_tuple("ScrollDown").finish(),
-            ClientMessage::ChangeDir(path) => f.debug_tuple("ChangeDir").field(path).finish(),
         }
     }
 }
@@ -207,11 +202,6 @@ impl ClientMessage {
     /// 创建文本输入消息
     pub fn input(text: impl Into<String>) -> Self {
         Self::Input(text.into())
-    }
-
-    /// 创建切换目录消息
-    pub fn change_dir(path: impl Into<String>) -> Self {
-        Self::ChangeDir(path.into())
     }
 }
 

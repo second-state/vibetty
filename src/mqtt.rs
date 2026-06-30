@@ -4,7 +4,7 @@
 //! 它是 WebSocket(`handle_socket`)之外的“另一个前端”:后端的 `cli_tx` / broadcast `tx`
 //! 通道、PTY 逻辑全部复用。ESP32 端无需 msgpack——
 //! - 原始按键 / PTY 输出走 raw 字节 topic(`pty_in` / `pty_out`);
-//! - 控制类消息(输入文本、切目录、同步、滚动)合并到一个 `control` topic,payload 是
+//! - 控制类消息(输入文本、同步、滚动)合并到一个 `control` topic,payload 是
 //!   `ClientMessage` 的 serde JSON,靠 `type` 字段区分。
 //!
 //! 只桥接终端核心消息;`notification`/`title` 不走 MQTT(WebSocket 端照常,ESP32 不需要)。
@@ -15,8 +15,8 @@
 //! - `{p}/control`  控制类消息(JSON)      -> 见下方 [`parse_control`]
 //!
 //!   `control` payload 是 `ClientMessage` 的 serde JSON(`{"type":...,"data":...}`):
-//!   `type` ∈ `input_text`(data=字符串)、`change_dir`(data=路径)、
-//!   `sync` / `scroll_up` / `scroll_down`(无 data)。原始按键走 `pty_in`,不在此 topic。
+//!   `type` ∈ `input_text`(data=字符串)、`sync` / `scroll_up` / `scroll_down`(无 data)。
+//!   原始按键走 `pty_in`,不在此 topic。
 //!
 //! 出站(vibetty -> ESP32,vibetty 发布):
 //! - `{p}/pty_out`  PTY 原始输出字节  <- `PtyOutput`
@@ -54,8 +54,8 @@ fn qos_from_u8(q: u8) -> QoS {
 const INBOUND_TOPICS: &[&str] = &["pty_in", "control"];
 
 /// 解析 `{prefix}/control` 的 JSON payload。复用 `ClientMessage` 的 serde 形式
-/// (`{"type":"input_text","data":"ls"}` 等),只接受控制类消息(input/change_dir/
-/// sync/scroll_*);原始按键(`pty_in`)与语音类在此 topic 上忽略并告警。
+/// (`{"type":"input_text","data":"ls"}` 等),只接受控制类消息(input/sync/scroll_*);
+/// 原始按键(`pty_in`)与语音类在此 topic 上忽略并告警。
 fn parse_control(payload: &[u8]) -> Option<ClientMessage> {
     let cm = match serde_json::from_slice::<ClientMessage>(payload) {
         Ok(cm) => cm,
@@ -67,7 +67,6 @@ fn parse_control(payload: &[u8]) -> Option<ClientMessage> {
     if matches!(
         cm,
         ClientMessage::Input(_)
-            | ClientMessage::ChangeDir(_)
             | ClientMessage::Sync
             | ClientMessage::ScrollUp
             | ClientMessage::ScrollDown
