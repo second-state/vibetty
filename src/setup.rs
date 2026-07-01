@@ -68,12 +68,12 @@ fn fields_from(existing: Option<&MqttConfig>) -> Vec<Field> {
                 .as_ref()
                 .map(|c| c.enable.to_string())
                 .unwrap_or_else(|| "true".into()),
-            hint: "总开关:true / false(留空=true)",
+            hint: "Master switch: true / false (empty = true)",
         },
         Field {
             label: "host",
             value: e.as_ref().map(|c| c.host.clone()).unwrap_or_default(),
-            hint: "broker 地址,如 broker.emqx.io 或 192.168.1.10",
+            hint: "Broker address, e.g. broker.emqx.io or 192.168.1.10",
         },
         Field {
             label: "port",
@@ -81,12 +81,12 @@ fn fields_from(existing: Option<&MqttConfig>) -> Vec<Field> {
                 .as_ref()
                 .map(|c| c.port.to_string())
                 .unwrap_or_else(|| "1883".into()),
-            hint: "1883=明文,8883=TLS(自动开 TLS)",
+            hint: "1883 = plaintext, 8883 = TLS (auto)",
         },
         Field {
             label: "client_id",
             value: e.as_ref().map(|c| c.client_id.clone()).unwrap_or_default(),
-            hint: "留空则自动 vibetty-{pid}",
+            hint: "Empty = auto vibetty-{pid}",
         },
         Field {
             label: "use_tls",
@@ -95,7 +95,7 @@ fn fields_from(existing: Option<&MqttConfig>) -> Vec<Field> {
                 .and_then(|c| c.use_tls)
                 .map(|b| b.to_string())
                 .unwrap_or_default(),
-            hint: "留空=自动(8883 开);或 true / false",
+            hint: "Empty = auto (8883 on); or true / false",
         },
         Field {
             label: "username",
@@ -103,7 +103,7 @@ fn fields_from(existing: Option<&MqttConfig>) -> Vec<Field> {
                 .as_ref()
                 .and_then(|c| c.username.clone())
                 .unwrap_or_default(),
-            hint: "可选",
+            hint: "Broker login; also topic segment 1 (empty = device fingerprint)",
         },
         Field {
             label: "password",
@@ -111,15 +111,7 @@ fn fields_from(existing: Option<&MqttConfig>) -> Vec<Field> {
                 .as_ref()
                 .and_then(|c| c.password.clone())
                 .unwrap_or_default(),
-            hint: "可选",
-        },
-        Field {
-            label: "topic_prefix",
-            value: e
-                .as_ref()
-                .map(|c| c.topic_prefix.clone())
-                .unwrap_or_else(|| "vibetty".into()),
-            hint: "默认 vibetty,建议每台设备不同",
+            hint: "Optional",
         },
         Field {
             label: "qos",
@@ -127,7 +119,7 @@ fn fields_from(existing: Option<&MqttConfig>) -> Vec<Field> {
                 .as_ref()
                 .map(|c| c.qos.to_string())
                 .unwrap_or_else(|| "1".into()),
-            hint: "0 / 1 / 2,默认 1",
+            hint: "0 / 1 / 2, default 1",
         },
         Field {
             label: "keep_alive_secs",
@@ -135,7 +127,7 @@ fn fields_from(existing: Option<&MqttConfig>) -> Vec<Field> {
                 .as_ref()
                 .map(|c| c.keep_alive_secs.to_string())
                 .unwrap_or_else(|| "30".into()),
-            hint: "默认 30",
+            hint: "Default 30",
         },
     ]
 }
@@ -152,11 +144,11 @@ fn mqtt_from_fields(fields: &[Field]) -> anyhow::Result<MqttConfig> {
     let enable = match field(fields, "enable").value.trim() {
         "" | "true" | "1" => true,
         "false" | "0" => false,
-        s => anyhow::bail!("enable 无效: {s}(true / false)"),
+        s => anyhow::bail!("invalid enable: {s} (true / false)"),
     };
     let host = field(fields, "host").value.trim().to_string();
     if enable && host.is_empty() {
-        anyhow::bail!("enable=true 时 host 不能为空");
+        anyhow::bail!("host is required when enable=true");
     }
     let port = parse_or(field(fields, "port"), 1883)?;
     let client_id = field(fields, "client_id").value.clone();
@@ -164,18 +156,10 @@ fn mqtt_from_fields(fields: &[Field]) -> anyhow::Result<MqttConfig> {
         "" => None,
         "true" | "1" => Some(true),
         "false" | "0" => Some(false),
-        s => anyhow::bail!("use_tls 无效: {s}(留空 / true / false)"),
+        s => anyhow::bail!("invalid use_tls: {s} (empty / true / false)"),
     };
     let username = opt_string(field(fields, "username").value.clone());
     let password = opt_string(field(fields, "password").value.clone());
-    let topic_prefix = {
-        let raw = field(fields, "topic_prefix").value.trim().to_string();
-        if raw.is_empty() {
-            "vibetty".into()
-        } else {
-            raw
-        }
-    };
     let qos = parse_or(field(fields, "qos"), 1)?;
     let keep_alive_secs = parse_or(field(fields, "keep_alive_secs"), 30)?;
     Ok(MqttConfig {
@@ -186,7 +170,6 @@ fn mqtt_from_fields(fields: &[Field]) -> anyhow::Result<MqttConfig> {
         use_tls,
         username,
         password,
-        topic_prefix,
         qos,
         keep_alive_secs,
     })
@@ -202,7 +185,7 @@ fn parse_or<T: std::str::FromStr>(fld: &Field, default: T) -> anyhow::Result<T> 
         return Ok(default);
     }
     raw.parse::<T>()
-        .map_err(|_| anyhow::anyhow!("{} 无法解析: {raw}", fld.label))
+        .map_err(|_| anyhow::anyhow!("cannot parse {}: {raw}", fld.label))
 }
 
 #[derive(Clone, Copy, PartialEq)]

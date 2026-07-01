@@ -24,9 +24,6 @@ pub struct MqttConfig {
     /// 密码
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
-    /// Topic 前缀,所有 topic 都在此前缀下。建议每台设备/会话不同
-    #[serde(default = "default_topic_prefix")]
-    pub topic_prefix: String,
     /// QoS: 0 / 1 / 2,默认 1(AtLeastOnce,适合弱网)
     #[serde(default = "default_mqtt_qos")]
     pub qos: u8,
@@ -40,9 +37,6 @@ fn default_true() -> bool {
 }
 fn default_mqtt_port() -> u16 {
     1883
-}
-fn default_topic_prefix() -> String {
-    "vibetty".to_string()
 }
 fn default_mqtt_qos() -> u8 {
     1

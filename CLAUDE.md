@@ -29,13 +29,14 @@ axum 0.8 WebSocket 终端服务器。把一个 PTY 会话同时当成「浏览�
 
 **协议设计(用户拍板)**:**不用 msgpack**。原始按键走独立 raw 字节 topic(`pty_in`);其余 4 个控制类消息(输入文本/同步/滚动)合并到一个 `control` topic,payload 是 `ClientMessage` 的 serde JSON(`{"type":...,"data":...}`),靠 `type` 字段区分——ESP32 只解一次 JSON,`type` 命名和 WS 协议一致。出站只发 `PtyOutput`(原始字节)和 `Screen`(整张图);`notification`/`title` 不走 MQTT。
 
-Topic 约定(`{topic_prefix}` 来自 `[mqtt]`,默认 `vibetty`):
-- 入站(ESP32→vibetty,vibetty 订阅):`{p}/pty_in`(原始按键字节→PtyInput)、`{p}/control`(JSON `{"type":...}`,覆盖 input_text/sync/scroll_up/scroll_down,见 `mqtt.rs::parse_control`)
-- 出站(vibetty→ESP32):`{p}/pty_out`(PTY 原始输出←PtyOutput)、`{p}/screen`(整张 PNG/JPEG 字节←Screen,无分块,格式靠 magic bytes 区分)
+Topic 命名:实例前缀自动构造为 `{user}/{device}/{pid}/vibetty`——`user`=`[mqtt] username`(没配则回退 `device`)、`device`=SHA256(machine-uid) 前 16 hex(设备指纹,跨机器唯一)、`pid`=进程 pid(区分同机多实例,跨重启变)。**不再有 `topic_prefix` 配置项**。
+- 入站(ESP32→vibetty,vibetty 订阅):`{prefix}/pty_in`(原始按键字节→PtyInput)、`{prefix}/control`(JSON `{"type":...}`,覆盖 input_text/sync/scroll_up/scroll_down,见 `mqtt.rs::parse_control`)
+- 出站(vibetty→ESP32):`{prefix}/pty_out`(PTY 原始输出←PtyOutput)、`{prefix}/screen`(整张 PNG/JPEG 字节←Screen,无分块,格式靠 magic bytes 区分)
+- presence(服务发现):实例在 `{prefix}` 发 retained 公告(`{prefix,client_id,ts}`),每 15s 心跳重发;LWT 异常掉线时清空。ESP32 订阅 `{user}/+/+/vibetty` 即可发现该用户所有实例(通配 device 与 pid)。
 
 改动要点:
 - `src/mqtt.rs`:`spawn()` + `run_bridge()`。出站订阅 broadcast 只转 `PtyOutput`/`Screen`(`Screen`→`ws::render_screen_to_image` 整张渲染);入站 `eventloop.poll()`→strip 前缀→`pty_in` 直构造 `PtyInput`、`control` 走 `parse_control()`(serde JSON,只接受 input/sync/scroll_*,其余告警丢弃)→`cli_tx`。`poll()` 出错只 warn+sleep 2s(rumqttc 自动重连)。
-- `src/config.rs`:`MqttConfig{enable=true,host,port=1883,client_id,use_tls:Option<bool>,username,password,topic_prefix="vibetty",qos=1,keep_alive_secs=30}` + `effective_use_tls()`(port==8883 自动开)、`effective_client_id()`(空则 `vibetty-{pid}`);`RunArgs::mqtt_config()` 固定从 `~/.vibetty/config.toml` 读 `[mqtt]` 段(不再支持 `-c`)。
+- `src/config.rs`:`MqttConfig{enable=true,host,port=1883,client_id,use_tls:Option<bool>,username,password,qos=1,keep_alive_secs=30}` + `effective_use_tls()`(port==8883 自动开)、`effective_client_id()`(空则 `vibetty-{pid}`);`RunArgs::mqtt_config()` 固定从 `~/.vibetty/config.toml` 读 `[mqtt]` 段(不再支持 `-c`)。
 - `src/main.rs`:解析到且 `enable != false` 才 `mqtt::spawn(...)`。
 - `src/setup.rs`:`vibetty setup` 是 ratatui TUI,编辑 `[mqtt]` 全部字段写回 `~/.vibetty/config.toml`(`save_mqtt` 用 `toml::Table` 保留其它段),预填已有配置。
 - `src/ws.rs`:`render_screen_to_image`、`IMAGE_CHUNK_SIZE` 改 `pub(crate)` 供 mqtt.rs 用。
@@ -52,7 +53,6 @@ Topic 约定(`{topic_prefix}` 来自 `[mqtt]`,默认 `vibetty`):
 enable = true           # 设 false 可临时关闭、保留配置
 host = "127.0.0.1"      # 或 EMQX/Mosquitto 地址
 port = 1883             # 8883 自动开 TLS
-topic_prefix = "vibetty/test"
 qos = 1
 # client_id / username / password / use_tls 可选
 ```
