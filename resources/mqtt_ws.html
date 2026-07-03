@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vibetty over MQTT-WS</title>
+<!-- mqtt.js 浏览器构建(走 CDN)。连内置 broker 的 WS 端口(默认 :9001)。 -->
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+<style>
+  :root { color-scheme: dark; }
+  body { font: 13px/1.5 ui-monospace, Menlo, Consolas, monospace; margin: 0; padding: 14px; background: #1b1b1b; color: #d4d4d4; }
+  h3 { margin: 0 0 6px; font-weight: 600; }
+  .muted { color: #888; }
+  code { background: #2a2a2a; padding: 1px 4px; border-radius: 2px; }
+  .bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 5px 0; }
+  input { font: inherit; padding: 3px 6px; background: #2a2a2a; color: #d4d4d4; border: 1px solid #444; border-radius: 3px; }
+  button { font: inherit; padding: 3px 10px; background: #2a2a2a; color: #d4d4d4; border: 1px solid #555; border-radius: 3px; cursor: pointer; }
+  button:hover { background: #333; }
+  button:disabled { opacity: .5; cursor: default; }
+  .panel { display: flex; gap: 12px; margin-top: 10px; align-items: flex-start; flex-wrap: wrap; }
+  #log { background: #000; padding: 8px 10px; height: 240px; overflow: auto; border: 1px solid #333; border-radius: 3px; white-space: pre-wrap; word-break: break-all; flex: 1; min-width: 280px; }
+  .in { color: #7ee787; } .out { color: #79c0ff; } .sys { color: #d29922; } .err { color: #ff7b72; }
+  #screenBox { flex: 1; min-width: 280px; }
+  #screen { max-width: 100%; image-rendering: pixelated; border: 1px solid #333; border-radius: 3px; display: none; }
+</style>
+</head>
+<body>
+<h3>vibetty over MQTT-WS</h3>
+<div class="muted">连内置 broker(:9001),自动发现实例 → 看屏幕图片 + 发输入</div>
+
+<div class="bar">
+  WS URL <input id="url" value="ws://localhost:9001" size="24">
+  Client ID <input id="cid" size="14">
+  <button id="btnConnect">连接</button>
+  <button id="btnDisconnect" disabled>断开</button>
+  <span id="status" class="muted">未连接</span>
+</div>
+
+<div class="bar">
+  当前实例 <input id="prefix" size="34" placeholder="(等待 presence 自动填入)">
+  <button id="btnResub">重新订阅 screen/pty_out</button>
+</div>
+
+<div class="panel">
+  <div id="screenBox">
+    <div class="muted">屏幕 <span id="screenInfo"></span></div>
+    <img id="screen">
+  </div>
+  <div style="flex:1; min-width:280px">
+    <div class="muted">消息日志</div>
+    <div id="log"></div>
+  </div>
+</div>
+
+<div class="bar" style="margin-top:10px">
+  发单键/raw 到 <code>{prefix}/pty_in</code>
+  <input id="ptyin" size="14" placeholder="如 a">
+  <button id="btnPty">发送</button>
+  <span class="muted">(\n / \r / \t 会被转义)</span>
+</div>
+<div class="bar">
+  发文本命令到 <code>{prefix}/control</code>(input_text)
+  <input id="cmd" size="22" placeholder="如 ls -la">
+  <button id="btnCmd">发送(自动加换行)</button>
+  <button id="btnSync">sync 刷屏</button>
+</div>
+<div class="bar">
+  自定义 publish
+  topic <input id="pubt" size="22"> : <input id="pubp" size="18">
+  <button id="btnPub">发布</button>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const genId = () => 'web-' + Math.random().toString(16).slice(2, 10);
+$('cid').value = genId();
+
+const logEl = $('log');
+function append(cls, msg) {
+  const t = new Date().toLocaleTimeString();
+  const div = document.createElement('div');
+  div.className = cls;
+  div.textContent = `[${t}] ${msg}`;
+  logEl.appendChild(div);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+let client = null;
+let currentPrefix = null;
+let lastImgUrl = null;
+const setStatus = s => $('status').textContent = s;
+const setConnected = on => { $('btnConnect').disabled = on; $('btnDisconnect').disabled = !on; };
+
+function showImage(bytes, mime, topic) {
+  if (lastImgUrl) URL.revokeObjectURL(lastImgUrl);
+  const blob = new Blob([bytes], { type: mime });
+  lastImgUrl = URL.createObjectURL(blob);
+  const img = $('screen');
+  img.src = lastImgUrl;
+  img.style.display = 'block';
+  $('screenInfo').textContent = `${topic}  ${bytes.length}B ${mime}  ${new Date().toLocaleTimeString()}`;
+}
+
+function subscribePrefix(p) {
+  if (!client || !p) return;
+  for (const t of [`${p}/screen`, `${p}/pty_out`]) {
+    client.subscribe(t, e => e ? append('err', `订阅失败 ${t}: ${e}`) : append('out', `→ 订阅 ${t}`));
+  }
+}
+
+function setPrefix(p) {
+  if (currentPrefix === p) return;
+  currentPrefix = p;
+  $('prefix').value = p;
+  append('sys', `当前实例: ${p}`);
+  subscribePrefix(p);
+}
+
+function onMessage(topic, payload) {
+  const bytes = new Uint8Array(payload);
+  const segs = topic.split('/');
+  // presence:[user, device, pid, "vibetty"](4 段)= 实例前缀本身
+  if (segs.length === 4 && segs[3] === 'vibetty') {
+    if (bytes.length === 0) { append('sys', `${topic}: 实例下线(LWT 空 payload)`); return; }
+    let p; try { p = JSON.parse(new TextDecoder().decode(bytes)); } catch { return; }
+    if (p && p.prefix) setPrefix(p.prefix);
+    append('in', `← presence ${topic} : ${JSON.stringify(p)}`);
+    return;
+  }
+  if (topic.endsWith('/screen')) {
+    const isJpeg = bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+    showImage(bytes, isJpeg ? 'image/jpeg' : 'image/png', topic);
+    return;
+  }
+  if (topic.endsWith('/pty_out')) {
+    append('in', `← ${topic} : ${new TextDecoder().decode(bytes)}`);
+    return;
+  }
+  const txt = new TextDecoder().decode(bytes);
+  let body = txt; try { body = JSON.stringify(JSON.parse(txt)); } catch {}
+  append('in', `← ${topic} : ${body}`);
+}
+
+$('btnConnect').onclick = () => {
+  if (client) return;
+  const url = $('url').value.trim();
+  const cid = $('cid').value.trim() || genId();
+  append('sys', `连接 ${url} (client_id=${cid}) …`);
+  setStatus('连接中…');
+  try { client = mqtt.connect(url, { clientId: cid, clean: true, reconnectPeriod: 0 }); }
+  catch (e) { append('err', `连接异常: ${e}`); setStatus('错误'); return; }
+  client.on('connect', () => {
+    setStatus('已连接 ✅'); setConnected(true); append('sys', '已连接');
+    // 宽通配发现所有实例(任意 user/device/pid)
+    client.subscribe('+/+/+/vibetty', e => e ? append('err', `订阅 presence 失败: ${e}`) : append('out', '→ 订阅 +/+/+/vibetty'));
+  });
+  client.on('error', e => { append('err', `错误: ${e.message || e}`); setStatus('错误'); });
+  client.on('close', () => { append('sys', '连接关闭'); setStatus('未连接'); setConnected(false); });
+  client.on('message', onMessage);
+};
+$('btnDisconnect').onclick = () => { if (!client) return; client.end(true); client = null; setConnected(false); setStatus('未连接'); append('sys', '已断开'); };
+
+$('btnResub').onclick = () => { const p = $('prefix').value.trim(); if (p) { currentPrefix = null; setPrefix(p); } };
+
+$('btnPty').onclick = () => {
+  if (!client) return append('err', '未连接');
+  const p = $('prefix').value.trim(); if (!p) return append('err', '还没有 prefix');
+  let s = $('ptyin').value.replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\t/g, '\t');
+  client.publish(`${p}/pty_in`, s, e => e ? append('err', `发送失败: ${e}`) : append('out', `→ ${p}/pty_in : ${JSON.stringify(s)}`));
+};
+$('btnCmd').onclick = () => {
+  if (!client) return append('err', '未连接');
+  const p = $('prefix').value.trim(); if (!p) return append('err', '还没有 prefix');
+  const text = $('cmd').value + '\n';
+  const payload = JSON.stringify({ type: 'input_text', data: text });
+  client.publish(`${p}/control`, payload, e => e ? append('err', `发送失败: ${e}`) : append('out', `→ ${p}/control : ${payload}`));
+};
+$('btnSync').onclick = () => {
+  if (!client) return append('err', '未连接');
+  const p = $('prefix').value.trim(); if (!p) return append('err', '还没有 prefix');
+  client.publish(`${p}/control`, JSON.stringify({ type: 'sync' }), e => e ? append('err', `发送失败: ${e}`) : append('out', `→ ${p}/control : sync`));
+};
+$('btnPub').onclick = () => {
+  if (!client) return append('err', '未连接');
+  const t = $('pubt').value.trim(); const v = $('pubp').value;
+  client.publish(t, v, e => e ? append('err', `发布失败: ${e}`) : append('out', `→ ${t} : ${v}`));
+};
+</script>
+</body>
+</html>

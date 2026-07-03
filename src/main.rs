@@ -4,6 +4,7 @@ use std::env;
 use std::net::SocketAddr;
 use tower_http::services::ServeDir;
 
+mod broker;
 mod config;
 mod mqtt;
 mod png_encode;
@@ -79,7 +80,23 @@ async fn main() {
 
     // 可选 MQTT 传输:配置里有 [mqtt] 段且 enable!=false 才启用,否则完全不碰。
     match args.mqtt_config() {
-        Some(cfg) if cfg.enable => {
+        Some(mut cfg) if cfg.enable => {
+            if cfg.builtin_broker {
+                // 内置 broker:进程内起 rumqttd(TCP port + WS builtin_ws_port,匿名),
+                // 自身 client 改连本地;ESP32 直接连本机 port。host/use_tls 被忽略。
+                match broker::spawn_builtin(&cfg) {
+                    Ok(()) => {
+                        cfg.host = "127.0.0.1".to_string();
+                        cfg.use_tls = Some(false);
+                        log::info!(
+                            "[mqtt] builtin broker on :{}(tcp) + :{}(ws); client connects locally",
+                            cfg.port,
+                            cfg.builtin_ws_port
+                        );
+                    }
+                    Err(e) => log::error!("[mqtt] failed to start builtin broker: {e}"),
+                }
+            }
             mqtt::spawn(cfg, state.cli_tx.clone(), state.tx.clone(), image_format);
             log::info!("[mqtt] transport enabled");
         }
@@ -98,6 +115,7 @@ async fn main() {
         .route("/", get(static_page::index_handler))
         .route("/app.js", get(static_page::app_js_handler))
         .route("/vosk", get(static_page::vosk_handler))
+        .route("/mqtt_ws", get(static_page::mqtt_ws_handler))
         .route("/ws", get(ws::ws_handler))
         .route("/screenshot", get(ws::screenshot_handler))
         .nest_service(

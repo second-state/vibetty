@@ -73,7 +73,7 @@ fn fields_from(existing: Option<&MqttConfig>) -> Vec<Field> {
         Field {
             label: "host",
             value: e.as_ref().map(|c| c.host.clone()).unwrap_or_default(),
-            hint: "Broker address, e.g. broker.emqx.io or 192.168.1.10",
+            hint: "Host, or full URL mqtt://[user:pass@]host:port",
         },
         Field {
             label: "port",
@@ -129,6 +129,22 @@ fn fields_from(existing: Option<&MqttConfig>) -> Vec<Field> {
                 .unwrap_or_else(|| "30".into()),
             hint: "Default 30",
         },
+        Field {
+            label: "builtin_broker",
+            value: e
+                .as_ref()
+                .map(|c| c.builtin_broker.to_string())
+                .unwrap_or_else(|| "false".into()),
+            hint: "true = spawn built-in rumqttd here (LAN, anonymous)",
+        },
+        Field {
+            label: "builtin_ws_port",
+            value: e
+                .as_ref()
+                .map(|c| c.builtin_ws_port.to_string())
+                .unwrap_or_else(|| "9001".into()),
+            hint: "Built-in broker WS port (default 9001)",
+        },
     ]
 }
 
@@ -139,16 +155,22 @@ fn field<'a>(fields: &'a [Field], label: &str) -> &'a Field {
         .expect("MQTT field always present")
 }
 
-/// 由表单字段构建 `MqttConfig`;host 必填,数值/枚举字段非法时报错。
+/// 由表单字段构建 `MqttConfig`;host 必填(除非 builtin_broker=true),数值/枚举字段非法时报错。
 fn mqtt_from_fields(fields: &[Field]) -> anyhow::Result<MqttConfig> {
     let enable = match field(fields, "enable").value.trim() {
         "" | "true" | "1" => true,
         "false" | "0" => false,
         s => anyhow::bail!("invalid enable: {s} (true / false)"),
     };
+    let builtin_broker = match field(fields, "builtin_broker").value.trim() {
+        "" | "false" | "0" => false,
+        "true" | "1" => true,
+        s => anyhow::bail!("invalid builtin_broker: {s} (true / false)"),
+    };
     let host = field(fields, "host").value.trim().to_string();
-    if enable && host.is_empty() {
-        anyhow::bail!("host is required when enable=true");
+    // 内置 broker 模式下 host 会被忽略(改连 127.0.0.1),所以不强制填。
+    if enable && !builtin_broker && host.is_empty() {
+        anyhow::bail!("host is required when enable=true and builtin_broker=false");
     }
     let port = parse_or(field(fields, "port"), 1883)?;
     let client_id = field(fields, "client_id").value.clone();
@@ -162,6 +184,7 @@ fn mqtt_from_fields(fields: &[Field]) -> anyhow::Result<MqttConfig> {
     let password = opt_string(field(fields, "password").value.clone());
     let qos = parse_or(field(fields, "qos"), 1)?;
     let keep_alive_secs = parse_or(field(fields, "keep_alive_secs"), 30)?;
+    let builtin_ws_port = parse_or(field(fields, "builtin_ws_port"), 9001)?;
     Ok(MqttConfig {
         enable,
         host,
@@ -172,6 +195,8 @@ fn mqtt_from_fields(fields: &[Field]) -> anyhow::Result<MqttConfig> {
         password,
         qos,
         keep_alive_secs,
+        builtin_broker,
+        builtin_ws_port,
     })
 }
 

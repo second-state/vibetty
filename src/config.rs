@@ -30,6 +30,15 @@ pub struct MqttConfig {
     /// keep-alive 秒数,默认 30
     #[serde(default = "default_keep_alive")]
     pub keep_alive_secs: u64,
+    /// 是否在进程内启动内置 rumqttd broker(默认 false)。
+    /// 为 true 时:vibetty 自带 broker,监听 port(TCP)+ builtin_ws_port(WS),
+    /// 自身的 client 改连 127.0.0.1;ESP32 直接连本机 port。host/use_tls 被忽略。
+    /// 注意:匿名认证 + 监听 0.0.0.0,仅内网使用,勿暴露公网。
+    #[serde(default)]
+    pub builtin_broker: bool,
+    /// 内置 broker 的 WebSocket 端口(默认 9001),仅 builtin_broker=true 时生效。
+    #[serde(default = "default_ws_port")]
+    pub builtin_ws_port: u16,
 }
 
 fn default_true() -> bool {
@@ -43,6 +52,9 @@ fn default_mqtt_qos() -> u8 {
 }
 fn default_keep_alive() -> u64 {
     30
+}
+fn default_ws_port() -> u16 {
+    9001
 }
 
 impl MqttConfig {
@@ -80,7 +92,7 @@ pub struct Cli {
     pub command_args: Vec<String>,
 
     /// Image format for screen rendering (png or jpeg)
-    #[arg(short = 'f', long, default_value = "jpeg", value_name = "FORMAT")]
+    #[arg(short = 'f', long, default_value = "png", value_name = "FORMAT")]
     pub image_format: String,
 }
 

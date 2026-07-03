@@ -112,7 +112,7 @@ fn sanitize_segment(s: &str) -> String {
 }
 
 /// 实例 topic 前缀 `{user}/{device}/{pid}/vibetty`。
-/// - `user`:配了 `[mqtt] username` 用它(多租户隔离);没配则回退 `device`(设备指纹)。
+/// - `user`:配了 `[mqtt] username` 用它(多租户隔离);没配则回退 `root`。
 /// - `device`:设备指纹,定位机器。
 /// - `pid`:区分同一台机器上同时跑的多个 vibetty(跨重启变,ESP32 用 `+` 通配订阅)。
 fn instance_prefix(username: Option<&str>) -> String {
@@ -121,7 +121,7 @@ fn instance_prefix(username: Option<&str>) -> String {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(sanitize_segment)
-        .unwrap_or_else(|| device.clone());
+        .unwrap_or_else(|| "root".to_string());
     format!("{user}/{device}/{pid}/vibetty", pid = std::process::id())
 }
 
@@ -159,18 +159,91 @@ fn parse_control(payload: &[u8]) -> Option<ClientMessage> {
     }
 }
 
+/// 从 broker URL(`mqtt://user:pass@host:port`)解析出的连接信息。
+struct ParsedBroker {
+    host: String,
+    port: u16,
+    username: Option<String>,
+    password: Option<String>,
+    use_tls: bool,
+}
+
+/// 解析 `mqtt://[user[:pass]@]host[:port]` / `mqtts://...`。
+/// 无账号时 username/password 为 None(匿名连,用于内置 broker 等)。
+fn parse_broker_url(url: &str) -> anyhow::Result<ParsedBroker> {
+    let (scheme, rest) = url
+        .split_once("://")
+        .ok_or_else(|| anyhow::anyhow!("MQTT URL missing '://': {url}"))?;
+    let use_tls = match scheme {
+        "mqtt" => false,
+        "mqtts" => true,
+        other => anyhow::bail!("Unsupported MQTT scheme '{other}', use mqtt:// or mqtts://"),
+    };
+    let (userinfo, hostport) = match rest.rfind('@') {
+        Some(idx) => (Some(&rest[..idx]), &rest[idx + 1..]),
+        None => (None, rest),
+    };
+    let hostport = hostport.split('/').next().unwrap_or(hostport);
+    let (username, password) = match userinfo {
+        Some(u) => match u.split_once(':') {
+            Some((user, pass)) => (Some(user.to_string()), Some(pass.to_string())),
+            None => (Some(u.to_string()), None),
+        },
+        None => (None, None), // 匿名
+    };
+    let default_port = if use_tls { 8883 } else { 1883 };
+    let (host, port) = match hostport.rsplit_once(':') {
+        Some((h, p)) => (h.to_string(), p.parse::<u16>().unwrap_or(default_port)),
+        None => (hostport.to_string(), default_port),
+    };
+    if host.is_empty() {
+        anyhow::bail!("MQTT URL missing host");
+    }
+    Ok(ParsedBroker {
+        host,
+        port,
+        username,
+        password,
+        use_tls,
+    })
+}
+
 async fn run_bridge(
     cfg: MqttConfig,
     cli_tx: mpsc::Sender<ClientMessage>,
     tx: broadcast::Sender<ServerMessage>,
     image_format: ImageFormat,
 ) {
-    let prefix = instance_prefix(cfg.username.as_deref());
     let qos = qos_from_u8(cfg.qos);
     let client_id = cfg.effective_client_id();
 
-    let mut opts = MqttOptions::new(client_id.clone(), cfg.host.clone(), cfg.port);
+    // host 字段可以是完整 URL(mqtt://user:pass@host:port)或纯主机名。URL 形式从中提取
+    // host/port/user/pass/tls(匿名 URL 则匿名连,用于内置 broker);纯主机名沿用 cfg 独立字段。
+    let broker = if cfg.host.contains("://") {
+        match parse_broker_url(&cfg.host) {
+            Ok(b) => b,
+            Err(e) => {
+                log::error!("[mqtt] invalid broker url {:?}: {e}", cfg.host);
+                return;
+            }
+        }
+    } else {
+        ParsedBroker {
+            host: cfg.host.clone(),
+            port: cfg.port,
+            username: cfg.username.clone(),
+            password: cfg.password.clone(),
+            use_tls: cfg.effective_use_tls(),
+        }
+    };
+    let prefix = instance_prefix(broker.username.as_deref());
+
+    let mut opts = MqttOptions::new(client_id.clone(), broker.host.clone(), broker.port);
     opts.set_keep_alive(std::time::Duration::from_secs(cfg.keep_alive_secs));
+    // rumqttc 默认 max packet 10KB:screen PNG(~22KB)/ pty_out(可达几十 KB+)会超,
+    // 触发 eventloop error → 断连重连 → LWT 覆盖 presence(页面就显示"实例下线")。
+    // 调到 1MB(broker 端 max_payload_size 也要 >= 此值,见 broker.rs)。
+    opts.set_max_packet_size(1024 * 1024, 1024 * 1024);
     // 遗嘱:异常掉线 → broker 自动发空 retained → 清掉本实例的 presence 公告。
     opts.set_last_will(LastWill {
         topic: prefix.clone(),
@@ -178,10 +251,10 @@ async fn run_bridge(
         qos,
         retain: true,
     });
-    if cfg.effective_use_tls() {
+    if broker.use_tls {
         opts.set_transport(Transport::tls_with_default_config());
     }
-    if let (Some(u), Some(p)) = (&cfg.username, &cfg.password) {
+    if let (Some(u), Some(p)) = (&broker.username, &broker.password) {
         opts.set_credentials(u.clone(), p.clone());
     }
 
@@ -225,8 +298,9 @@ async fn run_bridge(
         cfg.effective_use_tls()
     );
 
-    // 出站任务:订阅 broadcast,只转发 PtyOutput 和 Screen(整张图),其余忽略。
-    let pty_out_topic = format!("{prefix}/pty_out");
+    // 出站任务:订阅 broadcast,只转发 Screen(整张图),其余忽略。
+    // 暂时停发 pty_out(调试期只发 screen PNG);恢复时取消下面注释即可。
+    // let pty_out_topic = format!("{prefix}/pty_out");
     let screen_topic = format!("{prefix}/screen");
     let mut rx = tx.subscribe();
     let pub_client = client.clone();
@@ -234,14 +308,17 @@ async fn run_bridge(
         loop {
             match rx.recv().await {
                 Ok(ServerMessage::PtyOutput(bytes)) => {
-                    if let Err(e) = pub_client.publish(&pty_out_topic, qos, false, bytes).await {
-                        log::warn!("[mqtt] publish pty_out failed: {e}");
-                    }
+                    // 暂时不往 MQTT 发 pty_out(调试期只发 screen PNG)。
+                    log::debug!("[mqtt] pty_out skipped ({} bytes)", bytes.len());
                 }
                 Ok(ServerMessage::Screen(screen)) => {
                     let mut h = 0u16;
                     match render_screen_to_image(screen.as_ref(), None, &mut h, image_format) {
                         Ok(img) if !img.is_empty() => {
+                            log::debug!(
+                                "[mqtt] screen image {} bytes -> {screen_topic}",
+                                img.len()
+                            );
                             if let Err(e) = pub_client.publish(&screen_topic, qos, false, img).await
                             {
                                 log::warn!("[mqtt] publish screen failed: {e}");
@@ -291,5 +368,44 @@ async fn run_bridge(
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_url_with_credentials() {
+        let b = parse_broker_url("mqtt://alice:secret@broker.example.com:1883").unwrap();
+        assert_eq!(b.host, "broker.example.com");
+        assert_eq!(b.port, 1883);
+        assert_eq!(b.username.as_deref(), Some("alice"));
+        assert_eq!(b.password.as_deref(), Some("secret"));
+        assert!(!b.use_tls);
+    }
+
+    #[test]
+    fn parse_url_anonymous() {
+        // 无账号(匿名 URL):username/password 为 None
+        let b = parse_broker_url("mqtt://192.168.1.10:1883").unwrap();
+        assert_eq!(b.host, "192.168.1.10");
+        assert_eq!(b.port, 1883);
+        assert!(b.username.is_none());
+        assert!(b.password.is_none());
+        assert!(!b.use_tls);
+    }
+
+    #[test]
+    fn parse_url_mqtts_default_port() {
+        let b = parse_broker_url("mqtts://bob:p@host.io").unwrap();
+        assert_eq!(b.port, 8883);
+        assert!(b.use_tls);
+    }
+
+    #[test]
+    fn parse_url_no_port() {
+        let b = parse_broker_url("mqtt://broker.io").unwrap();
+        assert_eq!(b.port, 1883);
     }
 }
