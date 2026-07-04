@@ -86,11 +86,10 @@ async fn main() {
                 // 自身 client 改连本地;ESP32 直接连本机 port。host/use_tls 被忽略。
                 match broker::spawn_builtin(&cfg) {
                     Ok(()) => {
-                        cfg.host = "127.0.0.1".to_string();
-                        cfg.use_tls = Some(false);
+                        cfg.broker = format!("mqtt://127.0.0.1:{}", cfg.builtin_port);
                         log::info!(
                             "[mqtt] builtin broker on :{}(tcp) + :{}(ws); client connects locally",
-                            cfg.port,
+                            cfg.builtin_port,
                             cfg.builtin_ws_port
                         );
                     }

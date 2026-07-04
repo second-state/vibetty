@@ -115,8 +115,7 @@ fn sanitize_segment(s: &str) -> String {
 /// - `user`:配了 `[mqtt] username` 用它(多租户隔离);没配则回退 `root`。
 /// - `device`:设备指纹,定位机器。
 /// - `pid`:区分同一台机器上同时跑的多个 vibetty(跨重启变,ESP32 用 `+` 通配订阅)。
-fn instance_prefix(username: Option<&str>) -> String {
-    let device = device_hash();
+fn instance_prefix(username: Option<&str>, device: &str) -> String {
     let user = username
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -215,28 +214,20 @@ async fn run_bridge(
     image_format: ImageFormat,
 ) {
     let qos = qos_from_u8(cfg.qos);
-    let client_id = cfg.effective_client_id();
 
-    // host 字段可以是完整 URL(mqtt://user:pass@host:port)或纯主机名。URL 形式从中提取
-    // host/port/user/pass/tls(匿名 URL 则匿名连,用于内置 broker);纯主机名沿用 cfg 独立字段。
-    let broker = if cfg.host.contains("://") {
-        match parse_broker_url(&cfg.host) {
-            Ok(b) => b,
-            Err(e) => {
-                log::error!("[mqtt] invalid broker url {:?}: {e}", cfg.host);
-                return;
-            }
-        }
-    } else {
-        ParsedBroker {
-            host: cfg.host.clone(),
-            port: cfg.port,
-            username: cfg.username.clone(),
-            password: cfg.password.clone(),
-            use_tls: cfg.effective_use_tls(),
+    // broker 是完整 URL:mqtt(s)://[user:pass@]host[:port]。scheme 决定 TLS,
+    // user/pass 在 URL 里;端口没写则按协议默认(mqtt 1883 / mqtts 8883)。
+    let broker = match parse_broker_url(&cfg.broker) {
+        Ok(b) => b,
+        Err(e) => {
+            log::error!("[mqtt] invalid broker url {:?}: {e}", cfg.broker);
+            return;
         }
     };
-    let prefix = instance_prefix(broker.username.as_deref());
+    let device = device_hash();
+    let prefix = instance_prefix(broker.username.as_deref(), &device);
+    // client_id 带机器指纹 + pid:跨机器跑多个 vibetty(复用同一 config)也不会撞 client_id。
+    let client_id = format!("vibetty-{device}-{}", std::process::id());
 
     let mut opts = MqttOptions::new(client_id.clone(), broker.host.clone(), broker.port);
     opts.set_keep_alive(std::time::Duration::from_secs(cfg.keep_alive_secs));
@@ -295,7 +286,7 @@ async fn run_bridge(
 
     log::info!(
         "[mqtt] bridging: prefix={prefix} qos={qos:?} tls={} (pty_in raw + control JSON, no msgpack)",
-        cfg.effective_use_tls()
+        broker.use_tls
     );
 
     // 出站任务:订阅 broadcast,只转发 Screen(整张图),其余忽略。

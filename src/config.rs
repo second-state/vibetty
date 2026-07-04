@@ -7,23 +7,14 @@ pub struct MqttConfig {
     /// 是否启用 MQTT 传输;设为 false 可保留配置但关闭(默认 true)
     #[serde(default = "default_true")]
     pub enable: bool,
-    /// Broker 主机名/IP,例如 "broker.emqx.io" 或 "192.168.1.10"
-    pub host: String,
-    /// Broker 端口;1883=明文,8883=TLS
-    #[serde(default = "default_mqtt_port")]
-    pub port: u16,
-    /// MQTT client id(broker 内需唯一)。留空则用 `vibetty-{pid}`
+    /// Broker URL:`mqtt://[user:pass@]host[:port]`(明文)或 `mqtts://...`(TLS)。
+    /// user/pass/TLS/端口 都从这个 URL 解析(scheme 决定 TLS)。
+    /// `port` 字段只在内置 broker 模式下单独用。
     #[serde(default)]
-    pub client_id: String,
-    /// 是否启用 TLS;留空则当 port==8883 时自动开启
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub use_tls: Option<bool>,
-    /// 用户名(broker 要求鉴权时填)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub username: Option<String>,
-    /// 密码
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub password: Option<String>,
+    pub broker: String,
+    /// 内置 broker 的 TCP 监听端口(默认 1883)。URL 没写端口时按协议默认(mqtt 1883 / mqtts 8883)。
+    #[serde(default = "default_mqtt_port")]
+    pub builtin_port: u16,
     /// QoS: 0 / 1 / 2,默认 1(AtLeastOnce,适合弱网)
     #[serde(default = "default_mqtt_qos")]
     pub qos: u8,
@@ -32,7 +23,7 @@ pub struct MqttConfig {
     pub keep_alive_secs: u64,
     /// 是否在进程内启动内置 rumqttd broker(默认 false)。
     /// 为 true 时:vibetty 自带 broker,监听 port(TCP)+ builtin_ws_port(WS),
-    /// 自身的 client 改连 127.0.0.1;ESP32 直接连本机 port。host/use_tls 被忽略。
+    /// 自身的 client 改连 127.0.0.1;ESP32 直接连本机 port。broker(user/pass/TLS)被忽略。
     /// 注意:匿名认证 + 监听 0.0.0.0,仅内网使用,勿暴露公网。
     #[serde(default)]
     pub builtin_broker: bool,
@@ -55,21 +46,6 @@ fn default_keep_alive() -> u64 {
 }
 fn default_ws_port() -> u16 {
     9001
-}
-
-impl MqttConfig {
-    /// 解析后的有效 TLS 设置:显式优先,否则 port==8883 自动开
-    pub fn effective_use_tls(&self) -> bool {
-        self.use_tls.unwrap_or(self.port == 8883)
-    }
-    /// client_id 为空时兜底为 `vibetty-{pid}`
-    pub fn effective_client_id(&self) -> String {
-        if self.client_id.is_empty() {
-            format!("vibetty-{}", std::process::id())
-        } else {
-            self.client_id.clone()
-        }
-    }
 }
 
 #[derive(Parser, Debug)]

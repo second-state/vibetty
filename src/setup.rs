@@ -68,50 +68,20 @@ fn fields_from(existing: Option<&MqttConfig>) -> Vec<Field> {
                 .as_ref()
                 .map(|c| c.enable.to_string())
                 .unwrap_or_else(|| "true".into()),
-            hint: "Master switch: true / false (empty = true)",
+            hint: "[Space] toggle true / false",
         },
         Field {
-            label: "host",
-            value: e.as_ref().map(|c| c.host.clone()).unwrap_or_default(),
-            hint: "Host, or full URL mqtt://[user:pass@]host:port",
+            label: "broker",
+            value: e.as_ref().map(|c| c.broker.clone()).unwrap_or_default(),
+            hint: "mqtt(s)://[user:pass@]host:port  (mqtts = TLS)",
         },
         Field {
-            label: "port",
+            label: "builtin_port",
             value: e
                 .as_ref()
-                .map(|c| c.port.to_string())
+                .map(|c| c.builtin_port.to_string())
                 .unwrap_or_else(|| "1883".into()),
-            hint: "1883 = plaintext, 8883 = TLS (auto)",
-        },
-        Field {
-            label: "client_id",
-            value: e.as_ref().map(|c| c.client_id.clone()).unwrap_or_default(),
-            hint: "Empty = auto vibetty-{pid}",
-        },
-        Field {
-            label: "use_tls",
-            value: e
-                .as_ref()
-                .and_then(|c| c.use_tls)
-                .map(|b| b.to_string())
-                .unwrap_or_default(),
-            hint: "Empty = auto (8883 on); or true / false",
-        },
-        Field {
-            label: "username",
-            value: e
-                .as_ref()
-                .and_then(|c| c.username.clone())
-                .unwrap_or_default(),
-            hint: "Broker login; also topic segment 1 (empty = device fingerprint)",
-        },
-        Field {
-            label: "password",
-            value: e
-                .as_ref()
-                .and_then(|c| c.password.clone())
-                .unwrap_or_default(),
-            hint: "Optional",
+            hint: "Built-in broker TCP port (default 1883)",
         },
         Field {
             label: "qos",
@@ -135,7 +105,7 @@ fn fields_from(existing: Option<&MqttConfig>) -> Vec<Field> {
                 .as_ref()
                 .map(|c| c.builtin_broker.to_string())
                 .unwrap_or_else(|| "false".into()),
-            hint: "true = spawn built-in rumqttd here (LAN, anonymous)",
+            hint: "[Space] toggle: spawn built-in rumqttd here (LAN)",
         },
         Field {
             label: "builtin_ws_port",
@@ -167,41 +137,24 @@ fn mqtt_from_fields(fields: &[Field]) -> anyhow::Result<MqttConfig> {
         "true" | "1" => true,
         s => anyhow::bail!("invalid builtin_broker: {s} (true / false)"),
     };
-    let host = field(fields, "host").value.trim().to_string();
-    // 内置 broker 模式下 host 会被忽略(改连 127.0.0.1),所以不强制填。
-    if enable && !builtin_broker && host.is_empty() {
-        anyhow::bail!("host is required when enable=true and builtin_broker=false");
+    let broker = field(fields, "broker").value.trim().to_string();
+    // 内置 broker 模式下 broker 会被覆盖成 mqtt://127.0.0.1:port,所以不强制填。
+    if enable && !builtin_broker && broker.is_empty() {
+        anyhow::bail!("broker URL is required when enable=true and builtin_broker=false");
     }
-    let port = parse_or(field(fields, "port"), 1883)?;
-    let client_id = field(fields, "client_id").value.clone();
-    let use_tls = match field(fields, "use_tls").value.trim() {
-        "" => None,
-        "true" | "1" => Some(true),
-        "false" | "0" => Some(false),
-        s => anyhow::bail!("invalid use_tls: {s} (empty / true / false)"),
-    };
-    let username = opt_string(field(fields, "username").value.clone());
-    let password = opt_string(field(fields, "password").value.clone());
+    let builtin_port = parse_or(field(fields, "builtin_port"), 1883)?;
     let qos = parse_or(field(fields, "qos"), 1)?;
     let keep_alive_secs = parse_or(field(fields, "keep_alive_secs"), 30)?;
     let builtin_ws_port = parse_or(field(fields, "builtin_ws_port"), 9001)?;
     Ok(MqttConfig {
         enable,
-        host,
-        port,
-        client_id,
-        use_tls,
-        username,
-        password,
+        broker,
+        builtin_port,
         qos,
         keep_alive_secs,
         builtin_broker,
         builtin_ws_port,
     })
-}
-
-fn opt_string(v: String) -> Option<String> {
-    if v.is_empty() { None } else { Some(v) }
 }
 
 fn parse_or<T: std::str::FromStr>(fld: &Field, default: T) -> anyhow::Result<T> {
@@ -298,12 +251,29 @@ fn setup_loop(
                     *mode = Mode::Select;
                     continue;
                 };
+                let is_bool = matches!(fields[i].label, "enable" | "builtin_broker");
                 match key.code {
                     KeyCode::Esc | KeyCode::Enter => *mode = Mode::Select,
-                    KeyCode::Backspace => {
+                    // bool 字段:按键切换,不逐字输入
+                    KeyCode::Char(' ') if is_bool => {
+                        fields[i].value = if fields[i].value.trim() == "true" {
+                            "false"
+                        } else {
+                            "true"
+                        }
+                        .to_string();
+                    }
+                    KeyCode::Char('t') | KeyCode::Char('T') if is_bool => {
+                        fields[i].value = "true".to_string();
+                    }
+                    KeyCode::Char('f') | KeyCode::Char('F') if is_bool => {
+                        fields[i].value = "false".to_string();
+                    }
+                    // 文本/数值字段:正常输入
+                    KeyCode::Backspace if !is_bool => {
                         fields[i].value.pop();
                     }
-                    KeyCode::Char(c) => fields[i].value.push(c),
+                    KeyCode::Char(c) if !is_bool => fields[i].value.push(c),
                     _ => {}
                 }
             }
@@ -332,7 +302,10 @@ fn draw(f: &mut Frame, fields: &[Field], state: &mut ListState, mode: Mode, stat
         .map(|(i, fld)| {
             let sel = state.selected() == Some(i);
             let editing = sel && mode == Mode::Edit;
-            let val = if editing {
+            let is_bool = matches!(fld.label, "enable" | "builtin_broker");
+            let val = if editing && is_bool {
+                format!("[{}]", fld.value)
+            } else if editing {
                 format!("{}▌", fld.value)
             } else if fld.value.is_empty() {
                 "(empty)".to_string()
@@ -359,7 +332,7 @@ fn draw(f: &mut Frame, fields: &[Field], state: &mut ListState, mode: Mode, stat
         Some(s) => s.to_string(),
         None => match mode {
             Mode::Select => " ↑/↓ select  ·  Enter edit  ·  s save  ·  q/Esc quit".to_string(),
-            Mode::Edit => " typing edits the field  ·  Enter/Esc done".to_string(),
+            Mode::Edit => " typing edits  ·  [Space] toggle bool  ·  Enter/Esc done".to_string(),
         },
     };
     f.render_widget(

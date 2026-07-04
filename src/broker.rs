@@ -44,7 +44,7 @@ fn build_config(cfg: &MqttConfig) -> anyhow::Result<Config> {
 
     let tcp = ServerSettings {
         name: "tcp".to_string(),
-        listen: format!("0.0.0.0:{}", cfg.port).parse::<SocketAddr>()?,
+        listen: format!("0.0.0.0:{}", cfg.builtin_port).parse::<SocketAddr>()?,
         tls: None,
         next_connection_delay_ms: 1,
         connections: connections.clone(),
