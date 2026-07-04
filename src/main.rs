@@ -26,8 +26,15 @@ fn logger_init() -> anyhow::Result<flexi_logger::LoggerHandle> {
     use flexi_logger::{FileSpec, Logger, WriteMode};
 
     let logger = Logger::try_with_env_or_str("info")?
-        .log_to_file(FileSpec::default())
+        .log_to_file(FileSpec::default().suppress_timestamp())
+        .append() // 每次启动接着上次写;达到 rotate 的 10MB 才轮转成新文件
         .write_mode(WriteMode::BufferAndFlush)
+        .rotate(
+            flexi_logger::Criterion::Size(10_000_000), // 10MB
+            flexi_logger::Naming::Numbers,
+            flexi_logger::Cleanup::KeepForDays(5),
+        )
+        .format_for_files(flexi_logger::detailed_format)
         .start()?;
 
     Ok(logger)

@@ -310,7 +310,7 @@ async fn run_bridge(
                                 "[mqtt] screen image {} bytes -> {screen_topic}",
                                 img.len()
                             );
-                            if let Err(e) = pub_client.publish(&screen_topic, qos, false, img).await
+                            if let Err(e) = pub_client.publish(&screen_topic, qos, true, img).await
                             {
                                 log::warn!("[mqtt] publish screen failed: {e}");
                             }
