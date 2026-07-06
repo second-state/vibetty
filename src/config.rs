@@ -56,6 +56,10 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
 
+    /// Path to config.toml (overrides default ~/.vibetty/config.toml)
+    #[arg(long, value_name = "PATH", global = true)]
+    pub config: Option<std::path::PathBuf>,
+
     /// Listen address (e.g., "0.0.0.0:3000")
     #[arg(short, long, default_value = "0.0.0.0:3000")]
     pub bind_addr: String,
@@ -85,6 +89,7 @@ impl Cli {
             auto_submit: self.auto_submit,
             command: self.command_args.clone(),
             image_format: self.image_format.clone(),
+            config: self.config.clone(),
         }
     }
 }
@@ -95,6 +100,7 @@ pub struct RunArgs {
     pub auto_submit: bool,
     pub command: Vec<String>,
     pub image_format: String,
+    pub config: Option<std::path::PathBuf>,
 }
 
 impl RunArgs {
@@ -105,7 +111,8 @@ impl RunArgs {
         }
     }
 
-    /// 读取可选的 `[mqtt]` 配置,固定从 `~/.vibetty/config.toml` 读取。
+    /// 读取可选的 `[mqtt]` 配置。
+    /// 优先用 `--config` 指定的路径,否则回退 `~/.vibetty/config.toml`。
     /// 无配置文件 / 无 `[mqtt]` 段 → None(不启用 MQTT,现有 WebSocket/HTTP 路径不变)。
     pub fn mqtt_config(&self) -> Option<MqttConfig> {
         #[derive(serde::Deserialize)]
@@ -113,8 +120,10 @@ impl RunArgs {
             #[serde(default)]
             mqtt: Option<MqttConfig>,
         }
-        let home = dirs::home_dir()?;
-        let path = home.join(".vibetty").join("config.toml");
+        let path = match self.config.as_ref() {
+            Some(p) => p.clone(),
+            None => dirs::home_dir()?.join(".vibetty").join("config.toml"),
+        };
         let content = std::fs::read_to_string(&path).ok()?;
         toml::from_str::<MqttSection>(&content).ok()?.mqtt
     }

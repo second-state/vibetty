@@ -49,7 +49,7 @@ async fn main() {
 
     match cli.command {
         Some(Commands::Setup) => {
-            if let Err(e) = setup::run_setup() {
+            if let Err(e) = setup::run_setup(cli.config.clone()) {
                 eprintln!("Setup error: {e}");
                 std::process::exit(1);
             }

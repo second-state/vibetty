@@ -22,13 +22,16 @@ use crate::config::MqttConfig;
 
 type Term = Terminal<CrosstermBackend<Stdout>>;
 
-fn config_path() -> Option<std::path::PathBuf> {
-    dirs::home_dir().map(|h| h.join(".vibetty").join("config.toml"))
+fn config_path(override_path: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    match override_path {
+        Some(p) => Some(p.to_path_buf()),
+        None => dirs::home_dir().map(|h| h.join(".vibetty").join("config.toml")),
+    }
 }
 
 /// 读取现有 `[mqtt]` 段,用于预填表单。
-fn load_mqtt() -> Option<MqttConfig> {
-    let path = config_path()?;
+fn load_mqtt(override_path: Option<&std::path::Path>) -> Option<MqttConfig> {
+    let path = config_path(override_path)?;
     let content = std::fs::read_to_string(&path).ok()?;
     #[derive(serde::Deserialize)]
     struct Section {
@@ -38,9 +41,10 @@ fn load_mqtt() -> Option<MqttConfig> {
     toml::from_str::<Section>(&content).ok()?.mqtt
 }
 
-/// 把 `[mqtt]` 段写回 `~/.vibetty/config.toml`,保留文件中已有的其它段。
-fn save_mqtt(mqtt: &MqttConfig) -> anyhow::Result<()> {
-    let path = config_path().ok_or_else(|| anyhow::anyhow!("Cannot find home directory"))?;
+/// 把 `[mqtt]` 段写回 config.toml(默认 `~/.vibetty/config.toml`),保留文件中已有的其它段。
+fn save_mqtt(mqtt: &MqttConfig, override_path: Option<&std::path::Path>) -> anyhow::Result<()> {
+    let path =
+        config_path(override_path).ok_or_else(|| anyhow::anyhow!("Cannot find home directory"))?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -172,8 +176,9 @@ enum Mode {
     Edit,
 }
 
-pub fn run_setup() -> anyhow::Result<()> {
-    let existing = load_mqtt();
+pub fn run_setup(config: Option<std::path::PathBuf>) -> anyhow::Result<()> {
+    let override_path = config.as_deref();
+    let existing = load_mqtt(override_path);
     let mut fields = fields_from(existing.as_ref());
     let mut state = ListState::default();
     state.select(Some(0));
@@ -192,6 +197,7 @@ pub fn run_setup() -> anyhow::Result<()> {
         &mut state,
         &mut mode,
         &mut status,
+        override_path,
     );
 
     disable_raw_mode()?;
@@ -207,6 +213,7 @@ fn setup_loop(
     state: &mut ListState,
     mode: &mut Mode,
     status: &mut Option<String>,
+    override_path: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
     loop {
         terminal.draw(|f| draw(f, fields, state, *mode, status.as_deref()))?;
@@ -230,9 +237,9 @@ fn setup_loop(
             Mode::Select => match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                 KeyCode::Char('s') => match mqtt_from_fields(fields) {
-                    Ok(cfg) => match save_mqtt(&cfg) {
+                    Ok(cfg) => match save_mqtt(&cfg, override_path) {
                         Ok(()) => {
-                            let p = config_path()
+                            let p = config_path(override_path)
                                 .map(|p| p.display().to_string())
                                 .unwrap_or_default();
                             *status = Some(format!("Saved to {p}. Press any key to exit."));
