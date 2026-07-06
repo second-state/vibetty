@@ -125,7 +125,7 @@ fn instance_prefix(username: Option<&str>, device: &str) -> String {
 }
 
 /// 入站 topic 后缀(ESP32 -> vibetty)。payload -> `ClientMessage` 的映射在 `run_bridge`。
-const INBOUND_TOPICS: &[&str] = &["pty_in", "control"];
+const INBOUND_TOPICS: &[(&str, u8)] = &[("pty_in", 0), ("control", 1)];
 
 /// presence 公告(心跳)重发间隔;ESP32 靠 payload 的 `ts` 判断实例是否存活。
 const PRESENCE_INTERVAL_SECS: u64 = 15;
@@ -213,8 +213,6 @@ async fn run_bridge(
     tx: broadcast::Sender<ServerMessage>,
     image_format: ImageFormat,
 ) {
-    let qos = qos_from_u8(cfg.qos);
-
     // broker 是完整 URL:mqtt(s)://[user:pass@]host[:port]。scheme 决定 TLS,
     // user/pass 在 URL 里;端口没写则按协议默认(mqtt 1883 / mqtts 8883)。
     let broker = match parse_broker_url(&cfg.broker) {
@@ -239,7 +237,7 @@ async fn run_bridge(
     opts.set_last_will(LastWill {
         topic: prefix.clone(),
         message: Bytes::new(),
-        qos,
+        qos: QoS::AtLeastOnce,
         retain: true,
     });
     if broker.use_tls {
@@ -251,8 +249,11 @@ async fn run_bridge(
 
     let (client, mut eventloop) = AsyncClient::new(opts, 50);
 
-    for name in INBOUND_TOPICS {
-        if let Err(e) = client.subscribe(format!("{prefix}/{name}"), qos).await {
+    for (name, qos) in INBOUND_TOPICS {
+        if let Err(e) = client
+            .subscribe(format!("{prefix}/{name}"), qos_from_u8(*qos))
+            .await
+        {
             log::error!("[mqtt] subscribe {prefix}/{name} failed: {e}");
             return;
         }
@@ -261,7 +262,10 @@ async fn run_bridge(
     // 上线公告:在本实例前缀 topic 发 retained,声明存在。
     // ESP32 订阅 `{user}/+/+/vibetty` 即可发现该用户所有实例(retained 保证新订阅立即收到)。
     let presence = presence_payload(&prefix, &client_id);
-    if let Err(e) = client.publish(prefix.clone(), qos, true, presence).await {
+    if let Err(e) = client
+        .publish(prefix.clone(), QoS::AtLeastOnce, true, presence)
+        .await
+    {
         log::warn!("[mqtt] initial presence publish failed: {e}");
     }
 
@@ -278,14 +282,17 @@ async fn run_bridge(
         loop {
             interval.tick().await;
             let payload = presence_payload(&hb_prefix, &hb_client_id);
-            if let Err(e) = hb_client.publish(&hb_topic, qos, true, payload).await {
+            if let Err(e) = hb_client
+                .publish(&hb_topic, QoS::AtLeastOnce, true, payload)
+                .await
+            {
                 log::warn!("[mqtt] presence heartbeat failed: {e}");
             }
         }
     });
 
     log::info!(
-        "[mqtt] bridging: prefix={prefix} qos={qos:?} tls={} (pty_in raw + control JSON, no msgpack)",
+        "[mqtt] bridging: prefix={prefix} tls={} (pty_in raw + control JSON, no msgpack)",
         broker.use_tls
     );
 
