@@ -50,7 +50,7 @@ fn default_ws_port() -> u16 {
 
 #[derive(Parser, Debug)]
 #[command(name = "vibetty")]
-#[command(about = "WebSocket terminal server", long_about = None, version)]
+#[command(about = "MQTT terminal server", long_about = None, version)]
 #[command(args_conflicts_with_subcommands = true)]
 pub struct Cli {
     #[command(subcommand)]

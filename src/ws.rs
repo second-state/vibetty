@@ -1,12 +1,6 @@
 use std::sync::Arc;
 
-use axum::{
-    extract::{
-        Query, State,
-        ws::{Message, WebSocket, WebSocketUpgrade},
-    },
-    response::IntoResponse,
-};
+use axum::{extract::State, response::IntoResponse};
 use tokio::sync::{broadcast, mpsc};
 use vt100::Callbacks;
 
@@ -14,8 +8,6 @@ use crate::protocol::{ClientMessage, ServerMessage};
 
 /// Image broadcast frame interval (ms)
 const IMAGE_FRAME_INTERVAL_MS: u64 = 300;
-/// Image chunk size (bytes)
-pub(crate) const IMAGE_CHUNK_SIZE: usize = 10 * 1024;
 /// 终端截图里单个字符单元格的像素宽。`vibetty-screenshot` 在 font_size=14.0 +
 /// 内嵌字体 Sarasa Mono SC Light(swash 后端)下由 `get_char_metrics(14.0)` 实测得到。
 /// 客户端 Sync 发的是【像素】,要除以它换算成 PTY 列数。
@@ -199,10 +191,7 @@ pub async fn run_command(
                         cb.update_title = false;
                         let new_title = cb.title.clone();
                         let _ = cb;
-                        *ui_title = new_title.clone();
-
-                        // Send title change to client
-                        let _ = tx.send(ServerMessage::title(new_title));
+                        *ui_title = new_title;
                     }
                 }
 
@@ -319,17 +308,6 @@ pub async fn run_command(
                     vt_parser.screen_mut().set_scrollback(0);
                 }
             }
-            // ASR 已移至 ESP32 端;收到旧的 voice_input_* 消息静默丢弃,不转写、不回 asr_result。
-            TerminalEvent::Input(
-                ClientMessage::VoiceInputStart(_)
-                | ClientMessage::VoiceInputChunk(_)
-                | ClientMessage::VoiceInputEnd(_),
-            ) => {
-                log::debug!(
-                    "[{}] voice_input ignored (ASR disabled)",
-                    terminal.session_id()
-                );
-            }
             TerminalEvent::InputClosed | TerminalEvent::Error => {
                 log::error!("Input channel closed or error occurred, terminating terminal loop");
                 break;
@@ -338,297 +316,6 @@ pub async fn run_command(
     }
 
     Ok(())
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct WsParams {
-    #[serde(default = "default_true")]
-    pub pty: bool,
-    #[serde(default)]
-    pub img: bool,
-    /// Client display width (pixels); fed into the on-connect `Sync` and used as
-    /// the image-scaling target.
-    #[serde(default = "default_width")]
-    pub width: u16,
-    /// Client display height (pixels); same as `width`.
-    #[serde(default = "default_height")]
-    pub height: u16,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-fn default_height() -> u16 {
-    240
-}
-
-fn default_width() -> u16 {
-    240
-}
-
-pub async fn ws_handler(
-    ws: WebSocketUpgrade,
-    Query(params): Query<WsParams>,
-    State(state): State<AppState>,
-) -> impl IntoResponse {
-    log::info!(
-        "WebSocket connection params: pty={}, img={}",
-        params.pty,
-        params.img
-    );
-    ws.on_upgrade(move |socket| handle_socket(socket, state, params))
-}
-
-async fn send_screen_to_client(
-    state: &AppState,
-    socket: &mut WebSocket,
-    screen: &vt100::Screen,
-    window_size: Option<(u16, u16)>, // (width, height)
-    window_h_offset: &mut u16,
-    format: crate::protocol::ImageFormat,
-) -> anyhow::Result<()> {
-    let image_data = render_screen_to_image(screen, window_size, window_h_offset, format, None)?;
-    if image_data.is_empty() {
-        state
-            .cli_tx
-            .send(ClientMessage::ScrollDown)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to send ScrollDown message to cli_tx after empty image: {}",
-                    e
-                )
-            })?;
-    }
-    log::debug!(
-        "Sending screen image to client, format: {:?}, size: {} KB",
-        format,
-        image_data.len() / 1024
-    );
-    let chunk_size = IMAGE_CHUNK_SIZE;
-    let total_chunks = image_data.len().div_ceil(chunk_size);
-    for (i, chunk) in image_data.chunks(chunk_size).enumerate() {
-        let is_last = i == total_chunks - 1;
-        let msg = ServerMessage::screen_image_chunk(format, is_last, chunk.to_vec());
-        let data = msg.to_msgpack()?;
-        socket.send(Message::Binary(data.into())).await?;
-    }
-    Ok(())
-}
-
-async fn handle_client_message(
-    state: &AppState,
-    msg: ClientMessage,
-    socket: &mut WebSocket,
-    screen: Option<&vt100::Screen>,
-    width: u16,
-    height: u16,
-    window_h_offset: &mut u16,
-) -> anyhow::Result<()> {
-    log::debug!("Handling client message: {:?}", msg);
-    match msg {
-        ClientMessage::ScrollUp => {
-            if *window_h_offset == 0 {
-                state
-                    .cli_tx
-                    .send(ClientMessage::ScrollUp)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to send client message: {}", e))?;
-                return Ok(());
-            }
-            if *window_h_offset > height / 4 {
-                *window_h_offset -= height / 4
-            } else {
-                *window_h_offset = 0
-            };
-
-            log::debug!("ScrollUp, new window_h_offset: {}", window_h_offset);
-            if let Some(screen) = screen {
-                send_screen_to_client(
-                    state,
-                    socket,
-                    screen,
-                    Some((width, height)),
-                    window_h_offset,
-                    state.image_format,
-                )
-                .await?;
-            } else {
-                state
-                    .cli_tx
-                    .send(ClientMessage::Sync { width, height })
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to send client message: {}", e))?;
-            }
-        }
-        ClientMessage::ScrollDown => {
-            *window_h_offset += height / 4;
-
-            log::debug!("ScrollDown, new window_h_offset: {}", window_h_offset);
-
-            if let Some(screen) = screen {
-                send_screen_to_client(
-                    state,
-                    socket,
-                    screen,
-                    Some((width, height)),
-                    window_h_offset,
-                    state.image_format,
-                )
-                .await?;
-            } else {
-                state
-                    .cli_tx
-                    .send(ClientMessage::Sync { width, height })
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to send client message: {}", e))?;
-            }
-        }
-        ClientMessage::Input(text) => {
-            *window_h_offset = u16::MAX; // reset offset on new input
-            state
-                .cli_tx
-                .send(ClientMessage::Input(text))
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to send client message: {}", e))?;
-        }
-        msg => {
-            state
-                .cli_tx
-                .send(msg)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to send client message: {}", e))?;
-        }
-    }
-    Ok(())
-}
-
-async fn handle_socket(mut socket: WebSocket, state: AppState, params: WsParams) {
-    let mut server_rx = state.tx.subscribe();
-    if state
-        .cli_tx
-        .send(ClientMessage::Sync {
-            width: params.width,
-            height: params.height,
-        })
-        .await
-        .is_err()
-    {
-        log::error!("Failed to send Sync message to cli_tx");
-        return;
-    }
-
-    let mut wait_pong = false;
-    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(30));
-
-    let window_size = (params.width, params.height);
-    let mut window_h_offset = 0;
-    let mut screen = None; // default size, will be resized by client message
-
-    loop {
-        tokio::select! {
-            _ = ticker.tick() => {
-                if wait_pong {
-                    log::error!("No pong received, closing WebSocket connection");
-                    break;
-                }
-                wait_pong = true;
-                if socket.send(Message::Ping(bytes::Bytes::new())).await.is_err() {
-                    log::error!("Failed to send ping message");
-                    break;
-                }
-            }
-            // 接收来自服务器的消息（广播），发送到 WebSocket 客户端
-            result = server_rx.recv() => {
-                match result {
-                    Ok(msg) => {
-                        // Filter based on subscription params
-                        match &msg {
-                            ServerMessage::PtyOutput(_) if !params.pty => continue,
-                            ServerMessage::ScreenImage(_) => {
-                                log::warn!("unexpected ScreenImage message");
-                                continue
-                            },
-                            ServerMessage::Screen(screen_) => {
-                                screen = Some(screen_.clone());
-                                if let Err(e) = send_screen_to_client(&state, &mut socket, screen_, Some(window_size), &mut window_h_offset, state.image_format).await {
-                                    log::error!("Failed to send screen to client: {}", e);
-                                }
-                                continue;
-                            },
-                            _ => {}
-                        }
-                        let data = msg.to_msgpack().unwrap();
-                        if socket.send(Message::Binary(data.into())).await.is_err() {
-                            log::error!("Failed to send message to WebSocket");
-                            break;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        log::warn!("Lagged behind by {} messages", n);
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        log::error!("Broadcast channel closed");
-                        break;
-                    }
-                }
-            }
-            // 接收来自 WebSocket 客户端的消息
-            result = socket.recv() => {
-                let screen_ref = screen.as_ref().map(|s|s.as_ref());
-                match result {
-                    Some(Ok(msg)) => match msg {
-                        Message::Binary(data) => {
-                            log::trace!("Received binary message, length: {}", data.len());
-                            match ClientMessage::from_msgpack(&data) {
-                                Ok(client_msg) => {
-                                    if let Err(e) = handle_client_message(&state, client_msg, &mut socket, screen_ref, window_size.0, window_size.1, &mut window_h_offset).await {
-                                        log::error!("Failed to handle client message: {}", e);
-                                        break;
-                                    }
-                                }
-                                Err(e) => {
-                                    log::error!("Failed to parse message: {}", e);
-                                    log::error!("MessagePack data (hex): {:02x?}", &data[..data.len().min(32)]);
-                                }
-                            }
-                        }
-                        Message::Text(text) => {
-                            match ClientMessage::from_json(&text) {
-                                Ok(client_msg) => {
-                                    if let Err(e) = handle_client_message(&state, client_msg, &mut socket, screen_ref, window_size.0, window_size.1, &mut window_h_offset).await {
-                                        log::error!("Failed to handle client message: {}", e);
-                                        break;
-                                    }
-                                }
-                                Err(e) => {
-                                    log::error!("Failed to parse JSON message: {}", e);
-                                }
-                            }
-                        }
-                        Message::Close(_) => {
-                            log::info!("Client disconnected");
-                            break;
-                        }
-                        Message::Pong(_) => {
-                            wait_pong = false;
-                            log::debug!("Received pong from client");
-                        }
-                        _ => {}
-                    },
-                    Some(Err(e)) => {
-                        log::error!("WebSocket error: {}", e);
-                        break;
-                    }
-                    None => {
-                        log::info!("WebSocket connection closed");
-                        break;
-                    }
-                }
-            }
-        }
-    }
 }
 
 /// Render a vt100 screen to image bytes (JPEG or PNG)

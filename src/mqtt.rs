@@ -1,8 +1,8 @@
 //! 可选的 MQTT 传输桥接。
 //!
 //! 当 `~/.vibetty/config.toml` 含 `[mqtt]` 段时,main.rs 调用 [`spawn`] 启动本模块。
-//! 它是 WebSocket(`handle_socket`)之外的“另一个前端”:后端的 `cli_tx` / broadcast `tx`
-//! 通道、PTY 逻辑全部复用。ESP32 端无需 msgpack——
+//! 它是终端的传输通道:后端的 `cli_tx` / broadcast `tx` 通道、PTY 逻辑全部复用。
+//! ESP32 端无需 msgpack——
 //! - 原始按键 / PTY 输出走 raw 字节 topic(`pty_in` / `pty_out`);
 //! - 控制类消息(输入文本、同步、滚动)合并到一个 `control` topic,payload 是
 //!   `ClientMessage` 的 serde JSON,靠 `type` 字段区分。
@@ -341,9 +341,6 @@ async fn run_bridge(
                         Ok(_) => {}
                         Err(e) => log::warn!("[mqtt] render screen failed: {e}"),
                     }
-                }
-                Ok(_) => {
-                    // Notification/Title/ScreenImage 不走 MQTT(ESP32 不需要)
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     log::warn!("[mqtt] broadcast lagged {n} messages");

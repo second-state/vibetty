@@ -1,8 +1,6 @@
 use axum::{Router, routing::get};
 use clap::Parser;
-use std::env;
 use std::net::SocketAddr;
-use tower_http::services::ServeDir;
 
 mod broker;
 mod config;
@@ -116,21 +114,12 @@ async fn main() {
 
     let listen_port = listener.local_addr().unwrap().port();
 
-    // Spawn HTTP server
+    // Spawn HTTP server(只服务 /mqtt_ws 调试页 + /screenshot;终端传输走 MQTT)
     let app = Router::new()
-        .route("/", get(static_page::index_handler))
-        .route("/app.js", get(static_page::app_js_handler))
-        .route("/vosk", get(static_page::vosk_handler))
         .route("/mqtt_ws", get(static_page::mqtt_ws_handler))
-        .route("/ws", get(ws::ws_handler))
         .route("/screenshot", get(ws::screenshot_handler))
-        .nest_service(
-            "/models",
-            ServeDir::new(env::home_dir().unwrap().join(".vibetty/models")),
-        )
         .with_state(state);
 
-    log::info!("WebSocket server listening on ws://{}/ws", args.bind_addr);
     log::info!("HTTP server listening on http://{}", args.bind_addr);
 
     tokio::spawn(async move {
