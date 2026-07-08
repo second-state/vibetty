@@ -21,11 +21,19 @@ pub enum ClientMessage {
     #[serde(rename = "input_text")]
     Input(String),
 
+    /// 向上滚动;`rows` 缺省/0 = 滚一整页(= 终端可见行数)
     #[serde(rename = "scroll_up")]
-    ScrollUp,
+    ScrollUp {
+        #[serde(default)]
+        rows: u16,
+    },
 
+    /// 向下滚动;同 `ScrollUp`
     #[serde(rename = "scroll_down")]
-    ScrollDown,
+    ScrollDown {
+        #[serde(default)]
+        rows: u16,
+    },
 }
 
 impl Debug for ClientMessage {
@@ -41,8 +49,8 @@ impl Debug for ClientMessage {
                 .field(&format!("[{} bytes]", data.len()))
                 .finish(),
             ClientMessage::Input(text) => f.debug_tuple("Input").field(text).finish(),
-            ClientMessage::ScrollUp => f.debug_tuple("ScrollUp").finish(),
-            ClientMessage::ScrollDown => f.debug_tuple("ScrollDown").finish(),
+            ClientMessage::ScrollUp { rows } => f.debug_tuple("ScrollUp").field(rows).finish(),
+            ClientMessage::ScrollDown { rows } => f.debug_tuple("ScrollDown").field(rows).finish(),
         }
     }
 }

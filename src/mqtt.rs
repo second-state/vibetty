@@ -17,7 +17,7 @@
 //!   `control` payload 是 `ClientMessage` 的 serde JSON(`{"type":...,"data":...}`):
 //!   `type` ∈ `input_text`(data=字符串)、`sync`(data=`{width,height}`,**像素**尺寸,
 //!   服务端按 char cell 换算成列/行后 resize PTY)、
-//!   `scroll_up` / `scroll_down`(无 data)。原始按键走 `pty_in`,不在此 topic。
+//!   `scroll_up` / `scroll_down`(data=`{rows}`,`rows`=0/缺省=滚一整页)。原始按键走 `pty_in`,不在此 topic。
 //!
 //! 出站(vibetty -> ESP32,vibetty 发布):
 //! - `{p}/pty_out`  PTY 原始输出字节  <- `PtyOutput`
@@ -148,8 +148,8 @@ fn parse_control(payload: &[u8]) -> Option<ClientMessage> {
         cm,
         ClientMessage::Input(_)
             | ClientMessage::Sync { .. }
-            | ClientMessage::ScrollUp
-            | ClientMessage::ScrollDown
+            | ClientMessage::ScrollUp { .. }
+            | ClientMessage::ScrollDown { .. }
     ) {
         Some(cm)
     } else {

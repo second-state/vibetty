@@ -14,8 +14,7 @@ const IMAGE_FRAME_INTERVAL_MS: u64 = 300;
 /// ⚠️ 改 `render_screen_to_image` 的 font_size 或换字体时必须同步更新。
 pub(crate) const SCREEN_CHAR_WIDTH: u32 = 8;
 /// 单个字符单元格的像素高,同上(`get_char_metrics(14.0)` 返回 `(8, 18)`)。
-/// 记录用:sync 现在 height 保留原始行数、不再按高度换算,故暂未被引用。
-#[allow(dead_code)]
+/// 用于由 sync 的像素高度换算「一页」的行数。
 pub(crate) const SCREEN_CHAR_HEIGHT: u32 = 18;
 /// 截图四周的留白(每边像素数),来自 `ScreenshotConfig::default().padding`。
 /// 整张图 = cols×`SCREEN_CHAR_WIDTH` + 2×`SCREEN_PADDING` 宽、
@@ -69,6 +68,21 @@ fn send_screen(tx: &ServerTx, screen: Arc<vt100::Screen>) {
     let _ = tx.send(ServerMessage::Screen(screen));
 }
 
+/// 滚动行数换算:`rows == 0` 表示滚一整页(= `page_rows`),否则滚 `rows` 行。
+fn scroll_delta(rows: u16, page_rows: u16) -> usize {
+    if rows == 0 {
+        page_rows as usize
+    } else {
+        rows as usize
+    }
+}
+
+/// 由客户端 sync 发的像素高度算「一页」的行数:能塞下的行数 − 1(滚动时留一行可见)。
+fn page_rows_from_height(height: u16) -> u16 {
+    let fits = (height as u32).saturating_sub(2 * SCREEN_PADDING) / SCREEN_CHAR_HEIGHT;
+    fits.saturating_sub(1).max(1) as u16
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run_command(
     command: Vec<String>,
@@ -119,6 +133,10 @@ pub async fn run_command(
     // Frame rate limit for image broadcast (default 2 fps)
     let frame_interval = std::time::Duration::from_millis(IMAGE_FRAME_INTERVAL_MS);
     let mut last_frame_time = std::time::Instant::now() - frame_interval;
+
+    // 「一页」的行数:由最近一次 sync 的像素高度推算(能塞下的行数 − 1)。滚动 rows=0 时用它。
+    // 还没 sync 过就用初始终端行数兜底。
+    let mut page_rows: u16 = vt_rows;
 
     loop {
         let terminal_read_event = terminal.read_pty_output();
@@ -231,11 +249,14 @@ pub async fn run_command(
                 log::info!("UI Input: {:?}", String::from_utf8_lossy(&input));
                 terminal.send_bytes(&input).await?;
             }
-            TerminalEvent::UIEvent(crate::ui::UIEvent::ScrollUp)
-            | TerminalEvent::Input(ClientMessage::ScrollUp) => {
-                log::info!("ScrollUp");
+            TerminalEvent::UIEvent(crate::ui::UIEvent::ScrollUp { rows })
+            | TerminalEvent::Input(ClientMessage::ScrollUp { rows }) => {
+                let delta = scroll_delta(rows, page_rows);
+                log::info!("ScrollUp rows={rows} -> delta={delta}");
                 let s = vt_parser.screen().scrollback();
-                vt_parser.screen_mut().set_scrollback(s + 5);
+                vt_parser
+                    .screen_mut()
+                    .set_scrollback(s.saturating_add(delta));
                 let screen = Arc::new(vt_parser.screen().clone());
                 let title = ui_title.clone();
                 let footer = ui_footer.to_string();
@@ -244,11 +265,14 @@ pub async fn run_command(
 
                 send_screen(&tx, screen);
             }
-            TerminalEvent::UIEvent(crate::ui::UIEvent::ScrollDown)
-            | TerminalEvent::Input(ClientMessage::ScrollDown) => {
-                log::info!("ScrollDown");
+            TerminalEvent::UIEvent(crate::ui::UIEvent::ScrollDown { rows })
+            | TerminalEvent::Input(ClientMessage::ScrollDown { rows }) => {
+                let delta = scroll_delta(rows, page_rows);
+                log::info!("ScrollDown rows={rows} -> delta={delta}");
                 let s = vt_parser.screen().scrollback();
-                vt_parser.screen_mut().set_scrollback(s.saturating_sub(5));
+                vt_parser
+                    .screen_mut()
+                    .set_scrollback(s.saturating_sub(delta));
                 let screen = Arc::new(vt_parser.screen().clone());
                 let title = ui_title.clone();
                 let footer = ui_footer.to_string();
@@ -266,8 +290,10 @@ pub async fn run_command(
                 let screen = Arc::new(vt_parser.screen().clone());
                 send_screen(&tx, screen);
             }
-            TerminalEvent::Input(ClientMessage::Sync { width, .. }) => {
+            TerminalEvent::Input(ClientMessage::Sync { width, height }) => {
                 // sync 只决定宽度:按客户端像素宽换算列数;高度(行数)保持当前不变。
+                // 但高度用来记「一页」行数(= 能塞下 − 1),供 scroll rows=0 时用。
+                page_rows = page_rows_from_height(height);
                 let avail_w = (width as u32).saturating_sub(2 * SCREEN_PADDING);
                 let cols = (avail_w / SCREEN_CHAR_WIDTH).max(8) as u16; // 最低 8 列
                 // 列数和当前一致就不 resize(避免抖屏);但 sync 本身也是「请求刷屏」,仍回送屏幕。

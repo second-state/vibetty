@@ -18,10 +18,13 @@ use tokio::sync::mpsc;
 use tokio::time::Duration;
 use tui_term::widget::PseudoTerminal;
 
+/// 鼠标滚轮每格滚动的行数(客户端的 scroll 可自带 rows;0 = 整页)。
+const MOUSE_SCROLL_ROWS: u16 = 3;
+
 pub enum UIEvent {
     Input(Vec<u8>),
-    ScrollUp,
-    ScrollDown,
+    ScrollUp { rows: u16 },
+    ScrollDown { rows: u16 },
     Resize(u16, u16),
 }
 
@@ -143,10 +146,14 @@ fn event_loop_thread(tx_to_pty: UITx) -> anyhow::Result<()> {
             } else if let Event::Mouse(mouse) = evt {
                 match mouse.kind {
                     MouseEventKind::ScrollUp => {
-                        let _ = tx_to_pty.blocking_send(UIEvent::ScrollUp);
+                        let _ = tx_to_pty.blocking_send(UIEvent::ScrollUp {
+                            rows: MOUSE_SCROLL_ROWS,
+                        });
                     }
                     MouseEventKind::ScrollDown => {
-                        let _ = tx_to_pty.blocking_send(UIEvent::ScrollDown);
+                        let _ = tx_to_pty.blocking_send(UIEvent::ScrollDown {
+                            rows: MOUSE_SCROLL_ROWS,
+                        });
                     }
                     _ => {}
                 }
