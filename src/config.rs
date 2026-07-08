@@ -72,7 +72,7 @@ pub struct Cli {
     pub command_args: Vec<String>,
 
     /// Image format for screen rendering (png or jpeg)
-    #[arg(short = 'f', long, default_value = "png", value_name = "FORMAT")]
+    #[arg(short = 'f', long, default_value = "jpeg", value_name = "FORMAT")]
     pub image_format: String,
 }
 
