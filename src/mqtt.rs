@@ -15,8 +15,9 @@
 //! - `{p}/control`  控制类消息(JSON)      -> 见下方 [`parse_control`]
 //!
 //!   `control` payload 是 `ClientMessage` 的 serde JSON(`{"type":...,"data":...}`):
-//!   `type` ∈ `input_text`(data=字符串)、`sync` / `scroll_up` / `scroll_down`(无 data)。
-//!   原始按键走 `pty_in`,不在此 topic。
+//!   `type` ∈ `input_text`(data=字符串)、`sync`(data=`{width,height}`,**像素**尺寸,
+//!   服务端按 char cell 换算成列/行后 resize PTY)、
+//!   `scroll_up` / `scroll_down`(无 data)。原始按键走 `pty_in`,不在此 topic。
 //!
 //! 出站(vibetty -> ESP32,vibetty 发布):
 //! - `{p}/pty_out`  PTY 原始输出字节  <- `PtyOutput`
@@ -35,6 +36,8 @@
 
 use bytes::Bytes;
 use rumqttc::{AsyncClient, Event, LastWill, MqttOptions, Packet, QoS, Transport};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU16, Ordering};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::config::MqttConfig;
@@ -144,7 +147,7 @@ fn parse_control(payload: &[u8]) -> Option<ClientMessage> {
     if matches!(
         cm,
         ClientMessage::Input(_)
-            | ClientMessage::Sync
+            | ClientMessage::Sync { .. }
             | ClientMessage::ScrollUp
             | ClientMessage::ScrollDown
     ) {
@@ -300,8 +303,11 @@ async fn run_bridge(
     // 暂时停发 pty_out(调试期只发 screen PNG);恢复时取消下面注释即可。
     // let pty_out_topic = format!("{prefix}/pty_out");
     let screen_topic = format!("{prefix}/screen");
+    // 最近一次 sync 的客户端显示高度(px);出站渲染时据此把图片高度补齐。
+    let sync_height = Arc::new(AtomicU16::new(0));
     let mut rx = tx.subscribe();
     let pub_client = client.clone();
+    let out_sync_height = sync_height.clone();
     tokio::spawn(async move {
         loop {
             match rx.recv().await {
@@ -311,7 +317,15 @@ async fn run_bridge(
                 }
                 Ok(ServerMessage::Screen(screen)) => {
                     let mut h = 0u16;
-                    match render_screen_to_image(screen.as_ref(), None, &mut h, image_format) {
+                    let sync_h = out_sync_height.load(Ordering::Relaxed);
+                    let target = (sync_h != 0).then_some(sync_h);
+                    match render_screen_to_image(
+                        screen.as_ref(),
+                        None,
+                        &mut h,
+                        image_format,
+                        target,
+                    ) {
                         Ok(img) if !img.is_empty() => {
                             log::debug!(
                                 "[mqtt] screen image {} bytes -> {screen_topic}",
@@ -354,11 +368,15 @@ async fn run_bridge(
                     "control" => parse_control(&payload),
                     _ => None,
                 };
-                if let Some(cm) = msg
-                    && let Err(e) = cli_tx.send(cm).await
-                {
-                    log::error!("[mqtt] cli_tx send failed: {e}");
-                    break;
+                if let Some(cm) = msg {
+                    // 记下 sync 带的客户端高度,供出站渲染补齐图片高度用。
+                    if let ClientMessage::Sync { height, .. } = cm {
+                        sync_height.store(height, Ordering::Relaxed);
+                    }
+                    if let Err(e) = cli_tx.send(cm).await {
+                        log::error!("[mqtt] cli_tx send failed: {e}");
+                        break;
+                    }
                 }
             }
             Ok(_) => {}

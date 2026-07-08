@@ -8,9 +8,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ClientMessage {
-    /// Sync
+    /// Sync:客户端声明自己显示区的【像素】尺寸 `width`/`height`,
+    /// 服务端按 char cell 尺寸换算成列/行后 resize PTY,并回送整张屏幕
     #[serde(rename = "sync")]
-    Sync,
+    Sync { width: u16, height: u16 },
 
     /// PTY 输入（键盘输入发送到终端）
     #[serde(rename = "pty_in")]
@@ -42,7 +43,11 @@ pub enum ClientMessage {
 impl Debug for ClientMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ClientMessage::Sync => f.debug_tuple("Sync").finish(),
+            ClientMessage::Sync { width, height } => f
+                .debug_struct("Sync")
+                .field("width", width)
+                .field("height", height)
+                .finish(),
             ClientMessage::PtyInput(data) => f
                 .debug_tuple("PtyInput")
                 .field(&format!("[{} bytes]", data.len()))

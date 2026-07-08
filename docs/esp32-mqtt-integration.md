@@ -52,14 +52,18 @@ ESP32 和 vibetty 连**同一个 MQTT broker**,通过 topic 通信:ESP32 发按�
 | type | data | 含义 |
 |------|------|------|
 | `input_text` | 字符串 | 输入一段文本(如命令) |
-| `sync` | (无) | 请求刷新整屏 |
+| `sync` | `{width,height}` | `width`/`height` 是 ESP32 **显示区的像素**尺寸;服务端换算成列/行后 resize PTY 并刷新整屏 |
 | `scroll_up` | (无) | 终端向上滚动 |
 | `scroll_down` | (无) | 终端向下滚动 |
+
+> `sync` 的尺寸单位是**像素**,不是终端的列/行。服务端按截图渲染参数换算:
+> `cols = (width - 32) / 8`、`rows = (height - 32) / 18`(char cell 8×18px,四周留白各 16px,
+> 见 `ws.rs` 的 `SCREEN_CHAR_WIDTH/HEIGHT`、`SCREEN_PADDING`)。ESP32 只要如实上报自己屏的像素即可。
 
 示例:
 ```json
 {"type":"input_text","data":"ls -la\n"}
-{"type":"sync"}
+{"type":"sync","data":{"width":320,"height":240}}
 {"type":"scroll_up"}
 ```
 

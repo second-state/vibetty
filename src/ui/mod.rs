@@ -11,7 +11,7 @@ use crossterm::{
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Direction, Layout},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     widgets::{Block, Borders, Paragraph},
 };
 use tokio::sync::mpsc;
@@ -77,14 +77,31 @@ pub fn render_frame(
     f.render_widget(header, chunks[0]);
 
     {
+        let (term_rows, term_cols) = screen.size();
+        // 终端屏幕有固定的 cols×rows,可能小于 pane(如 ESP32 sync 把 PTY resize 成小屏后,
+        // 本地 TUI pane 仍很大)。按屏幕尺寸(+边框各 1)在 pane 内居中;屏幕大于 pane 时铺满并裁切。
+        let area = centered_rect(
+            chunks[1],
+            term_cols.saturating_add(2),
+            term_rows.saturating_add(2),
+        );
         let pseudo_term = PseudoTerminal::new(screen).block(Block::new().borders(Borders::ALL));
-        f.render_widget(pseudo_term, chunks[1]);
+        f.render_widget(pseudo_term, area);
     }
 
     let footer = Paragraph::new(footer_text)
         .block(Block::new().borders(Borders::ALL))
         .alignment(Alignment::Center);
     f.render_widget(footer, chunks[2]);
+}
+
+/// 在 `area` 内居中放置一个 `want_w` × `want_h` 的矩形;超出 `area` 时裁到 `area` 大小。
+fn centered_rect(area: Rect, want_w: u16, want_h: u16) -> Rect {
+    let w = want_w.min(area.width);
+    let h = want_h.min(area.height);
+    let x = area.x + (area.width - w) / 2;
+    let y = area.y + (area.height - h) / 2;
+    Rect::new(x, y, w, h)
 }
 
 pub fn spawn_event_loop(ui_tx: UITx) {

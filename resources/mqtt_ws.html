@@ -62,7 +62,8 @@
   发文本命令到 <code>{prefix}/control</code>(input_text)
   <input id="cmd" size="22" placeholder="如 ls -la">
   <button id="btnCmd">发送(自动加换行)</button>
-  <button id="btnSync">sync 刷屏</button>
+  <button id="btnSync">sync(resize+刷屏)</button>
+  宽(px)<input id="syncW" size="4" value="320"> 高(px)<input id="syncH" size="4" value="240">
 </div>
 <div class="bar">
   自定义 publish
@@ -178,7 +179,10 @@ $('btnCmd').onclick = () => {
 $('btnSync').onclick = () => {
   if (!client) return append('err', '未连接');
   const p = $('prefix').value.trim(); if (!p) return append('err', '还没有 prefix');
-  client.publish(`${p}/control`, JSON.stringify({ type: 'sync' }), e => e ? append('err', `发送失败: ${e}`) : append('out', `→ ${p}/control : sync`));
+  const w = parseInt($('syncW').value, 10) || 320;
+  const h = parseInt($('syncH').value, 10) || 240;
+  const payload = JSON.stringify({ type: 'sync', data: { width: w, height: h } });
+  client.publish(`${p}/control`, payload, e => e ? append('err', `发送失败: ${e}`) : append('out', `→ ${p}/control : ${payload}`));
 };
 $('btnPub').onclick = () => {
   if (!client) return append('err', '未连接');

@@ -16,6 +16,19 @@ use crate::protocol::{ClientMessage, ServerMessage};
 const IMAGE_FRAME_INTERVAL_MS: u64 = 300;
 /// Image chunk size (bytes)
 pub(crate) const IMAGE_CHUNK_SIZE: usize = 10 * 1024;
+/// 终端截图里单个字符单元格的像素宽。`vibetty-screenshot` 在 font_size=14.0 +
+/// 内嵌字体 Sarasa Mono SC Light(swash 后端)下由 `get_char_metrics(14.0)` 实测得到。
+/// 客户端 Sync 发的是【像素】,要除以它换算成 PTY 列数。
+/// ⚠️ 改 `render_screen_to_image` 的 font_size 或换字体时必须同步更新。
+pub(crate) const SCREEN_CHAR_WIDTH: u32 = 8;
+/// 单个字符单元格的像素高,同上(`get_char_metrics(14.0)` 返回 `(8, 18)`)。
+/// 记录用:sync 现在 height 保留原始行数、不再按高度换算,故暂未被引用。
+#[allow(dead_code)]
+pub(crate) const SCREEN_CHAR_HEIGHT: u32 = 18;
+/// 截图四周的留白(每边像素数),来自 `ScreenshotConfig::default().padding`。
+/// 整张图 = cols×`SCREEN_CHAR_WIDTH` + 2×`SCREEN_PADDING` 宽、
+///         rows×`SCREEN_CHAR_HEIGHT` + 2×`SCREEN_PADDING` 高。
+pub(crate) const SCREEN_PADDING: u32 = 16;
 /// Columns reserved for TUI decorations: the terminal pane's left + right
 /// borders (1 column each).
 const TUI_COLS_PADDING: u16 = 2;
@@ -161,8 +174,13 @@ pub async fn run_command(
             TerminalEvent::ScreenGetter(getter) => {
                 let screen = vt_parser.screen().clone();
                 let mut window_scrollback = 0;
-                let result =
-                    render_screen_to_image(&screen, None, &mut window_scrollback, image_format);
+                let result = render_screen_to_image(
+                    &screen,
+                    None,
+                    &mut window_scrollback,
+                    image_format,
+                    None,
+                );
 
                 let jpeg = match result {
                     Ok(data) => Ok(data),
@@ -260,16 +278,28 @@ pub async fn run_command(
                 let screen = Arc::new(vt_parser.screen().clone());
                 send_screen(&tx, screen);
             }
-            TerminalEvent::Input(ClientMessage::Sync) => {
-                log::info!("Received Sync message from client, sending screen");
-                let (rows, cols) = vt_parser.screen().size();
-                if cols > 35 {
-                    vt_parser.screen_mut().set_size(rows, 35);
-                    let _ = terminal.resize(rows, 35);
+            TerminalEvent::Input(ClientMessage::Sync { width, .. }) => {
+                // sync 只决定宽度:按客户端像素宽换算列数;高度(行数)保持当前不变。
+                let avail_w = (width as u32).saturating_sub(2 * SCREEN_PADDING);
+                let cols = (avail_w / SCREEN_CHAR_WIDTH).max(8) as u16; // 最低 8 列
+                // 列数和当前一致就不 resize(避免抖屏);但 sync 本身也是「请求刷屏」,仍回送屏幕。
+                let (rows, cur_cols) = vt_parser.screen().size(); // rows = 原始高度,保留
+                if cur_cols != cols {
+                    log::info!(
+                        "Sync: {width}px wide -> resize PTY cols {cur_cols} -> {cols} (rows kept {rows})"
+                    );
+                    vt_parser.screen_mut().set_size(rows, cols);
+                    let _ = terminal.resize(rows, cols);
                 } else {
-                    let screen = Arc::new(vt_parser.screen().clone());
-                    send_screen(&tx, screen);
+                    log::debug!("Sync: cols unchanged ({cols}), skip resize");
                 }
+                let screen = Arc::new(vt_parser.screen().clone());
+                // 立即重绘本地 TUI,否则要等下一次 PTY 输出才看得到 resize/居中效果。
+                let title = ui_title.clone();
+                let footer = ui_footer.to_string();
+                let _ =
+                    tui.draw(|f| crate::ui::render_frame(f, &screen, &title, "Vibetty", &footer));
+                send_screen(&tx, screen);
             }
             TerminalEvent::Input(ClientMessage::PtyInput(input)) => {
                 log::info!(
@@ -316,10 +346,11 @@ pub struct WsParams {
     pub pty: bool,
     #[serde(default)]
     pub img: bool,
-    /// Client screen width (columns)
+    /// Client display width (pixels); fed into the on-connect `Sync` and used as
+    /// the image-scaling target.
     #[serde(default = "default_width")]
     pub width: u16,
-    /// Client screen height (rows)
+    /// Client display height (pixels); same as `width`.
     #[serde(default = "default_height")]
     pub height: u16,
 }
@@ -357,7 +388,7 @@ async fn send_screen_to_client(
     window_h_offset: &mut u16,
     format: crate::protocol::ImageFormat,
 ) -> anyhow::Result<()> {
-    let image_data = render_screen_to_image(screen, window_size, window_h_offset, format)?;
+    let image_data = render_screen_to_image(screen, window_size, window_h_offset, format, None)?;
     if image_data.is_empty() {
         state
             .cli_tx
@@ -426,7 +457,7 @@ async fn handle_client_message(
             } else {
                 state
                     .cli_tx
-                    .send(ClientMessage::Sync)
+                    .send(ClientMessage::Sync { width, height })
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to send client message: {}", e))?;
             }
@@ -449,7 +480,7 @@ async fn handle_client_message(
             } else {
                 state
                     .cli_tx
-                    .send(ClientMessage::Sync)
+                    .send(ClientMessage::Sync { width, height })
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to send client message: {}", e))?;
             }
@@ -475,7 +506,15 @@ async fn handle_client_message(
 
 async fn handle_socket(mut socket: WebSocket, state: AppState, params: WsParams) {
     let mut server_rx = state.tx.subscribe();
-    if state.cli_tx.send(ClientMessage::Sync).await.is_err() {
+    if state
+        .cli_tx
+        .send(ClientMessage::Sync {
+            width: params.width,
+            height: params.height,
+        })
+        .await
+        .is_err()
+    {
         log::error!("Failed to send Sync message to cli_tx");
         return;
     }
@@ -598,6 +637,7 @@ pub(crate) fn render_screen_to_image(
     window_size: Option<(u16, u16)>, // (width, height)
     window_h_offset: &mut u16,
     format: crate::protocol::ImageFormat,
+    target_height: Option<u16>, // 把图片高度补齐到该值(不足补到该值,超过补到 8 的倍数)
 ) -> anyhow::Result<Vec<u8>> {
     let config = crate::screenshot::ScreenshotConfig {
         show_decorations: false,
@@ -679,6 +719,25 @@ pub(crate) fn render_screen_to_image(
                 image::imageops::crop(&mut dyn_image, 0, y_offset, width as u32, crop_height)
                     .to_image()
                     .into();
+        }
+    }
+
+    // 按目标高度补齐图片高度(主要用于 MQTT 出站):不足 sync 高度就补到该高度,
+    // 超过就补到 8 的倍数。内容保持在上,下方用背景色填。
+    if let Some(sync_h) = target_height {
+        let cur_h = dyn_image.height();
+        let target = if cur_h < sync_h as u32 {
+            sync_h as u32
+        } else {
+            cur_h.div_ceil(8) * 8
+        };
+        if target > cur_h {
+            let mut padded = image::RgbaImage::new(dyn_image.width(), target);
+            for p in padded.pixels_mut() {
+                *p = image::Rgba([30, 30, 30, 255]);
+            }
+            image::imageops::overlay(&mut padded, &dyn_image.to_rgba8(), 0, 0);
+            dyn_image = image::DynamicImage::ImageRgba8(padded);
         }
     }
 
