@@ -12,7 +12,7 @@ use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph},
 };
 use tokio::sync::mpsc;
 use tokio::time::Duration;
@@ -80,6 +80,9 @@ pub fn render_frame(
         let (term_rows, term_cols) = screen.size();
         // 终端屏幕有固定的 cols×rows,可能小于 pane(如 ESP32 sync 把 PTY resize 成小屏后,
         // 本地 TUI pane 仍很大)。按屏幕尺寸(+边框各 1)在 pane 内居中;屏幕大于 pane 时铺满并裁切。
+        // 先 Clear 整个 pane:居中的终端只重绘自己的 rect,不清的话 pane 其余区域会残留上一帧
+        // (更宽时的)旧内容,滚动时尤其明显,看着像重复行。
+        f.render_widget(Clear, chunks[1]);
         let area = centered_rect(
             chunks[1],
             term_cols.saturating_add(2),
