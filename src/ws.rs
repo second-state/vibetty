@@ -181,6 +181,15 @@ pub async fn run_command(
                 let _ = getter.send(jpeg);
             }
             TerminalEvent::PtyOutput(output) => {
+                // 空 PTY 输出 = EOF / 子进程已退出(reader 线程读到 Ok(0) 后停掉、
+                // read_rx 关闭)。此时优雅退出循环,由 main.rs 走 TUI cleanup;否则会空读 busy-loop。
+                if output.is_empty() {
+                    log::info!(
+                        "[{}] PTY closed (child exited), shutting down",
+                        terminal.session_id()
+                    );
+                    break;
+                }
                 log::trace!("[{}] PTY output: {}", terminal.session_id(), output.len());
                 vt_parser.process(output.as_bytes());
 
@@ -221,16 +230,6 @@ pub async fn run_command(
             TerminalEvent::UIEvent(crate::ui::UIEvent::Input(input)) => {
                 log::info!("UI Input: {:?}", String::from_utf8_lossy(&input));
                 terminal.send_bytes(&input).await?;
-            }
-            TerminalEvent::UIEvent(crate::ui::UIEvent::ResizePtyWidth(i)) => {
-                log::info!("UI ResizePtyWidth: {}", i);
-                let (rows, cols) = vt_parser.screen().size();
-                let new_cols = (cols as i16 + i).max(10) as u16;
-                vt_parser.screen_mut().set_size(rows, new_cols);
-                let _ = terminal.resize(rows, new_cols);
-                log::debug!("Resized PTY to {} rows and {} cols", rows, new_cols);
-                let screen = Arc::new(vt_parser.screen().clone());
-                send_screen(&tx, screen);
             }
             TerminalEvent::UIEvent(crate::ui::UIEvent::ScrollUp)
             | TerminalEvent::Input(ClientMessage::ScrollUp) => {
