@@ -38,6 +38,7 @@ strip-ansi-escapes = "0.2.1"
 ratatui = "0.30"
 crossterm = { version = "0.28", features = ["event-stream", "bracketed-paste"] }
 tui-term = "0.3"
+tui-input = "0.15"
 vt100 = "0.16"
 
 # Screenshot / Image rendering

@@ -3,7 +3,7 @@ use std::io;
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-        KeyModifiers, MouseEventKind,
+        KeyModifiers, MouseButton, MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -12,6 +12,8 @@ use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
+    style::{Color, Style},
+    text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
 };
 use tokio::sync::mpsc;
@@ -23,9 +25,38 @@ const MOUSE_SCROLL_ROWS: u16 = 3;
 
 pub enum UIEvent {
     Input(Vec<u8>),
-    ScrollUp { rows: u16 },
-    ScrollDown { rows: u16 },
+    /// 鼠标左键点击(col/row 为终端单元格坐标)。
+    Click {
+        col: u16,
+        row: u16,
+    },
+    ScrollUp {
+        rows: u16,
+    },
+    ScrollDown {
+        rows: u16,
+    },
     Resize(u16, u16),
+}
+
+/// footer HTTP 按钮的显示状态。
+#[derive(Default)]
+pub(crate) enum HttpBtnState {
+    #[default]
+    Off,
+    On(String),
+}
+
+/// 端口输入对话框的状态(打开时键盘事件路由给它,不进 PTY)。
+#[derive(Default)]
+pub(crate) enum ModalState {
+    #[default]
+    None,
+    PortInput {
+        /// 绑定地址输入(含光标状态),光标/插入/删除由 tui-input 管理。
+        input: tui_input::Input,
+    },
+    Error(String),
 }
 
 pub type UITx = mpsc::Sender<UIEvent>;
@@ -55,7 +86,8 @@ pub fn render_frame(
     screen: &vt100::Screen,
     title: &str,
     header_text: &str,
-    footer_text: &str,
+    http: &HttpBtnState,
+    modal: &ModalState,
 ) {
     let size = f.area();
 
@@ -94,10 +126,82 @@ pub fn render_frame(
         f.render_widget(pseudo_term, area);
     }
 
-    let footer = Paragraph::new(footer_text)
-        .block(Block::new().borders(Borders::ALL))
-        .alignment(Alignment::Center);
-    f.render_widget(footer, chunks[2]);
+    // footer:左 HTTP 开关 + 右 退出按钮。
+    {
+        let http_label = match http {
+            HttpBtnState::Off => "HTTP off".to_string(),
+            HttpBtnState::On(addr) => format!("HTTP {addr}"),
+        };
+        render_button(f, http_button_rect(f.area(), &http_label), &http_label);
+        render_button(f, quit_button_rect(f.area(), "Quit"), "Quit");
+    }
+
+    // 模态对话框(输入地址 / 显示错误),覆盖在终端之上。
+    if !matches!(modal, ModalState::None) {
+        let area = centered_rect(f.area(), 48, 9);
+        f.render_widget(Clear, area);
+        let block = Block::new().borders(Borders::ALL).title(" HTTP Server ");
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        // 主内容区 + 底部提示行。
+        let panes = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(1)])
+            .split(inner);
+        let hint = match modal {
+            ModalState::PortInput { .. } => "Enter to start · Esc to cancel",
+            ModalState::Error(_) => "(press any key to close)",
+            ModalState::None => unreachable!(),
+        };
+        match modal {
+            ModalState::PortInput { input } => {
+                // 输入行竖直居中。
+                let rows = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Min(0),
+                        Constraint::Length(1),
+                        Constraint::Min(0),
+                    ])
+                    .split(panes[0]);
+                // [固定宽度的标签] [可变宽度的输入框],标签位置不随内容移动。
+                let cols = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Length(6), Constraint::Min(0)])
+                    .split(rows[1]);
+                f.render_widget(Paragraph::new("Bind:").alignment(Alignment::Right), cols[0]);
+                // 输入框整块背景高亮;光标用高亮单元格(末尾则高亮一个空格)。
+                let val = input.value();
+                let cur = input.cursor().min(val.chars().count());
+                let byte = val.char_indices().nth(cur).map_or(val.len(), |(i, _)| i);
+                let (at, after) = if byte < val.len() {
+                    let next = val
+                        .char_indices()
+                        .nth(cur + 1)
+                        .map_or(val.len(), |(i, _)| i);
+                    (&val[byte..next], &val[next..])
+                } else {
+                    (" ", "")
+                };
+                let field = Style::default().bg(Color::DarkGray);
+                let cursor_cell = Style::default().bg(Color::LightBlue).fg(Color::Black);
+                let line = Line::from(vec![
+                    Span::styled(&val[..byte], field),
+                    Span::styled(at, cursor_cell),
+                    Span::styled(after, field),
+                ]);
+                f.render_widget(Paragraph::new(line).style(field), cols[1]);
+            }
+            ModalState::Error(msg) => {
+                f.render_widget(
+                    Paragraph::new(msg.clone()).alignment(Alignment::Center),
+                    panes[0],
+                );
+            }
+            ModalState::None => unreachable!(),
+        }
+        f.render_widget(Paragraph::new(hint).alignment(Alignment::Center), panes[1]);
+    }
 }
 
 /// 在 `area` 内居中放置一个 `want_w` × `want_h` 的矩形;超出 `area` 时裁到 `area` 大小。
@@ -107,6 +211,53 @@ fn centered_rect(area: Rect, want_w: u16, want_h: u16) -> Rect {
     let x = area.x + (area.width - w) / 2;
     let y = area.y + (area.height - h) / 2;
     Rect::new(x, y, w, h)
+}
+
+/// 画一个带边框、文字居中的按钮。
+fn render_button(f: &mut Frame, area: Rect, label: &str) {
+    let block = Block::new().borders(Borders::ALL);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    f.render_widget(
+        Paragraph::new(label.to_string()).alignment(Alignment::Center),
+        inner,
+    );
+}
+
+/// footer 左侧「HTTP 按钮」的 Rect(宽度随 `label` 内容变化,含两侧边框)。
+/// `render_frame` 画按钮、`run_command` 命中检测共用,保证点击坐标与渲染位置一致;
+/// 内部 Layout 必须与 `render_frame` 完全相同。
+pub(crate) fn http_button_rect(frame_area: Rect, label: &str) -> Rect {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(3),
+        ])
+        .split(frame_area);
+    let footer = chunks[2];
+    let want = label.chars().count() as u16 + 2; // +2:左右边框
+    let width = want.min(footer.width);
+    Rect::new(footer.x, footer.y, width, footer.height)
+}
+
+/// footer 右侧「退出按钮」的 Rect(右对齐,宽度随 `label` 变化,含两侧边框)。
+/// render 画按钮、`run_command` 命中检测共用;Layout 与 `render_frame` 相同。
+pub(crate) fn quit_button_rect(frame_area: Rect, label: &str) -> Rect {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(3),
+        ])
+        .split(frame_area);
+    let footer = chunks[2];
+    let want = label.chars().count() as u16 + 2; // +2:左右边框
+    let width = want.min(footer.width);
+    let x = footer.x + footer.width - width;
+    Rect::new(x, footer.y, width, footer.height)
 }
 
 pub fn spawn_event_loop(ui_tx: UITx) {
@@ -153,6 +304,12 @@ fn event_loop_thread(tx_to_pty: UITx) -> anyhow::Result<()> {
                     MouseEventKind::ScrollDown => {
                         let _ = tx_to_pty.blocking_send(UIEvent::ScrollDown {
                             rows: MOUSE_SCROLL_ROWS,
+                        });
+                    }
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        let _ = tx_to_pty.blocking_send(UIEvent::Click {
+                            col: mouse.column,
+                            row: mouse.row,
                         });
                     }
                     _ => {}

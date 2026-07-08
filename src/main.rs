@@ -1,6 +1,4 @@
-use axum::{Router, routing::get};
 use clap::Parser;
-use std::net::SocketAddr;
 
 mod broker;
 mod config;
@@ -76,13 +74,6 @@ async fn main() {
 
     let image_format = args.image_format();
 
-    let state = ws::AppState {
-        tx: tx.clone(),
-        cli_tx,
-        screenshot_tx: screenshot_tx.clone(),
-        image_format,
-    };
-
     // 可选 MQTT 传输:配置里有 [mqtt] 段且 enable!=false 才启用,否则完全不碰。
     match args.mqtt_config() {
         Some(mut cfg) if cfg.enable => {
@@ -101,54 +92,20 @@ async fn main() {
                     Err(e) => log::error!("[mqtt] failed to start builtin broker: {e}"),
                 }
             }
-            mqtt::spawn(cfg, state.cli_tx.clone(), state.tx.clone(), image_format);
+            mqtt::spawn(cfg, cli_tx.clone(), tx.clone(), image_format);
             log::info!("[mqtt] transport enabled");
         }
         Some(_) => log::info!("[mqtt] transport disabled by config (enable=false)"),
-        None => log::debug!("[mqtt] not configured, transport disabled (WebSocket/HTTP only)"),
+        None => log::debug!("[mqtt] not configured, transport disabled"),
     }
 
-    let listener = tokio::net::TcpListener::bind(&args.bind_addr)
-        .await
-        .expect("Failed to bind to address");
-
-    let listen_port = listener.local_addr().unwrap().port();
-
-    // Spawn HTTP server(只服务 /mqtt_ws 调试页 + /screenshot;终端传输走 MQTT)
-    let app = Router::new()
-        .route("/mqtt_ws", get(static_page::mqtt_ws_handler))
-        .route("/screenshot", get(ws::screenshot_handler))
-        .with_state(state);
-
-    log::info!("HTTP server listening on http://{}", args.bind_addr);
-
-    tokio::spawn(async move {
-        let serve = axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        );
-        if let Err(e) = serve.await {
-            log::error!("Server error: {}", e);
-        }
-    });
+    // HTTP server 默认不启动;由 TUI footer 按钮按需开启(见 ws::run_command)。
+    // --bind-addr 整体(如 `0.0.0.0:3000`)作为对话框预填默认值;其端口部分注入 VIBETTY_PORT。
+    let default_bind = args.bind_addr.clone();
 
     // Init TUI
     let mut tui = ui::init_terminal().expect("Failed to initialize terminal");
     ui::spawn_event_loop(ui_tx);
-
-    let server_url = if let Ok(addr) = std::net::TcpListener::bind(&args.bind_addr) {
-        let addr = addr.local_addr().unwrap();
-        if addr.ip().is_loopback() {
-            format!(
-                "http://localhost:{}        Warning: Server only bind on loopback dev. ",
-                listen_port
-            )
-        } else {
-            format!("http://{}:{}", addr.ip(), listen_port)
-        }
-    } else {
-        format!("http://localhost:{}", listen_port)
-    };
 
     let mut ui_title = String::new();
     let mut ui_rx = ui_rx;
@@ -159,11 +116,11 @@ async fn main() {
         cli_rx,
         &mut ui_rx,
         tx.clone(),
-        listen_port,
+        screenshot_tx,
+        default_bind,
         screenshot_rx,
         &mut tui,
         &mut ui_title,
-        &server_url,
         image_format,
         args.auto_submit,
     )

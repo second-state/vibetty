@@ -1,10 +1,14 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::{extract::State, response::IntoResponse};
+use axum::{Router, extract::State, response::IntoResponse, routing::get};
+use ratatui::layout::Rect;
 use tokio::sync::{broadcast, mpsc};
+use tui_input::InputRequest;
 use vt100::Callbacks;
 
 use crate::protocol::{ClientMessage, ServerMessage};
+use crate::ui::{HttpBtnState, ModalState, http_button_rect, quit_button_rect};
 
 /// Image broadcast frame interval (ms)
 const IMAGE_FRAME_INTERVAL_MS: u64 = 300;
@@ -29,7 +33,6 @@ const TUI_ROWS_PADDING: u16 = 8;
 
 type ServerTx = broadcast::Sender<ServerMessage>;
 
-type ClientTx = mpsc::Sender<ClientMessage>;
 type ClientRx = mpsc::Receiver<ClientMessage>;
 
 struct WindowCallbacks {
@@ -58,14 +61,38 @@ type ScreenshotTx = mpsc::Sender<tokio::sync::oneshot::Sender<Result<Vec<u8>, St
 
 #[derive(Clone)]
 pub struct AppState {
-    pub tx: ServerTx,
-    pub cli_tx: ClientTx,
     pub screenshot_tx: ScreenshotTx,
     pub image_format: crate::protocol::ImageFormat,
 }
 
 fn send_screen(tx: &ServerTx, screen: Arc<vt100::Screen>) {
     let _ = tx.send(ServerMessage::Screen(screen));
+}
+
+/// 构造 HTTP 路由:/mqtt_ws 调试页 + /screenshot(与原启动期一致)。
+fn build_router(state: AppState) -> Router {
+    Router::new()
+        .route("/mqtt_ws", get(crate::static_page::mqtt_ws_handler))
+        .route("/screenshot", get(screenshot_handler))
+        .with_state(state)
+}
+
+/// 按指定绑定地址(如 `0.0.0.0:3000`、`127.0.0.1:8080`)后台启动 HTTP server,
+/// 返回实际绑定的 `host:port`。失败(地址占用/无权限/格式非法等)返回 Err。
+async fn start_http(bind: &str, state: AppState) -> anyhow::Result<String> {
+    let listener = tokio::net::TcpListener::bind(bind).await?;
+    let bound = listener.local_addr()?.to_string();
+    let app = build_router(state);
+    tokio::spawn(async move {
+        let serve = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        );
+        if let Err(e) = serve.await {
+            log::error!("[http] server error: {e}");
+        }
+    });
+    Ok(bound)
 }
 
 /// 滚动行数换算:`rows == 0` 表示滚一整页(= `page_rows`),否则滚 `rows` 行。
@@ -89,11 +116,11 @@ pub async fn run_command(
     mut rx: ClientRx,
     ui_rx: &mut mpsc::Receiver<crate::ui::UIEvent>,
     tx: ServerTx,
-    listen_port: u16,
+    screenshot_tx: ScreenshotTx,
+    default_bind: String,
     mut screenshot_rx: mpsc::Receiver<tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>>,
     tui: &mut crate::ui::TuiTerminal,
     ui_title: &mut String,
-    ui_footer: &str,
     image_format: crate::protocol::ImageFormat,
     auto_submit: bool,
 ) -> anyhow::Result<()> {
@@ -122,7 +149,14 @@ pub async fn run_command(
     let mut terminal = crate::terminal::pty::new_with_command(
         command.first().unwrap().as_str(),
         &command[1..],
-        &[("VIBETTY_PORT".to_string(), listen_port.to_string())],
+        &[(
+            "VIBETTY_PORT".to_string(),
+            default_bind
+                .rsplit_once(':')
+                .map(|(_, p)| p)
+                .unwrap_or("0")
+                .to_string(),
+        )],
         (vt_rows, vt_cols),
     )
     .await?;
@@ -137,6 +171,18 @@ pub async fn run_command(
     // 「一页」的行数:由最近一次 sync 的像素高度推算(能塞下的行数 − 1)。滚动 rows=0 时用它。
     // 还没 sync 过就用初始终端行数兜底。
     let mut page_rows: u16 = vt_rows;
+
+    // footer HTTP 按钮状态 + 端口输入对话框状态;启动时 server 未开(off)。
+    let mut http = HttpBtnState::Off;
+    let mut modal = ModalState::None;
+    // 终端整体尺寸(单元格),用于点击命中检测;随 Resize 更新。
+    let mut term_size: (u16, u16) = (cols, rows);
+
+    // 统一重绘:画 screen/title + 按钮状态 + 对话框。`tui` 仅由此闭包借用。
+    let mut redraw =
+        |screen: &Arc<vt100::Screen>, title: &str, http: &HttpBtnState, modal: &ModalState| {
+            let _ = tui.draw(|f| crate::ui::render_frame(f, screen, title, "Vibetty", http, modal));
+        };
 
     loop {
         let terminal_read_event = terminal.read_pty_output();
@@ -224,10 +270,7 @@ pub async fn run_command(
 
                 // Render directly to TUI
                 let screen = Arc::new(vt_parser.screen().clone());
-                let title = ui_title.clone();
-                let footer = ui_footer.to_string();
-                let _ =
-                    tui.draw(|f| crate::ui::render_frame(f, &screen, &title, "Vibetty", &footer));
+                redraw(&screen, ui_title, &http, &modal);
                 if tx
                     .send(ServerMessage::PtyOutput(output.into_bytes()))
                     .is_err()
@@ -238,16 +281,115 @@ pub async fn run_command(
 
                 // Generate JPEG and broadcast chunks for img subscribers (rate limited)
                 let now = std::time::Instant::now();
-                if now.duration_since(last_frame_time) >= frame_interval || title.starts_with("✳")
+                if now.duration_since(last_frame_time) >= frame_interval
+                    || ui_title.starts_with("✳")
                 {
                     last_frame_time = now;
                     send_screen(&tx, screen);
                 }
             }
 
-            TerminalEvent::UIEvent(crate::ui::UIEvent::Input(input)) => {
-                log::info!("UI Input: {:?}", String::from_utf8_lossy(&input));
-                terminal.send_bytes(&input).await?;
+            TerminalEvent::UIEvent(crate::ui::UIEvent::Input(bytes)) => {
+                if matches!(modal, ModalState::None) {
+                    log::info!("UI Input: {:?}", String::from_utf8_lossy(&bytes));
+                    terminal.send_bytes(&bytes).await?;
+                } else {
+                    // 模态打开:按键路由给对话框,不进 PTY。方向键/Home/End 移动光标,Esc 取消。
+                    let mut next = std::mem::take(&mut modal);
+                    next = match next {
+                        ModalState::PortInput { mut input } => {
+                            if bytes == b"\r" || bytes == b"\n" {
+                                let bind = input.value().trim().to_string();
+                                if bind.is_empty() {
+                                    ModalState::Error("invalid address".to_string())
+                                } else {
+                                    let state = AppState {
+                                        screenshot_tx: screenshot_tx.clone(),
+                                        image_format,
+                                    };
+                                    match start_http(&bind, state).await {
+                                        Ok(addr) => {
+                                            log::info!("[http] started on {addr}");
+                                            http = HttpBtnState::On(addr);
+                                            ModalState::None
+                                        }
+                                        Err(e) => {
+                                            log::warn!("[http] start failed: {e}");
+                                            ModalState::Error(format!("listen failed: {e}"))
+                                        }
+                                    }
+                                }
+                            } else if bytes == b"\x1b" {
+                                ModalState::None // Esc 取消
+                            } else {
+                                let req = if bytes == b"\x1b[D" {
+                                    Some(InputRequest::GoToPrevChar)
+                                } else if bytes == b"\x1b[C" {
+                                    Some(InputRequest::GoToNextChar)
+                                } else if bytes == b"\x1b[H" {
+                                    Some(InputRequest::GoToStart)
+                                } else if bytes == b"\x1b[F" {
+                                    Some(InputRequest::GoToEnd)
+                                } else if bytes == [0x08] || bytes == [0x7f] {
+                                    Some(InputRequest::DeletePrevChar)
+                                } else if bytes.len() == 1 {
+                                    let c = bytes[0];
+                                    if (c.is_ascii_alphanumeric()
+                                        || matches!(c, b'.' | b':' | b'[' | b']'))
+                                        && input.value().len() < 45
+                                    {
+                                        Some(InputRequest::InsertChar(c as char))
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                };
+                                if let Some(req) = req {
+                                    input.handle(req);
+                                }
+                                ModalState::PortInput { input }
+                            }
+                        }
+                        ModalState::Error(_) => ModalState::None, // 任意键关闭
+                        ModalState::None => ModalState::None,
+                    };
+                    modal = next;
+                    let screen = Arc::new(vt_parser.screen().clone());
+                    redraw(&screen, ui_title, &http, &modal);
+                }
+            }
+            TerminalEvent::UIEvent(crate::ui::UIEvent::Click { col, row }) => {
+                // 模态打开时忽略点击。
+                if matches!(modal, ModalState::None) {
+                    let area = Rect::new(0, 0, term_size.0, term_size.1);
+                    // 退出按钮(右):发 0x03 + 退出循环,等同 Ctrl+C。
+                    let quit = quit_button_rect(area, "Quit");
+                    if col >= quit.x
+                        && col < quit.x + quit.width
+                        && row >= quit.y
+                        && row < quit.y + quit.height
+                    {
+                        log::info!("Quit button clicked, sending Ctrl+C (0x03)");
+                        terminal.send_bytes(&[0x03]).await?;
+                        break;
+                    }
+                    // HTTP 按钮(左,off 态):打开地址输入框。
+                    if matches!(http, HttpBtnState::Off) {
+                        let btn = http_button_rect(area, "HTTP off");
+                        if col >= btn.x
+                            && col < btn.x + btn.width
+                            && row >= btn.y
+                            && row < btn.y + btn.height
+                        {
+                            modal = ModalState::PortInput {
+                                input: tui_input::Input::new(default_bind.clone()),
+                            };
+                            let screen = Arc::new(vt_parser.screen().clone());
+                            redraw(&screen, ui_title, &http, &modal);
+                        }
+                    }
+                }
             }
             TerminalEvent::UIEvent(crate::ui::UIEvent::ScrollUp { rows })
             | TerminalEvent::Input(ClientMessage::ScrollUp { rows }) => {
@@ -258,10 +400,7 @@ pub async fn run_command(
                     .screen_mut()
                     .set_scrollback(s.saturating_add(delta));
                 let screen = Arc::new(vt_parser.screen().clone());
-                let title = ui_title.clone();
-                let footer = ui_footer.to_string();
-                let _ =
-                    tui.draw(|f| crate::ui::render_frame(f, &screen, &title, "Vibetty", &footer));
+                redraw(&screen, ui_title, &http, &modal);
 
                 send_screen(&tx, screen);
             }
@@ -274,20 +413,19 @@ pub async fn run_command(
                     .screen_mut()
                     .set_scrollback(s.saturating_sub(delta));
                 let screen = Arc::new(vt_parser.screen().clone());
-                let title = ui_title.clone();
-                let footer = ui_footer.to_string();
-                let _ =
-                    tui.draw(|f| crate::ui::render_frame(f, &screen, &title, "Vibetty", &footer));
+                redraw(&screen, ui_title, &http, &modal);
 
                 send_screen(&tx, screen);
             }
             TerminalEvent::UIEvent(crate::ui::UIEvent::Resize(cols, rows)) => {
                 log::info!("Resize: cols={}, rows={}", cols, rows);
+                term_size = (cols, rows);
                 let vt_cols = cols.saturating_sub(TUI_COLS_PADDING);
                 let vt_rows = rows.saturating_sub(TUI_ROWS_PADDING);
                 vt_parser.screen_mut().set_size(vt_rows, vt_cols);
                 let _ = terminal.resize(vt_rows, vt_cols);
                 let screen = Arc::new(vt_parser.screen().clone());
+                redraw(&screen, ui_title, &http, &modal);
                 send_screen(&tx, screen);
             }
             TerminalEvent::Input(ClientMessage::Sync { width, height }) => {
@@ -309,10 +447,7 @@ pub async fn run_command(
                 }
                 let screen = Arc::new(vt_parser.screen().clone());
                 // 立即重绘本地 TUI,否则要等下一次 PTY 输出才看得到 resize/居中效果。
-                let title = ui_title.clone();
-                let footer = ui_footer.to_string();
-                let _ =
-                    tui.draw(|f| crate::ui::render_frame(f, &screen, &title, "Vibetty", &footer));
+                redraw(&screen, ui_title, &http, &modal);
                 send_screen(&tx, screen);
             }
             TerminalEvent::Input(ClientMessage::PtyInput(input)) => {
