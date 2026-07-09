@@ -148,6 +148,401 @@ fn page_rows_from_height(height: u16) -> u16 {
     fits.saturating_sub(1).max(1) as u16
 }
 
+/// 主事件循环统一的事件来源(PTY 输出 / 客户端消息 / TUI UI 事件 / 截图请求)。
+enum TerminalEvent {
+    Input(crate::protocol::ClientMessage),
+    InputClosed,
+    UIEvent(crate::ui::UIEvent),
+    PtyOutput(String),
+    ScreenGetter(tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>),
+    Error,
+}
+
+/// 点击 footer 按钮的结果:退出程序 / 打开对话框 / 无命中。
+/// `Modal` 装箱:另两个变体无数据,装箱避免整个枚举撑到 ModalState 的大小
+/// (clippy::large_enum_variant);该值每次点击产生后立即消费,一次分配可忽略。
+enum ClickOutcome {
+    Quit,
+    Modal(Box<ModalState>),
+    None,
+}
+
+/// MqttPanel 操作需要的可变状态(改端口/URL 写 config、起停 broker/client)。
+/// 把这几样 `&mut` 收进一个结构体,免去面板处理函数一长串参数。
+struct MqttCtx<'a> {
+    cfg: &'a mut Option<MqttConfig>,
+    broker_on: &'a mut bool,
+    client: &'a mut Option<mqtt::MqttHandle>,
+    cli_tx: &'a mpsc::Sender<ClientMessage>,
+    tx: &'a ServerTx,
+    image_format: crate::protocol::ImageFormat,
+}
+
+/// 把原始按键解析成对 tui_input 的编辑请求:方向键/Home/End 导航、Backspace 删除、
+/// 单字符插入(由 `allowed` 过滤、且当前长度 `< cap` 时才插)。端口/地址/URL 输入框共用,
+/// 消除原先散落各处的重复 if 链。
+fn parse_input_request(
+    bytes: &[u8],
+    allowed: impl Fn(u8) -> bool,
+    cur_len: usize,
+    cap: usize,
+) -> Option<InputRequest> {
+    if bytes == b"\x1b[D" {
+        Some(InputRequest::GoToPrevChar)
+    } else if bytes == b"\x1b[C" {
+        Some(InputRequest::GoToNextChar)
+    } else if bytes == b"\x1b[H" {
+        Some(InputRequest::GoToStart)
+    } else if bytes == b"\x1b[F" {
+        Some(InputRequest::GoToEnd)
+    } else if bytes == [0x08] || bytes == [0x7f] {
+        Some(InputRequest::DeletePrevChar)
+    } else if bytes.len() == 1 && cur_len < cap && allowed(bytes[0]) {
+        Some(InputRequest::InsertChar(bytes[0] as char))
+    } else {
+        None
+    }
+}
+
+/// MQTT broker URL 输入框允许的字符(字母/数字 + URL 常见符号)。
+fn url_char_allowed(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, b':' | b'/' | b'.' | b'_' | b'-' | b'~' | b'@')
+}
+
+/// 点击坐标是否落在 `r` 内。
+fn hit_test(col: u16, row: u16, r: Rect) -> bool {
+    col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
+}
+
+/// boot 时的 MQTT auto-start:`enable` 起 client、`builtin_broker` 起内置 broker。
+/// 返回 (broker 是否在跑, client handle)。broker 只起不停(rumqttd 无 shutdown)。
+fn autostart_mqtt(
+    mqtt_cfg: &Option<MqttConfig>,
+    cli_tx: &mpsc::Sender<ClientMessage>,
+    tx: &ServerTx,
+    image_format: crate::protocol::ImageFormat,
+) -> (bool, Option<mqtt::MqttHandle>) {
+    let Some(cfg) = mqtt_cfg else {
+        return (false, None);
+    };
+    let mut broker_on = false;
+    if cfg.builtin_broker {
+        match broker::spawn_builtin(cfg) {
+            Ok(()) => {
+                broker_on = true;
+                log::info!("[mqtt] broker auto-started on :{}", cfg.builtin_port);
+            }
+            Err(e) => log::warn!("[mqtt] broker auto-start failed: {e}"),
+        }
+    }
+    let client = cfg.enable.then(|| {
+        log::info!("[mqtt] client auto-started");
+        mqtt::spawn(cfg.for_client(), cli_tx.clone(), tx.clone(), image_format)
+    });
+    (broker_on, client)
+}
+
+/// 处理 HTTP 端口输入框的按键:Enter 按地址起 server、Esc 取消、其余编辑输入。
+async fn handle_port_input(
+    mut input: tui_input::Input,
+    bytes: &[u8],
+    http: &mut HttpBtnState,
+    screenshot_tx: &ScreenshotTx,
+    image_format: crate::protocol::ImageFormat,
+) -> ModalState {
+    // Enter:尝试按输入地址起 HTTP server。
+    if bytes == b"\r" || bytes == b"\n" {
+        let bind = input.value().trim().to_string();
+        if bind.is_empty() {
+            return ModalState::Error("invalid address".to_string());
+        }
+        let state = AppState {
+            screenshot_tx: screenshot_tx.clone(),
+            image_format,
+        };
+        return match start_http(&bind, state).await {
+            Ok(addr) => {
+                log::info!("[http] started on {addr}");
+                *http = HttpBtnState::On(addr);
+                ModalState::None
+            }
+            Err(e) => {
+                log::warn!("[http] start failed: {e}");
+                ModalState::Error(format!("listen failed: {e}"))
+            }
+        };
+    }
+    if bytes == b"\x1b" {
+        return ModalState::None; // Esc 取消
+    }
+    // 地址可含字母/数字/.:[];导航/Home/End/Backspace 通用。
+    let req = parse_input_request(
+        bytes,
+        |c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b':' | b'[' | b']'),
+        input.value().len(),
+        45,
+    );
+    if let Some(req) = req {
+        input.handle(req);
+    }
+    ModalState::PortInput { input }
+}
+
+/// 把面板表单重新打包(保留输入字段、更新聚焦项)。
+fn mqtt_panel(
+    tcp: tui_input::Input,
+    ws: tui_input::Input,
+    url: tui_input::Input,
+    focus: MqttFocus,
+) -> ModalState {
+    ModalState::MqttPanel {
+        tcp,
+        ws,
+        url,
+        focus,
+    }
+}
+
+/// MqttPanel 上按 Enter:行为随聚焦项不同。
+///  Tcp/Ws       -> 解析存盘(有改动则写 config)+ 跳到 BrokerStart。
+///  BrokerStart  -> 起 broker(已起则无动作,rumqttd 停不掉)。
+///  Url          -> broker URL 改动了则写回 [mqtt] broker + 跳到 ClientToggle。
+///  ClientToggle -> 切换 client:已起则 stop(oneshot),否则 spawn。
+async fn mqtt_panel_enter(
+    tcp: tui_input::Input,
+    ws: tui_input::Input,
+    url: tui_input::Input,
+    mut focus: MqttFocus,
+    mqtt: &mut MqttCtx<'_>,
+) -> ModalState {
+    match focus {
+        MqttFocus::Tcp | MqttFocus::Ws => match parse_and_save(&tcp, &ws, mqtt.cfg) {
+            Ok(_) => {
+                focus = MqttFocus::BrokerStart;
+                mqtt_panel(tcp, ws, url, focus)
+            }
+            Err(e) => ModalState::Error(e),
+        },
+        MqttFocus::BrokerStart => {
+            if *mqtt.broker_on {
+                // 已起,rumqttd 停不掉 -> 无动作,留在面板。
+                mqtt_panel(tcp, ws, url, focus)
+            } else {
+                match parse_and_save(&tcp, &ws, mqtt.cfg) {
+                    Ok((t, w)) => match tokio::net::TcpListener::bind(("0.0.0.0", t)).await {
+                        Ok(_) => {
+                            let mut cfg = mqtt
+                                .cfg
+                                .as_ref()
+                                .expect("mqtt_cfg_present implies mqtt_cfg")
+                                .clone();
+                            cfg.builtin_port = t;
+                            cfg.builtin_ws_port = w;
+                            match broker::spawn_builtin(&cfg) {
+                                Ok(()) => {
+                                    log::info!("[mqtt] broker started on :{t}");
+                                    *mqtt.broker_on = true;
+                                    ModalState::None
+                                }
+                                Err(e) => ModalState::Error(format!("broker start failed: {e}")),
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("[mqtt] port {t} unavailable: {e}");
+                            ModalState::Error(format!("port {t} unavailable: {e}"))
+                        }
+                    },
+                    Err(e) => ModalState::Error(e),
+                }
+            }
+        }
+        MqttFocus::Url => {
+            // 只在用户改动了(与「当前生效 URL」不同)时写回 config,
+            // 避免把默认本地地址回写污染 cfg.broker。
+            // 生效 URL = for_client().broker(config 填了用配置值,空 + 内置才默认本地)。
+            let new_url = url.value().trim().to_string();
+            let effective = mqtt
+                .cfg
+                .as_ref()
+                .map(|c| c.for_client().broker)
+                .unwrap_or_default();
+            if new_url == effective {
+                focus = MqttFocus::ClientToggle;
+                mqtt_panel(tcp, ws, url, focus)
+            } else if let Some(cfg) = mqtt.cfg.as_mut() {
+                cfg.broker = new_url.clone();
+                match crate::setup::save_mqtt(cfg, None) {
+                    Ok(()) => {
+                        log::info!("[mqtt] saved broker url={new_url}");
+                        focus = MqttFocus::ClientToggle;
+                        mqtt_panel(tcp, ws, url, focus)
+                    }
+                    Err(e) => ModalState::Error(format!("save url failed: {e}")),
+                }
+            } else {
+                focus = MqttFocus::ClientToggle;
+                mqtt_panel(tcp, ws, url, focus)
+            }
+        }
+        MqttFocus::ClientToggle => {
+            if let Some(h) = mqtt.client.take() {
+                h.stop();
+                log::info!("[mqtt] client stopped via panel");
+            } else {
+                let cfg = mqtt
+                    .cfg
+                    .as_ref()
+                    .expect("mqtt_cfg_present implies mqtt_cfg")
+                    .for_client();
+                *mqtt.client = Some(mqtt::spawn(
+                    cfg,
+                    mqtt.cli_tx.clone(),
+                    mqtt.tx.clone(),
+                    mqtt.image_format,
+                ));
+                log::info!("[mqtt] client started via panel");
+            }
+            ModalState::None
+        }
+    }
+}
+
+/// MqttPanel 上编辑聚焦的输入字段(BrokerStart/ClientToggle 聚焦时不编辑)。
+/// 端口只收数字;URL 收 URL 合法字符。方向/Home/End/Backspace 通用。
+fn mqtt_panel_edit(
+    focus: MqttFocus,
+    bytes: &[u8],
+    tcp: &mut tui_input::Input,
+    ws: &mut tui_input::Input,
+    url: &mut tui_input::Input,
+) {
+    let req = match focus {
+        MqttFocus::Tcp => parse_input_request(
+            bytes,
+            |c| c.is_ascii_digit(),
+            tcp.value().chars().count(),
+            5,
+        ),
+        MqttFocus::Ws => {
+            parse_input_request(bytes, |c| c.is_ascii_digit(), ws.value().chars().count(), 5)
+        }
+        MqttFocus::Url => {
+            parse_input_request(bytes, url_char_allowed, url.value().chars().count(), 60)
+        }
+        // BrokerStart / ClientToggle 聚焦时不编辑输入字段。
+        MqttFocus::BrokerStart | MqttFocus::ClientToggle => return,
+    };
+    if let Some(req) = req {
+        match focus {
+            MqttFocus::Tcp => {
+                tcp.handle(req);
+            }
+            MqttFocus::Ws => {
+                ws.handle(req);
+            }
+            MqttFocus::Url => {
+                url.handle(req);
+            }
+            // 上面已对 BrokerStart/ClientToggle 提前 return,这里不可达。
+            MqttFocus::BrokerStart | MqttFocus::ClientToggle => {}
+        }
+    }
+}
+
+/// 处理 MqttPanel 上的按键:Tab/↑↓ 切聚焦项、Esc 关闭、Enter 按聚焦项动作,
+/// 否则编辑聚焦的输入字段。返回新的面板状态。
+async fn handle_mqtt_panel(
+    mut tcp: tui_input::Input,
+    mut ws: tui_input::Input,
+    mut url: tui_input::Input,
+    mut focus: MqttFocus,
+    bytes: &[u8],
+    mqtt: &mut MqttCtx<'_>,
+) -> ModalState {
+    // 导航:Tab / ↓ 下一项,↑ 上一项。
+    if bytes == b"\t" || bytes == b"\x1b[B" {
+        focus = focus.next();
+    } else if bytes == b"\x1b[A" {
+        focus = focus.prev();
+    } else if bytes == b"\x1b" {
+        return ModalState::None; // Esc 取消
+    } else if bytes == b"\r" || bytes == b"\n" {
+        return mqtt_panel_enter(tcp, ws, url, focus, mqtt).await;
+    } else {
+        mqtt_panel_edit(focus, bytes, &mut tcp, &mut ws, &mut url);
+    }
+    mqtt_panel(tcp, ws, url, focus)
+}
+
+/// 处理模态打开时的按键:按对话框类型路由。返回新的 modal 状态。
+async fn handle_modal_input(
+    modal: ModalState,
+    bytes: &[u8],
+    http: &mut HttpBtnState,
+    mqtt: &mut MqttCtx<'_>,
+    screenshot_tx: &ScreenshotTx,
+    image_format: crate::protocol::ImageFormat,
+) -> ModalState {
+    match modal {
+        ModalState::PortInput { input } => {
+            handle_port_input(input, bytes, http, screenshot_tx, image_format).await
+        }
+        ModalState::MqttPanel {
+            tcp,
+            ws,
+            url,
+            focus,
+        } => handle_mqtt_panel(tcp, ws, url, focus, bytes, mqtt).await,
+        ModalState::Error(_) => ModalState::None, // 任意键关闭
+        ModalState::None => ModalState::None,
+    }
+}
+
+/// footer 点击命中检测:Quit(右)/ HTTP(off 态,左)/ MQTT(配了 [mqtt] 才显示)。
+/// 命中按钮分别返回退出、打开对应对话框;无命中返回 None。
+fn handle_click(
+    col: u16,
+    row: u16,
+    term_size: (u16, u16),
+    http: &HttpBtnState,
+    default_bind: &str,
+    mqtt_cfg: Option<&MqttConfig>,
+    mqtt: MqttButtonsState,
+) -> ClickOutcome {
+    let area = Rect::new(0, 0, term_size.0, term_size.1);
+    // 退出按钮(右):发 0x03 + 退出循环,等同 Ctrl+C。
+    let quit = quit_button_rect(area, "Quit");
+    if hit_test(col, row, quit) {
+        return ClickOutcome::Quit;
+    }
+    // HTTP 按钮(左,off 态):打开地址输入框。
+    if matches!(http, HttpBtnState::Off) {
+        let btn = http_button_rect(area, "HTTP off");
+        if hit_test(col, row, btn) {
+            return ClickOutcome::Modal(Box::new(ModalState::PortInput {
+                input: tui_input::Input::new(default_bind.to_string()),
+            }));
+        }
+    }
+    // MQTT 按钮(HTTP 右边):只要配了 [mqtt] 就开控制面板(起停都在面板里,不看 off 态)。
+    if let Some(cfg) = mqtt_cfg {
+        let hl = button_label("HTTP", http);
+        let mlabel = mqtt_footer_label(&mqtt);
+        let mbtn = mqtt_button_rect(area, &hl, &mlabel);
+        if hit_test(col, row, mbtn) {
+            return ClickOutcome::Modal(Box::new(ModalState::MqttPanel {
+                tcp: tui_input::Input::new(cfg.builtin_port.to_string()),
+                ws: tui_input::Input::new(cfg.builtin_ws_port.to_string()),
+                // 预填生效 URL(见 MqttConfig::for_client):填了 broker 就用配置值,
+                // 没填 + 内置 broker 才默认本地。
+                url: tui_input::Input::new(cfg.for_client().broker),
+                focus: MqttFocus::Tcp,
+            }));
+        }
+    }
+    ClickOutcome::None
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run_command(
     command: Vec<String>,
@@ -164,19 +559,6 @@ pub async fn run_command(
     image_format: crate::protocol::ImageFormat,
     auto_submit: bool,
 ) -> anyhow::Result<()> {
-    enum TerminalEvent {
-        Input(crate::protocol::ClientMessage),
-        InputClosed,
-
-        UIEvent(crate::ui::UIEvent),
-
-        PtyOutput(String),
-
-        ScreenGetter(tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>),
-
-        Error,
-    }
-
     // headless(无 TTY,例如纯 MQTT、无 WS 客户端)时 crossterm 返回 0×0 而非 Err,
     // unwrap_or 兜不住;尺寸为 0 会让 vt80 渲染时 overflow panic。拿不到有效尺寸时默认 80×24。
     let (cols, rows) = match crossterm::terminal::size() {
@@ -220,28 +602,8 @@ pub async fn run_command(
 
     // MQTT:`enable` / `builtin_broker` 当 auto-start 标志。broker 只起不停(rumqttd 无 shutdown);
     // client 可停/重起(oneshot cancel,见 mqtt::MqttHandle)。
-    let mut mqtt_broker_on = false;
-    let mut mqtt_client: Option<mqtt::MqttHandle> = None;
-    if let Some(cfg) = &mqtt_cfg {
-        if cfg.builtin_broker {
-            match broker::spawn_builtin(cfg) {
-                Ok(()) => {
-                    mqtt_broker_on = true;
-                    log::info!("[mqtt] broker auto-started on :{}", cfg.builtin_port);
-                }
-                Err(e) => log::warn!("[mqtt] broker auto-start failed: {e}"),
-            }
-        }
-        if cfg.enable {
-            mqtt_client = Some(mqtt::spawn(
-                cfg.for_client(),
-                cli_tx.clone(),
-                tx.clone(),
-                image_format,
-            ));
-            log::info!("[mqtt] client auto-started");
-        }
-    }
+    let (mut mqtt_broker_on, mut mqtt_client) =
+        autostart_mqtt(&mqtt_cfg, &cli_tx, &tx, image_format);
     // footer MQTT 按钮:只要配了 [mqtt] 就显示(不再绑 builtin_broker)。
     let mqtt_cfg_present = mqtt_cfg.is_some();
 
@@ -262,43 +624,30 @@ pub async fn run_command(
     };
 
     loop {
-        let terminal_read_event = terminal.read_pty_output();
-
         let event = tokio::select! {
-            result = terminal_read_event => {
-                match result {
-                    Ok(r) => TerminalEvent::PtyOutput(r),
-                    Err(e) => {
-                        log::error!("[{}] Error reading PTY output: {:?}", terminal.session_id(), e);
-                        TerminalEvent::Error
-                    },
-                }
-
-            },
-            msg = rx.recv() => {
-                match msg {
-                    Some(input) => TerminalEvent::Input(input),
-                    None => TerminalEvent::InputClosed,
+            result = terminal.read_pty_output() => match result {
+                Ok(r) => TerminalEvent::PtyOutput(r),
+                Err(e) => {
+                    log::error!("[{}] Error reading PTY output: {:?}", terminal.session_id(), e);
+                    TerminalEvent::Error
                 }
             },
-
-            ui_evt = ui_rx.recv() => {
-                match ui_evt {
-                    Some(evt) => TerminalEvent::UIEvent(evt),
-                    None => {
-                        log::error!("[{}] UI event channel closed", terminal.session_id());
-                        TerminalEvent::Error
-                    }
+            msg = rx.recv() => match msg {
+                Some(input) => TerminalEvent::Input(input),
+                None => TerminalEvent::InputClosed,
+            },
+            ui_evt = ui_rx.recv() => match ui_evt {
+                Some(evt) => TerminalEvent::UIEvent(evt),
+                None => {
+                    log::error!("[{}] UI event channel closed", terminal.session_id());
+                    TerminalEvent::Error
                 }
             },
-
-            req = screenshot_rx.recv() => {
-                match req {
-                    Some(resp_tx) => TerminalEvent::ScreenGetter(resp_tx),
-                    None => {
-                        log::error!("[{}] Screenshot request channel closed", terminal.session_id());
-                        TerminalEvent::Error
-                    }
+            req = screenshot_rx.recv() => match req {
+                Some(resp_tx) => TerminalEvent::ScreenGetter(resp_tx),
+                None => {
+                    log::error!("[{}] Screenshot request channel closed", terminal.session_id());
+                    TerminalEvent::Error
                 }
             }
         };
@@ -378,307 +727,26 @@ pub async fn run_command(
                     log::info!("UI Input: {:?}", String::from_utf8_lossy(&bytes));
                     terminal.send_bytes(&bytes).await?;
                 } else {
-                    // 模态打开:按键路由给对话框,不进 PTY。方向键/Home/End 移动光标,Esc 取消。
-                    let mut next = std::mem::take(&mut modal);
-                    next = match next {
-                        ModalState::PortInput { mut input } => {
-                            if bytes == b"\r" || bytes == b"\n" {
-                                let bind = input.value().trim().to_string();
-                                if bind.is_empty() {
-                                    ModalState::Error("invalid address".to_string())
-                                } else {
-                                    let state = AppState {
-                                        screenshot_tx: screenshot_tx.clone(),
-                                        image_format,
-                                    };
-                                    match start_http(&bind, state).await {
-                                        Ok(addr) => {
-                                            log::info!("[http] started on {addr}");
-                                            http = HttpBtnState::On(addr);
-                                            ModalState::None
-                                        }
-                                        Err(e) => {
-                                            log::warn!("[http] start failed: {e}");
-                                            ModalState::Error(format!("listen failed: {e}"))
-                                        }
-                                    }
-                                }
-                            } else if bytes == b"\x1b" {
-                                ModalState::None // Esc 取消
-                            } else {
-                                let req = if bytes == b"\x1b[D" {
-                                    Some(InputRequest::GoToPrevChar)
-                                } else if bytes == b"\x1b[C" {
-                                    Some(InputRequest::GoToNextChar)
-                                } else if bytes == b"\x1b[H" {
-                                    Some(InputRequest::GoToStart)
-                                } else if bytes == b"\x1b[F" {
-                                    Some(InputRequest::GoToEnd)
-                                } else if bytes == [0x08] || bytes == [0x7f] {
-                                    Some(InputRequest::DeletePrevChar)
-                                } else if bytes.len() == 1 {
-                                    let c = bytes[0];
-                                    if (c.is_ascii_alphanumeric()
-                                        || matches!(c, b'.' | b':' | b'[' | b']'))
-                                        && input.value().len() < 45
-                                    {
-                                        Some(InputRequest::InsertChar(c as char))
-                                    } else {
-                                        None
-                                    }
-                                } else {
-                                    None
-                                };
-                                if let Some(req) = req {
-                                    input.handle(req);
-                                }
-                                ModalState::PortInput { input }
-                            }
-                        }
-                        ModalState::MqttPanel {
-                            mut tcp,
-                            mut ws,
-                            mut url,
-                            mut focus,
-                        } => {
-                            // 导航:Tab / ↓ 下一项,↑ 上一项(Tcp → Ws → BrokerStart → Url → ClientToggle 循环)。
-                            if bytes == b"\t" || bytes == b"\x1b[B" {
-                                focus = match focus {
-                                    MqttFocus::Tcp => MqttFocus::Ws,
-                                    MqttFocus::Ws => MqttFocus::BrokerStart,
-                                    MqttFocus::BrokerStart => MqttFocus::Url,
-                                    MqttFocus::Url => MqttFocus::ClientToggle,
-                                    MqttFocus::ClientToggle => MqttFocus::Tcp,
-                                };
-                                ModalState::MqttPanel {
-                                    tcp,
-                                    ws,
-                                    url,
-                                    focus,
-                                }
-                            } else if bytes == b"\x1b[A" {
-                                focus = match focus {
-                                    MqttFocus::Tcp => MqttFocus::ClientToggle,
-                                    MqttFocus::Ws => MqttFocus::Tcp,
-                                    MqttFocus::BrokerStart => MqttFocus::Ws,
-                                    MqttFocus::Url => MqttFocus::BrokerStart,
-                                    MqttFocus::ClientToggle => MqttFocus::Url,
-                                };
-                                ModalState::MqttPanel {
-                                    tcp,
-                                    ws,
-                                    url,
-                                    focus,
-                                }
-                            } else if bytes == b"\x1b" {
-                                ModalState::None // Esc 取消
-                            } else if bytes == b"\r" || bytes == b"\n" {
-                                // Enter 行为随聚焦项不同:
-                                //  Tcp/Ws       -> 解析存盘(有改动则写 config)+ 跳到 BrokerStart。
-                                //  BrokerStart  -> 起 broker(已起则无动作,rumqttd 停不掉)。
-                                //  Url          -> broker URL 改动了则写回 [mqtt] broker + 跳到 ClientToggle。
-                                //  ClientToggle -> 切换 client:已起则 stop(oneshot),否则 spawn。
-                                match focus {
-                                    MqttFocus::Tcp | MqttFocus::Ws => {
-                                        match parse_and_save(&tcp, &ws, &mut mqtt_cfg) {
-                                            Ok(_) => {
-                                                focus = MqttFocus::BrokerStart;
-                                                ModalState::MqttPanel {
-                                                    tcp,
-                                                    ws,
-                                                    url,
-                                                    focus,
-                                                }
-                                            }
-                                            Err(e) => ModalState::Error(e),
-                                        }
-                                    }
-                                    MqttFocus::BrokerStart => {
-                                        if mqtt_broker_on {
-                                            // 已起,rumqttd 停不掉 -> 无动作,留在面板。
-                                            ModalState::MqttPanel {
-                                                tcp,
-                                                ws,
-                                                url,
-                                                focus,
-                                            }
-                                        } else {
-                                            match parse_and_save(&tcp, &ws, &mut mqtt_cfg) {
-                                                Ok((t, w)) => match tokio::net::TcpListener::bind((
-                                                    "0.0.0.0", t,
-                                                ))
-                                                .await
-                                                {
-                                                    Ok(_) => {
-                                                        let mut cfg = mqtt_cfg
-                                                            .as_ref()
-                                                            .expect(
-                                                                "mqtt_cfg_present implies mqtt_cfg",
-                                                            )
-                                                            .clone();
-                                                        cfg.builtin_port = t;
-                                                        cfg.builtin_ws_port = w;
-                                                        match broker::spawn_builtin(&cfg) {
-                                                            Ok(()) => {
-                                                                log::info!(
-                                                                    "[mqtt] broker started on :{t}"
-                                                                );
-                                                                mqtt_broker_on = true;
-                                                                ModalState::None
-                                                            }
-                                                            Err(e) => ModalState::Error(format!(
-                                                                "broker start failed: {e}"
-                                                            )),
-                                                        }
-                                                    }
-                                                    Err(e) => {
-                                                        log::warn!(
-                                                            "[mqtt] port {t} unavailable: {e}"
-                                                        );
-                                                        ModalState::Error(format!(
-                                                            "port {t} unavailable: {e}"
-                                                        ))
-                                                    }
-                                                },
-                                                Err(e) => ModalState::Error(e),
-                                            }
-                                        }
-                                    }
-                                    MqttFocus::Url => {
-                                        // 只在用户改动了(与「当前生效 URL」不同)时写回 config,
-                                        // 避免把默认本地地址回写污染 cfg.broker。
-                                        // 生效 URL = for_client().broker(config 填了用配置值,空 + 内置才默认本地)。
-                                        let new_url = url.value().trim().to_string();
-                                        let effective = mqtt_cfg
-                                            .as_ref()
-                                            .map(|c| c.for_client().broker)
-                                            .unwrap_or_default();
-                                        if new_url == effective {
-                                            focus = MqttFocus::ClientToggle;
-                                            ModalState::MqttPanel {
-                                                tcp,
-                                                ws,
-                                                url,
-                                                focus,
-                                            }
-                                        } else if let Some(cfg) = mqtt_cfg.as_mut() {
-                                            cfg.broker = new_url.clone();
-                                            match crate::setup::save_mqtt(cfg, None) {
-                                                Ok(()) => {
-                                                    log::info!("[mqtt] saved broker url={new_url}");
-                                                    focus = MqttFocus::ClientToggle;
-                                                    ModalState::MqttPanel {
-                                                        tcp,
-                                                        ws,
-                                                        url,
-                                                        focus,
-                                                    }
-                                                }
-                                                Err(e) => ModalState::Error(format!(
-                                                    "save url failed: {e}"
-                                                )),
-                                            }
-                                        } else {
-                                            focus = MqttFocus::ClientToggle;
-                                            ModalState::MqttPanel {
-                                                tcp,
-                                                ws,
-                                                url,
-                                                focus,
-                                            }
-                                        }
-                                    }
-                                    MqttFocus::ClientToggle => {
-                                        if let Some(h) = mqtt_client.take() {
-                                            h.stop();
-                                            log::info!("[mqtt] client stopped via panel");
-                                        } else {
-                                            let cfg = mqtt_cfg
-                                                .as_ref()
-                                                .expect("mqtt_cfg_present implies mqtt_cfg")
-                                                .for_client();
-                                            mqtt_client = Some(mqtt::spawn(
-                                                cfg,
-                                                cli_tx.clone(),
-                                                tx.clone(),
-                                                image_format,
-                                            ));
-                                            log::info!("[mqtt] client started via panel");
-                                        }
-                                        ModalState::None
-                                    }
-                                }
-                            } else {
-                                // 编辑聚焦的输入字段(BrokerStart/ClientToggle 聚焦时不编辑)。
-                                // 端口只收数字;URL 收 URL 合法字符。方向/Home/End/Backspace 通用。
-                                if focus == MqttFocus::Tcp
-                                    || focus == MqttFocus::Ws
-                                    || focus == MqttFocus::Url
-                                {
-                                    let req = if bytes == b"\x1b[D" {
-                                        Some(InputRequest::GoToPrevChar)
-                                    } else if bytes == b"\x1b[C" {
-                                        Some(InputRequest::GoToNextChar)
-                                    } else if bytes == b"\x1b[H" {
-                                        Some(InputRequest::GoToStart)
-                                    } else if bytes == b"\x1b[F" {
-                                        Some(InputRequest::GoToEnd)
-                                    } else if bytes == [0x08] || bytes == [0x7f] {
-                                        Some(InputRequest::DeletePrevChar)
-                                    } else if bytes.len() == 1 {
-                                        let c = bytes[0];
-                                        let is_url = focus == MqttFocus::Url;
-                                        let allowed = if is_url {
-                                            c.is_ascii_alphanumeric()
-                                                || matches!(
-                                                    c,
-                                                    b':' | b'/' | b'.' | b'_' | b'-' | b'~' | b'@'
-                                                )
-                                        } else {
-                                            c.is_ascii_digit()
-                                        };
-                                        let cur_len = match focus {
-                                            MqttFocus::Ws => ws.value().chars().count(),
-                                            MqttFocus::Tcp => tcp.value().chars().count(),
-                                            MqttFocus::Url => url.value().chars().count(),
-                                            _ => 0,
-                                        };
-                                        let cap = if is_url { 60 } else { 5 };
-                                        if allowed && cur_len < cap {
-                                            Some(InputRequest::InsertChar(c as char))
-                                        } else {
-                                            None
-                                        }
-                                    } else {
-                                        None
-                                    };
-                                    if let Some(req) = req {
-                                        match focus {
-                                            MqttFocus::Ws => {
-                                                ws.handle(req);
-                                            }
-                                            MqttFocus::Tcp => {
-                                                tcp.handle(req);
-                                            }
-                                            MqttFocus::Url => {
-                                                url.handle(req);
-                                            }
-                                            MqttFocus::BrokerStart | MqttFocus::ClientToggle => {}
-                                        }
-                                    }
-                                }
-                                ModalState::MqttPanel {
-                                    tcp,
-                                    ws,
-                                    url,
-                                    focus,
-                                }
-                            }
-                        }
-                        ModalState::Error(_) => ModalState::None, // 任意键关闭
-                        ModalState::None => ModalState::None,
+                    // 模态打开:按键路由给对话框,不进 PTY。返回新 modal 后重绘。
+                    modal = {
+                        let mut mqtt = MqttCtx {
+                            cfg: &mut mqtt_cfg,
+                            broker_on: &mut mqtt_broker_on,
+                            client: &mut mqtt_client,
+                            cli_tx: &cli_tx,
+                            tx: &tx,
+                            image_format,
+                        };
+                        handle_modal_input(
+                            std::mem::take(&mut modal),
+                            &bytes,
+                            &mut http,
+                            &mut mqtt,
+                            &screenshot_tx,
+                            image_format,
+                        )
+                        .await
                     };
-                    modal = next;
                     let screen = Arc::new(vt_parser.screen().clone());
                     redraw(
                         &screen,
@@ -693,29 +761,26 @@ pub async fn run_command(
             TerminalEvent::UIEvent(crate::ui::UIEvent::Click { col, row }) => {
                 // 模态打开时忽略点击。
                 if matches!(modal, ModalState::None) {
-                    let area = Rect::new(0, 0, term_size.0, term_size.1);
-                    // 退出按钮(右):发 0x03 + 退出循环,等同 Ctrl+C。
-                    let quit = quit_button_rect(area, "Quit");
-                    if col >= quit.x
-                        && col < quit.x + quit.width
-                        && row >= quit.y
-                        && row < quit.y + quit.height
-                    {
-                        log::info!("Quit button clicked, sending Ctrl+C (0x03)");
-                        terminal.send_bytes(&[0x03]).await?;
-                        break;
-                    }
-                    // HTTP 按钮(左,off 态):打开地址输入框。
-                    if matches!(http, HttpBtnState::Off) {
-                        let btn = http_button_rect(area, "HTTP off");
-                        if col >= btn.x
-                            && col < btn.x + btn.width
-                            && row >= btn.y
-                            && row < btn.y + btn.height
-                        {
-                            modal = ModalState::PortInput {
-                                input: tui_input::Input::new(default_bind.clone()),
-                            };
+                    let mqtt_state = MqttButtonsState {
+                        broker_on: mqtt_broker_on,
+                        client_on: mqtt_client.is_some(),
+                    };
+                    match handle_click(
+                        col,
+                        row,
+                        term_size,
+                        &http,
+                        &default_bind,
+                        mqtt_cfg.as_ref(),
+                        mqtt_state,
+                    ) {
+                        ClickOutcome::Quit => {
+                            log::info!("Quit button clicked, sending Ctrl+C (0x03)");
+                            terminal.send_bytes(&[0x03]).await?;
+                            break;
+                        }
+                        ClickOutcome::Modal(m) => {
+                            modal = *m;
                             let screen = Arc::new(vt_parser.screen().clone());
                             redraw(
                                 &screen,
@@ -726,41 +791,7 @@ pub async fn run_command(
                                 &modal,
                             );
                         }
-                    }
-                    // MQTT 按钮(HTTP 右边):只要配了 [mqtt] 就开控制面板(起停都在面板里,不看 off 态)。
-                    if mqtt_cfg_present {
-                        let hl = button_label("HTTP", &http);
-                        let mlabel = mqtt_footer_label(&MqttButtonsState {
-                            broker_on: mqtt_broker_on,
-                            client_on: mqtt_client.is_some(),
-                        });
-                        let mbtn = mqtt_button_rect(area, &hl, &mlabel);
-                        if col >= mbtn.x
-                            && col < mbtn.x + mbtn.width
-                            && row >= mbtn.y
-                            && row < mbtn.y + mbtn.height
-                        {
-                            let cfg = mqtt_cfg
-                                .as_ref()
-                                .expect("mqtt_cfg_present implies mqtt_cfg");
-                            modal = ModalState::MqttPanel {
-                                tcp: tui_input::Input::new(cfg.builtin_port.to_string()),
-                                ws: tui_input::Input::new(cfg.builtin_ws_port.to_string()),
-                                // 预填生效 URL(见 MqttConfig::for_client):填了 broker 就用配置值,
-                                // 没填 + 内置 broker 才默认本地。
-                                url: tui_input::Input::new(cfg.for_client().broker),
-                                focus: MqttFocus::Tcp,
-                            };
-                            let screen = Arc::new(vt_parser.screen().clone());
-                            redraw(
-                                &screen,
-                                ui_title,
-                                &http,
-                                mqtt_broker_on,
-                                mqtt_client.is_some(),
-                                &modal,
-                            );
-                        }
+                        ClickOutcome::None => {}
                     }
                 }
             }

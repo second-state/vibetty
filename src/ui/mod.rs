@@ -64,6 +64,30 @@ pub(crate) enum MqttFocus {
     ClientToggle,
 }
 
+impl MqttFocus {
+    /// 下一项(Tab / ↓):Tcp → Ws → BrokerStart → Url → ClientToggle → Tcp。
+    pub(crate) fn next(self) -> Self {
+        match self {
+            MqttFocus::Tcp => MqttFocus::Ws,
+            MqttFocus::Ws => MqttFocus::BrokerStart,
+            MqttFocus::BrokerStart => MqttFocus::Url,
+            MqttFocus::Url => MqttFocus::ClientToggle,
+            MqttFocus::ClientToggle => MqttFocus::Tcp,
+        }
+    }
+
+    /// 上一项(↑):反向循环。
+    pub(crate) fn prev(self) -> Self {
+        match self {
+            MqttFocus::Tcp => MqttFocus::ClientToggle,
+            MqttFocus::Ws => MqttFocus::Tcp,
+            MqttFocus::BrokerStart => MqttFocus::Ws,
+            MqttFocus::Url => MqttFocus::BrokerStart,
+            MqttFocus::ClientToggle => MqttFocus::Url,
+        }
+    }
+}
+
 /// 端口输入对话框的状态(打开时键盘事件路由给它,不进 PTY)。
 #[derive(Default)]
 pub(crate) enum ModalState {
