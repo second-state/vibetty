@@ -25,37 +25,73 @@ axum 0.8 WebSocket 终端服务器。把一个 PTY 会话同时当成「浏览�
 
 ## 可选 MQTT 传输(feat/mqtt-transport 分支)
 
-给 ESP32/MCU 这类不方便跑 WS 的设备加第二条传输通道。**配置驱动、可选**:只在 `~/.vibetty/config.toml` 有 `[mqtt]` 段且 `enable != false` 时才连外部 broker;否则完全不碰 MQTT,WebSocket/HTTP 原样保留。两条通道并存,复用同一个 PTY 会话、`cli_tx` / broadcast `tx`、PTY 逻辑,**零改动**。
+给 ESP32/MCU 这类不方便跑 WS 的设备加第二条传输通道。**配置驱动、可选**:只在 `~/.vibetty/config.toml` 有 `[mqtt]` 段时才启用;否则完全不碰 MQTT,WebSocket/HTTP 原样保留。两条通道并存,复用同一个 PTY 会话、`cli_tx` / broadcast `tx`、PTY 逻辑。
 
-**协议设计(用户拍板)**:**不用 msgpack**。原始按键走独立 raw 字节 topic(`pty_in`);其余 4 个控制类消息(输入文本/同步/滚动)合并到一个 `control` topic,payload 是 `ClientMessage` 的 serde JSON(`{"type":...,"data":...}`),靠 `type` 字段区分——ESP32 只解一次 JSON,`type` 命名和 WS 协议一致。出站只发 `PtyOutput`(原始字节)和 `Screen`(整张图);`notification`/`title` 不走 MQTT。
+### 配置(`MqttConfig`,config.rs)
 
-Topic 命名:实例前缀自动构造为 `{user}/{device}/{pid}/vibetty`——`user`=`[mqtt] username`(没配则回退 `device`)、`device`=SHA256(machine-uid) 前 16 hex(设备指纹,跨机器唯一)、`pid`=进程 pid(区分同机多实例,跨重启变)。**不再有 `topic_prefix` 配置项**。
-- 入站(ESP32→vibetty,vibetty 订阅):`{prefix}/pty_in`(原始按键字节→PtyInput)、`{prefix}/control`(JSON `{"type":...}`,覆盖 input_text/sync/scroll_up/scroll_down,见 `mqtt.rs::parse_control`)
-- 出站(vibetty→ESP32):`{prefix}/pty_out`(PTY 原始输出←PtyOutput)、`{prefix}/screen`(整张 PNG/JPEG 字节←Screen,无分块,格式靠 magic bytes 区分)
-- presence(服务发现):实例在 `{prefix}` 发 retained 公告(`{prefix,client_id,ts}`),每 15s 心跳重发;LWT 异常掉线时清空。ESP32 订阅 `{user}/+/+/vibetty` 即可发现该用户所有实例(通配 device 与 pid)。
-
-改动要点:
-- `src/mqtt.rs`:`spawn()` + `run_bridge()`。出站订阅 broadcast 只转 `PtyOutput`/`Screen`(`Screen`→`ws::render_screen_to_image` 整张渲染);入站 `eventloop.poll()`→strip 前缀→`pty_in` 直构造 `PtyInput`、`control` 走 `parse_control()`(serde JSON,只接受 input/sync/scroll_*,其余告警丢弃)→`cli_tx`。`poll()` 出错只 warn+sleep 2s(rumqttc 自动重连)。
-- `src/config.rs`:`MqttConfig{enable=true,host,port=1883,client_id,use_tls:Option<bool>,username,password,qos=1,keep_alive_secs=30}` + `effective_use_tls()`(port==8883 自动开)、`effective_client_id()`(空则 `vibetty-{pid}`);`RunArgs::mqtt_config()` 固定从 `~/.vibetty/config.toml` 读 `[mqtt]` 段(不再支持 `-c`)。
-- `src/main.rs`:解析到且 `enable != false` 才 `mqtt::spawn(...)`。
-- `src/setup.rs`:`vibetty setup` 是 ratatui TUI,编辑 `[mqtt]` 全部字段写回 `~/.vibetty/config.toml`(`save_mqtt` 用 `toml::Table` 保留其它段),预填已有配置。
-- `src/ws.rs`:`render_screen_to_image`、`IMAGE_CHUNK_SIZE` 改 `pub(crate)` 供 mqtt.rs 用。
-
-**`enable` 开关**:`MqttConfig.enable`(serde 默认 `true`)。设 `false` 时保留 `[mqtt]` 配置但不连 broker——临时关 MQTT 不用删整段。`setup` TUI 第一个字段就是它。
-
-**验证状态**:
-- 入站 `pty_in` 已验证(本地 mosquitto + python paho-mqtt)。`control`(JSON 合并)、出站 `pty_out`/`screen`、`enable=false` 待端到端重验。
-- 出站曾卡 headless vt80 panic(无 TTY 时尺寸 0×0),已修:`ws.rs` 拿不到有效尺寸默认 80×24(`f160599`)。
-
-`config.toml` 示例:
 ```toml
 [mqtt]
-enable = true           # 设 false 可临时关闭、保留配置
-host = "127.0.0.1"      # 或 EMQX/Mosquitto 地址
-port = 1883             # 8883 自动开 TLS
-qos = 1
-# client_id / username / password / use_tls 可选
+enable = true           # transport client 的 auto-start 开关
+broker = ""             # mqtt(s)://[user:pass@]host:port;空 + builtin_broker 时默认本地
+builtin_broker = true   # 内置 broker(rumqttd)的 auto-start 开关
+builtin_port = 1883     # 内置 broker TCP 端口
+builtin_ws_port = 9001  # 内置 broker WS 端口
+qos = 1                 # ⚠️ 当前未生效:inbound QoS 在 mqtt.rs 写死(pty_in=0, control=1);此字段只在 setup TUI 可编辑
+keep_alive_secs = 30
 ```
+
+`enable` / `builtin_broker` 现在纯粹是 **auto-start 标志**:boot 时 `run_command` 见 `enable`→起 transport client、`builtin_broker`→起内置 broker。两者还能在 TUI 弹窗里手动起/停。
+
+**URL 解析(`MqttConfig::for_client`,config.rs)**:client 连的 broker URL 一律以 config 里 `broker` 为准;**只有** `broker` 空 **且** `builtin_broker=true` 时才默认填本地 `mqtt://127.0.0.1:{builtin_port}`。即:即便内置 broker 开着,只要 `broker` 填了,client 就连填的地址。boot 自动起、面板(重)spawn、URL 预填/比对都走这一处(唯一真相源)。
+
+### TUI 控制(footer MQTT 按钮)
+
+footer 是 `HTTP | MQTT | Quit`;`[mqtt]` 配置存在即显示 `MQTT` 按钮(不再绑 `builtin_broker`),点击弹 **MqttPanel**(上下两块):
+- **Broker 块**:`TCP:` / `WS :` 端口可编辑(Enter 存回 config)+ `Start broker`(起内置 rumqttd;**只能起不能停**——rumqttd 无 shutdown API,起了之后变只读 `● broker running :{port}`)。
+- **Client 块**:`URL:` broker 地址可编辑(Enter 存回 `[mqtt] broker`)+ `Start client`/`Stop client`。
+- `Tab`/`↑↓` 在 `TCP → WS → BrokerStart → URL → ClientToggle` 循环;Enter 行为随聚焦项变(端口=存盘、BrokerStart=起 broker、URL=存 URL、ClientToggle=切 client);底部提示也随聚焦项动态变化。
+- footer MQTT 按钮文字反映组合状态:`MQTT off` / `MQTT brkr` / `MQTT conn` / `MQTT on`(brkr=broker 在跑 client 没跑,以此类推)。
+
+### footer 渲染与悬停高亮(ui/mod.rs + ws.rs,`9cb9c69`)
+
+footer 按钮的**外观与鼠标交互**(按钮**功能**见上节):
+- footer 是 `Layout::Vertical` 第三段 `Length(1)`——**单行**,不是以前带边框的 3 行 block。`TUI_ROWS_PADDING=6` = header 3 + footer 1 + 终端 pane 上下边框各 1。
+- 按钮**无边框**:`render_button` 用 `Paragraph`+`Style.bg` 整块填色(默认 `DarkGray`,悬停 `LightBlue`+黑字),不是 `Block::borders`(`borders` 会让按钮高 3 行)。
+- 按钮**左右各内缩 1 格**对齐 header **内容区**:header 是带边框 block、内容在边框内 1 格;按钮去边框后若从 `footer.x` 起会落到 header 边框列,视觉错位。故 `http_button_rect`=`footer.x+1`、`quit_button_rect`=`footer.x+footer.width-1-width`;MQTT 按钮从 HTTP 右侧推导、自动跟随。
+- **命中 rect 三处共用**:`render_frame` 渲染、`handle_click` 点击、`footer_button_at` 悬停命中都走 `*_button_rect`/同一 `Layout`——改按钮布局要同步这几处。
+- **悬停高亮**靠 crossterm `?1003h`(any-event,`Moved` 无需按键上报),两层节流避免刷屏:
+  1. producer 侧(`event_loop_thread`):维护 `last_row`(init `terminal::size()`、Resize 同步),`Moved` 只在 `row==last_row`(footer 行)或刚离开 footer 行时转发;终端区滑动直接丢、不进 channel。
+  2. consumer 侧(`run_command` Hover 分支):`footer_button_at` 算当前悬停按钮,只在变化时重绘。
+  - `hover`(`HoveredBtn`,Copy)是普通 `let mut` 变量、当参数传进 `redraw` 闭包。
+
+### client 可中断/重启(oneshot cancel)
+
+`mqtt::spawn` 返回 `MqttHandle{cancel: oneshot::Sender<()>}`;`run_bridge` 主轮询循环 `select!` 同时监听 cancel。`MqttHandle::stop()` 发信号 → break → `client.disconnect()` + `abort()` 心跳/出站子任务(否则它们会一直往死连接上发、刷 warn)。真正的下线清理靠 **LWT**(空 retained):连接一断 broker 自动清 presence。**停 client 期间的消息不会缓存、重启不补发**(broadcast 只投递给当前订阅者)。
+
+### 协议(用户拍板)
+
+**不用 msgpack**。原始按键走独立 raw topic(`pty_in`);控制类消息(输入文本/同步/滚动)合并到一个 `control` topic,payload 是 `ClientMessage` 的 serde JSON(`{"type":...,"data":...}`)。出站只发 `Screen`(整张 PNG/JPEG);`pty_out` 当前**调试期停发**(只 log);`notification`/`title` 不走 MQTT。
+
+Topic 前缀 `{user}/{device}/{pid}/vibetty`:`device`=SHA256(machine-uid) 前 16 hex、`pid`=进程 pid、`user`=`username`(空则 `root`)。
+- 入站(订阅):`{p}/pty_in`(raw→PtyInput)、`{p}/control`(JSON→`parse_control`,只收 input/sync/scroll_*)。
+- 出站:`{p}/screen`(整张图←Screen,无分块,格式靠 magic bytes 区分)。
+- presence:`{p}` 上 retained 公告,15s 心跳;LWT 异常掉线清空。ESP32 订阅 `{user}/+/+/vibetty` 发现该用户所有实例。
+
+### 改动要点
+
+- `mqtt.rs`:`spawn()->MqttHandle` + `run_bridge(cfg, cli_tx, tx, fmt, cancel)`。出站任务订阅 broadcast 只转 `Screen`(→`ws::render_screen_to_image`);入站 `eventloop.poll()`→strip 前缀→`pty_in`/`control`→`cli_tx`。`select!` cancel + 退出时 disconnect + abort 子任务。
+- `config.rs`:`MqttConfig` 见上;`for_client()`(URL 解析,唯一一处)。`RunArgs::mqtt_config()` 固定从 `~/.vibetty/config.toml` 读 `[mqtt]`。
+- `main.rs`:**不再 boot 起 transport**;只 `args.mqtt_config()` 拿 `mqtt_cfg` + `cli_tx` 传给 `run_command`。
+- `ws.rs`:`run_command` 负责 boot 自动起(client if enable、broker if builtin_broker)+ footer 按钮起停 + MqttPanel 弹窗;新增 `cli_tx` 形参(运行期重 spawn client 用)。`parse_and_save` 同步更新内存 `mqtt_cfg`(避免改端口后重启 client 连旧端口)。`render_screen_to_image` 是 `pub(crate)` 供 mqtt.rs 用。
+- `setup.rs`:`vibetty setup` 是 ratatui TUI,编辑 `[mqtt]` 全部字段写回 config;`save_mqtt` 是 `pub(crate)`(ws.rs 写 config 复用),用 `toml::Table` 保留其它段。
+- broker.rs:`spawn_builtin(&cfg)` 在独立 OS 线程跑 rumqttd(TCP + WS,匿名,1MB payload)。**无 shutdown**。
+
+### 验证状态
+
+- 编译 / clippy `-D warnings` / `cargo fmt --check` / 单测全绿。
+- 入站 `pty_in` 早先端到端验过(本地 mosquitto + paho-mqtt)。`control`、出站 `screen`、client stop/restart(oneshot + LWT 清 presence)、URL 编辑存盘、面板起停 broker **待端到端重验**。
+- headless 出站:80×24 默认尺寸已兜底(不 panic),但要收到 `screen` 仍需 PTY 有输出触发广播。
+- 出站曾卡 headless vt80 panic(无 TTY 尺寸 0×0),已修:`ws.rs` 拿不到有效尺寸默认 80×24(`f160599`)。
 
 ---
 
