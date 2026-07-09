@@ -12,8 +12,9 @@ use crate::config::MqttConfig;
 use crate::mqtt;
 use crate::protocol::{ClientMessage, ServerMessage};
 use crate::ui::{
-    HttpBtnState, ModalState, MqttButtonsState, MqttFocus, button_label, http_button_rect,
-    mqtt_button_rect, mqtt_footer_label, quit_button_rect,
+    HoveredBtn, HttpBtnState, ModalState, MqttButtonsState, MqttFocus, button_label,
+    footer_button_at, hit_test, http_button_rect, mqtt_button_rect, mqtt_footer_label,
+    quit_button_rect,
 };
 
 /// Image broadcast frame interval (ms)
@@ -33,9 +34,9 @@ pub(crate) const SCREEN_PADDING: u32 = 16;
 /// Columns reserved for TUI decorations: the terminal pane's left + right
 /// borders (1 column each).
 const TUI_COLS_PADDING: u16 = 2;
-/// Rows reserved for TUI decorations: header pane (3) + footer pane (3) +
+/// Rows reserved for TUI decorations: header pane (3) + footer pane (1,单行按钮) +
 /// the terminal pane's top + bottom borders (1 row each).
-const TUI_ROWS_PADDING: u16 = 8;
+const TUI_ROWS_PADDING: u16 = 6;
 
 type ServerTx = broadcast::Sender<ServerMessage>;
 
@@ -207,11 +208,6 @@ fn parse_input_request(
 /// MQTT broker URL 输入框允许的字符(字母/数字 + URL 常见符号)。
 fn url_char_allowed(c: u8) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, b':' | b'/' | b'.' | b'_' | b'-' | b'~' | b'@')
-}
-
-/// 点击坐标是否落在 `r` 内。
-fn hit_test(col: u16, row: u16, r: Rect) -> bool {
-    col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
 }
 
 /// boot 时的 MQTT auto-start:`enable` 起 client、`builtin_broker` 起内置 broker。
@@ -607,20 +603,25 @@ pub async fn run_command(
     // footer MQTT 按钮:只要配了 [mqtt] 就显示(不再绑 builtin_broker)。
     let mqtt_cfg_present = mqtt_cfg.is_some();
 
-    // 统一重绘:画 screen/title + 按钮状态 + 对话框。`tui` 仅由此闭包借用。
+    // footer 按钮悬停态。HoveredBtn 是 Copy,直接当参数传进 redraw,比捕获个 Cell 直白。
+    let mut hover = HoveredBtn::None;
+
+    // 统一重绘:画 screen/title + 按钮状态 + 对话框 + 悬停高亮。`tui` 仅由此闭包借用。
     let mut redraw = |screen: &Arc<vt100::Screen>,
                       title: &str,
                       http: &HttpBtnState,
                       mqtt_broker_on: bool,
                       mqtt_client_on: bool,
-                      modal: &ModalState| {
+                      modal: &ModalState,
+                      hover: HoveredBtn| {
         let mqtt = MqttButtonsState {
             broker_on: mqtt_broker_on,
             client_on: mqtt_client_on,
         };
         let mqtt_opt = mqtt_cfg_present.then_some(&mqtt);
-        let _ = tui
-            .draw(|f| crate::ui::render_frame(f, screen, title, "Vibetty", http, mqtt_opt, modal));
+        let _ = tui.draw(|f| {
+            crate::ui::render_frame(f, screen, title, "Vibetty", http, mqtt_opt, modal, hover)
+        });
     };
 
     loop {
@@ -703,6 +704,7 @@ pub async fn run_command(
                     mqtt_broker_on,
                     mqtt_client.is_some(),
                     &modal,
+                    hover,
                 );
                 if tx
                     .send(ServerMessage::PtyOutput(output.into_bytes()))
@@ -755,6 +757,7 @@ pub async fn run_command(
                         mqtt_broker_on,
                         mqtt_client.is_some(),
                         &modal,
+                        hover,
                     );
                 }
             }
@@ -780,6 +783,9 @@ pub async fn run_command(
                             break;
                         }
                         ClickOutcome::Modal(m) => {
+                            // 打开模态时清悬停态:模态期间 Hover 分支被挡不更新,
+                            // 清掉可避免关闭模态后残留上次的高亮。
+                            hover = HoveredBtn::None;
                             modal = *m;
                             let screen = Arc::new(vt_parser.screen().clone());
                             redraw(
@@ -789,9 +795,41 @@ pub async fn run_command(
                                 mqtt_broker_on,
                                 mqtt_client.is_some(),
                                 &modal,
+                                hover,
                             );
                         }
                         ClickOutcome::None => {}
+                    }
+                }
+            }
+            TerminalEvent::UIEvent(crate::ui::UIEvent::Hover { col, row }) => {
+                // 模态打开时忽略悬停(footer 被遮)。且只在悬停按钮「变化」时才重绘——
+                // ?1003h 会对光标划过的每个单元格都报一次 Moved,在终端区/同一按钮内移动时
+                // 悬停态不变,这里直接跳过,避免刷屏。
+                if matches!(modal, ModalState::None) {
+                    let mqtt_state = MqttButtonsState {
+                        broker_on: mqtt_broker_on,
+                        client_on: mqtt_client.is_some(),
+                    };
+                    let now = footer_button_at(
+                        col,
+                        row,
+                        Rect::new(0, 0, term_size.0, term_size.1),
+                        &http,
+                        mqtt_cfg_present.then_some(&mqtt_state),
+                    );
+                    if now != hover {
+                        hover = now;
+                        let screen = Arc::new(vt_parser.screen().clone());
+                        redraw(
+                            &screen,
+                            ui_title,
+                            &http,
+                            mqtt_broker_on,
+                            mqtt_client.is_some(),
+                            &modal,
+                            hover,
+                        );
                     }
                 }
             }
@@ -811,6 +849,7 @@ pub async fn run_command(
                     mqtt_broker_on,
                     mqtt_client.is_some(),
                     &modal,
+                    hover,
                 );
 
                 send_screen(&tx, screen);
@@ -831,6 +870,7 @@ pub async fn run_command(
                     mqtt_broker_on,
                     mqtt_client.is_some(),
                     &modal,
+                    hover,
                 );
 
                 send_screen(&tx, screen);
@@ -850,6 +890,7 @@ pub async fn run_command(
                     mqtt_broker_on,
                     mqtt_client.is_some(),
                     &modal,
+                    hover,
                 );
                 send_screen(&tx, screen);
             }
@@ -879,6 +920,7 @@ pub async fn run_command(
                     mqtt_broker_on,
                     mqtt_client.is_some(),
                     &modal,
+                    hover,
                 );
                 send_screen(&tx, screen);
             }
