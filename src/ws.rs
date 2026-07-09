@@ -134,7 +134,7 @@ fn parse_and_save(
     Ok((t, w))
 }
 
-/// 滚动行数换算:`rows == 0` 表示滚一整页(= `page_rows`),否则滚 `rows` 行。
+/// 滚动行数换算:`rows == 0` 表示翻一页(= `page_rows`,半屏),否则滚 `rows` 行。
 fn scroll_delta(rows: u16, page_rows: u16) -> usize {
     if rows == 0 {
         page_rows as usize
@@ -143,10 +143,10 @@ fn scroll_delta(rows: u16, page_rows: u16) -> usize {
     }
 }
 
-/// 由客户端 sync 发的像素高度算「一页」的行数:能塞下的行数 − 1(滚动时留一行可见)。
+/// 由客户端 sync 发的像素高度算「翻页」的行数:半屏(= 能塞下的行数 / 2)。
 fn page_rows_from_height(height: u16) -> u16 {
     let fits = (height as u32).saturating_sub(2 * SCREEN_PADDING) / SCREEN_CHAR_HEIGHT;
-    fits.saturating_sub(1).max(1) as u16
+    (fits / 2).max(1) as u16
 }
 
 /// 主事件循环统一的事件来源(PTY 输出 / 客户端消息 / TUI UI 事件 / 截图请求)。
@@ -586,9 +586,9 @@ pub async fn run_command(
     let frame_interval = std::time::Duration::from_millis(IMAGE_FRAME_INTERVAL_MS);
     let mut last_frame_time = std::time::Instant::now() - frame_interval;
 
-    // 「一页」的行数:由最近一次 sync 的像素高度推算(能塞下的行数 − 1)。滚动 rows=0 时用它。
-    // 还没 sync 过就用初始终端行数兜底。
-    let mut page_rows: u16 = vt_rows;
+    // 翻页的行数:由最近一次 sync 的像素高度推算(半屏 = 能塞下 / 2)。滚动 rows=0 时用它。
+    // 还没 sync 过就用初始终端行数 / 2 兜底。
+    let mut page_rows: u16 = vt_rows / 2;
 
     // footer HTTP 按钮状态 + 对话框状态;启动时都 off。
     let mut http = HttpBtnState::Off;
@@ -829,11 +829,12 @@ pub async fn run_command(
             TerminalEvent::UIEvent(crate::ui::UIEvent::ScrollUp { rows })
             | TerminalEvent::Input(ClientMessage::ScrollUp { rows }) => {
                 let delta = scroll_delta(rows, page_rows);
-                log::info!("ScrollUp rows={rows} -> delta={delta}");
-                let s = vt_parser.screen().scrollback();
+                let before = vt_parser.screen().scrollback();
                 vt_parser
                     .screen_mut()
-                    .set_scrollback(s.saturating_add(delta));
+                    .set_scrollback(before.saturating_add(delta));
+                let after = vt_parser.screen().scrollback();
+                log::info!("ScrollUp rows={rows} delta={delta} offset {before} -> {after}");
                 let screen = Arc::new(vt_parser.screen().clone());
                 redraw(
                     &screen,
@@ -850,11 +851,12 @@ pub async fn run_command(
             TerminalEvent::UIEvent(crate::ui::UIEvent::ScrollDown { rows })
             | TerminalEvent::Input(ClientMessage::ScrollDown { rows }) => {
                 let delta = scroll_delta(rows, page_rows);
-                log::info!("ScrollDown rows={rows} -> delta={delta}");
-                let s = vt_parser.screen().scrollback();
+                let before = vt_parser.screen().scrollback();
                 vt_parser
                     .screen_mut()
-                    .set_scrollback(s.saturating_sub(delta));
+                    .set_scrollback(before.saturating_sub(delta));
+                let after = vt_parser.screen().scrollback();
+                log::info!("ScrollDown rows={rows} delta={delta} offset {before} -> {after}");
                 let screen = Arc::new(vt_parser.screen().clone());
                 redraw(
                     &screen,
@@ -891,7 +893,7 @@ pub async fn run_command(
                 // sync 按客户端像素 (width,height) 换算 cols×rows:各减去两侧 padding 后除以
                 // 字符格尺寸。整张图(= cols×rows 网格 + 四周 padding)就与 sync 的 (width,height)
                 // 对齐——之前只换算 cols、rows 保留旧值,图片高度和 sync 对不上。(字符网格 8×18
-                // 精度内,会有 <1 格的 floor 余量。)height 另算 page_rows(= 能塞下 − 1)供 scroll。
+                // 精度内,会有 <1 格的 floor 余量。)height 另算 page_rows(= 半屏 = 能塞下 / 2)供 scroll。
                 page_rows = page_rows_from_height(height);
                 let avail_w = (width as u32).saturating_sub(2 * SCREEN_PADDING);
                 let avail_h = (height as u32).saturating_sub(2 * SCREEN_PADDING);
