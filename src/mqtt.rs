@@ -38,13 +38,26 @@ use bytes::Bytes;
 use rumqttc::{AsyncClient, Event, LastWill, MqttOptions, Packet, QoS, Transport};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU16, Ordering};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::config::MqttConfig;
 use crate::protocol::{ClientMessage, ImageFormat, ServerMessage};
 use crate::ws::render_screen_to_image;
 
-/// 启动 MQTT 桥接(后台任务)。main.rs 在解析到 `MqttConfig` 后调用。
+/// 传输 client 的停止句柄:持有 oneshot 发送端。`stop()` 发信号让 `run_bridge`
+/// 优雅退出并 abort 心跳 / 出站子任务;连接断开后 broker 触发 LWT 清空 presence(实例下线)。
+pub struct MqttHandle {
+    cancel: oneshot::Sender<()>,
+}
+
+impl MqttHandle {
+    /// 请求 client 停止(消耗 self)。重入安全:run_bridge 收到信号后自行 break + abort。
+    pub fn stop(self) {
+        let _ = self.cancel.send(());
+    }
+}
+
+/// 启动 MQTT 桥接(后台任务),返回停止句柄。调用方按需 `.stop()`,或直接丢弃(运行到进程结束)。
 ///
 /// - `cli_tx`: 客户端消息进入 PTY 会话的入口(与 `AppState.cli_tx` 同一个)
 /// - `tx`:     服务端广播源(与 `AppState.tx` 同一个),内部 `.subscribe()` 取副本
@@ -53,8 +66,10 @@ pub fn spawn(
     cli_tx: mpsc::Sender<ClientMessage>,
     tx: broadcast::Sender<ServerMessage>,
     image_format: ImageFormat,
-) {
-    tokio::spawn(run_bridge(cfg, cli_tx, tx, image_format));
+) -> MqttHandle {
+    let (cancel_tx, cancel_rx) = oneshot::channel();
+    tokio::spawn(run_bridge(cfg, cli_tx, tx, image_format, cancel_rx));
+    MqttHandle { cancel: cancel_tx }
 }
 
 fn qos_from_u8(q: u8) -> QoS {
@@ -215,6 +230,7 @@ async fn run_bridge(
     cli_tx: mpsc::Sender<ClientMessage>,
     tx: broadcast::Sender<ServerMessage>,
     image_format: ImageFormat,
+    mut cancel: oneshot::Receiver<()>,
 ) {
     // broker 是完整 URL:mqtt(s)://[user:pass@]host[:port]。scheme 决定 TLS,
     // user/pass 在 URL 里;端口没写则按协议默认(mqtt 1883 / mqtts 8883)。
@@ -278,7 +294,7 @@ async fn run_bridge(
     let hb_topic = prefix.clone();
     let hb_prefix = prefix.clone();
     let hb_client_id = client_id.clone();
-    tokio::spawn(async move {
+    let hb_handle = tokio::spawn(async move {
         let mut interval =
             tokio::time::interval(std::time::Duration::from_secs(PRESENCE_INTERVAL_SECS));
         interval.tick().await; // 跳过首次(上线公告刚发过)
@@ -308,7 +324,7 @@ async fn run_bridge(
     let mut rx = tx.subscribe();
     let pub_client = client.clone();
     let out_sync_height = sync_height.clone();
-    tokio::spawn(async move {
+    let out_handle = tokio::spawn(async move {
         loop {
             match rx.recv().await {
                 Ok(ServerMessage::PtyOutput(bytes)) => {
@@ -353,37 +369,52 @@ async fn run_bridge(
         }
     });
 
-    // 入站:poll eventloop,按 topic 后缀构造 ClientMessage -> cli_tx
+    // 入站:poll eventloop,按 topic 后缀构造 ClientMessage -> cli_tx。
+    // select! 同时监听取消信号:`MqttHandle::stop()` 发信号即 break,随后 disconnect + abort 子任务。
     let pfx = format!("{prefix}/");
     loop {
-        match eventloop.poll().await {
-            Ok(Event::Incoming(Packet::Publish(p))) => {
-                let suffix = p.topic.strip_prefix(&pfx).unwrap_or("");
-                let payload = p.payload.to_vec();
-                let msg = match suffix {
-                    "pty_in" => Some(ClientMessage::PtyInput(payload)),
-                    "control" => parse_control(&payload),
-                    _ => None,
-                };
-                if let Some(cm) = msg {
-                    // 记下 sync 带的客户端高度,供出站渲染补齐图片高度用。
-                    if let ClientMessage::Sync { height, .. } = cm {
-                        sync_height.store(height, Ordering::Relaxed);
-                    }
-                    if let Err(e) = cli_tx.send(cm).await {
-                        log::error!("[mqtt] cli_tx send failed: {e}");
-                        break;
+        tokio::select! {
+            _ = &mut cancel => {
+                log::info!("[mqtt] cancel signal received, stopping client");
+                break;
+            }
+            ev = eventloop.poll() => match ev {
+                Ok(Event::Incoming(Packet::Publish(p))) => {
+                    let suffix = p.topic.strip_prefix(&pfx).unwrap_or("");
+                    let payload = p.payload.to_vec();
+                    let msg = match suffix {
+                        "pty_in" => Some(ClientMessage::PtyInput(payload)),
+                        "control" => parse_control(&payload),
+                        _ => None,
+                    };
+                    if let Some(cm) = msg {
+                        // 记下 sync 带的客户端高度,供出站渲染补齐图片高度用。
+                        if let ClientMessage::Sync { height, .. } = cm {
+                            sync_height.store(height, Ordering::Relaxed);
+                        }
+                        if let Err(e) = cli_tx.send(cm).await {
+                            log::error!("[mqtt] cli_tx send failed: {e}");
+                            break;
+                        }
                     }
                 }
-            }
-            Ok(_) => {}
-            Err(e) => {
-                // rumqttc EventLoop 自带自动重连;这里只记录并退避,WS/PTY 不受影响。
-                log::warn!("[mqtt] eventloop error (auto-reconnecting): {e}");
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            }
+                Ok(_) => {}
+                Err(e) => {
+                    // rumqttc EventLoop 自带自动重连;这里只记录并退避,WS/PTY 不受影响。
+                    log::warn!("[mqtt] eventloop error (auto-reconnecting): {e}");
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+            },
         }
     }
+
+    // 收到取消:best-effort disconnect(可能不 flush——已不再 poll eventloop),再 abort 心跳/出站子任务,
+    // 防止它们继续往已断开的连接上发(否则会一直每 15s 刷 heartbeat failed)。
+    // 连接断开后 broker 触发 LWT(空 retained)清空 presence —— 正是主动停 client 想要的下线效果。
+    let _ = client.disconnect().await;
+    hb_handle.abort();
+    out_handle.abort();
+    log::info!("[mqtt] client stopped");
 }
 
 #[cfg(test)]

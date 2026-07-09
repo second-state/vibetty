@@ -42,7 +42,10 @@ fn load_mqtt(override_path: Option<&std::path::Path>) -> Option<MqttConfig> {
 }
 
 /// 把 `[mqtt]` 段写回 config.toml(默认 `~/.vibetty/config.toml`),保留文件中已有的其它段。
-fn save_mqtt(mqtt: &MqttConfig, override_path: Option<&std::path::Path>) -> anyhow::Result<()> {
+pub(crate) fn save_mqtt(
+    mqtt: &MqttConfig,
+    override_path: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
     let path =
         config_path(override_path).ok_or_else(|| anyhow::anyhow!("Cannot find home directory"))?;
     if let Some(parent) = path.parent() {

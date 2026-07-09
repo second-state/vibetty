@@ -12,9 +12,6 @@ pub struct MqttConfig {
     /// `port` 字段只在内置 broker 模式下单独用。
     #[serde(default)]
     pub broker: String,
-    /// 内置 broker 的 TCP 监听端口(默认 1883)。URL 没写端口时按协议默认(mqtt 1883 / mqtts 8883)。
-    #[serde(default = "default_mqtt_port")]
-    pub builtin_port: u16,
     /// QoS: 0 / 1 / 2,默认 1(AtLeastOnce,适合弱网)
     #[serde(default = "default_mqtt_qos")]
     pub qos: u8,
@@ -30,6 +27,25 @@ pub struct MqttConfig {
     /// 内置 broker 的 WebSocket 端口(默认 9001),仅 builtin_broker=true 时生效。
     #[serde(default = "default_ws_port")]
     pub builtin_ws_port: u16,
+    /// 内置 broker 的 TCP 监听端口(默认 1883)。URL 没写端口时按协议默认(mqtt 1883 / mqtts 8883)。
+    #[serde(default = "default_mqtt_port")]
+    pub builtin_port: u16,
+}
+
+impl MqttConfig {
+    /// 返回一份用于**启动传输 client**(`mqtt::spawn`)的配置副本。
+    ///
+    /// broker URL 一律以 config 里的 `broker` 为准;**只有** `builtin_broker=true` 且 `broker` 为空时,
+    /// 才默认填上本地内置 broker 地址(`mqtt://127.0.0.1:{builtin_port}`)。也就是说:即便内置 broker
+    /// 开着,只要 config 里填了 `broker`,client 就连那个地址(不会强制改本地)。
+    /// boot 自动起 + 运行期(重)spawn + 面板预填/比对 都复用这个,保证 URL 解析逻辑只有一处。
+    pub fn for_client(&self) -> MqttConfig {
+        let mut c = self.clone();
+        if c.builtin_broker && c.broker.trim().is_empty() {
+            c.broker = format!("mqtt://127.0.0.1:{}", c.builtin_port);
+        }
+        c
+    }
 }
 
 fn default_true() -> bool {

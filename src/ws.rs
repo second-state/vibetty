@@ -7,8 +7,14 @@ use tokio::sync::{broadcast, mpsc};
 use tui_input::InputRequest;
 use vt100::Callbacks;
 
+use crate::broker;
+use crate::config::MqttConfig;
+use crate::mqtt;
 use crate::protocol::{ClientMessage, ServerMessage};
-use crate::ui::{HttpBtnState, ModalState, http_button_rect, quit_button_rect};
+use crate::ui::{
+    HttpBtnState, ModalState, MqttButtonsState, MqttFocus, button_label, http_button_rect,
+    mqtt_button_rect, mqtt_footer_label, quit_button_rect,
+};
 
 /// Image broadcast frame interval (ms)
 const IMAGE_FRAME_INTERVAL_MS: u64 = 300;
@@ -95,6 +101,38 @@ async fn start_http(bind: &str, state: AppState) -> anyhow::Result<String> {
     Ok(bound)
 }
 
+/// 解析两个端口(须 > 0);任一与 config 不同则把整段 `[mqtt]` 写回 `~/.vibetty/config.toml`,
+/// 并同步更新内存里的 `mqtt_cfg`(后续 client (重)spawn 的 `for_client()` 用得到——
+/// 避免「面板改端口后重启 client 仍连旧端口」的不一致)。
+fn parse_and_save(
+    tcp: &tui_input::Input,
+    ws: &tui_input::Input,
+    mqtt_cfg: &mut Option<MqttConfig>,
+) -> Result<(u16, u16), String> {
+    let t = tcp
+        .value()
+        .trim()
+        .parse::<u16>()
+        .map_err(|_| "invalid TCP port".to_string())?;
+    let w = ws
+        .value()
+        .trim()
+        .parse::<u16>()
+        .map_err(|_| "invalid WS port".to_string())?;
+    if t == 0 || w == 0 {
+        return Err("port must be > 0".to_string());
+    }
+    if let Some(cfg) = mqtt_cfg
+        && (cfg.builtin_port != t || cfg.builtin_ws_port != w)
+    {
+        cfg.builtin_port = t;
+        cfg.builtin_ws_port = w;
+        crate::setup::save_mqtt(cfg, None).map_err(|e| format!("save config failed: {e}"))?;
+        log::info!("[mqtt] saved builtin_port={t}, builtin_ws_port={w}");
+    }
+    Ok((t, w))
+}
+
 /// 滚动行数换算:`rows == 0` 表示滚一整页(= `page_rows`),否则滚 `rows` 行。
 fn scroll_delta(rows: u16, page_rows: u16) -> usize {
     if rows == 0 {
@@ -116,8 +154,10 @@ pub async fn run_command(
     mut rx: ClientRx,
     ui_rx: &mut mpsc::Receiver<crate::ui::UIEvent>,
     tx: ServerTx,
+    cli_tx: mpsc::Sender<ClientMessage>,
     screenshot_tx: ScreenshotTx,
     default_bind: String,
+    mut mqtt_cfg: Option<MqttConfig>,
     mut screenshot_rx: mpsc::Receiver<tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>>,
     tui: &mut crate::ui::TuiTerminal,
     ui_title: &mut String,
@@ -172,17 +212,54 @@ pub async fn run_command(
     // 还没 sync 过就用初始终端行数兜底。
     let mut page_rows: u16 = vt_rows;
 
-    // footer HTTP 按钮状态 + 端口输入对话框状态;启动时 server 未开(off)。
+    // footer HTTP 按钮状态 + 对话框状态;启动时都 off。
     let mut http = HttpBtnState::Off;
     let mut modal = ModalState::None;
     // 终端整体尺寸(单元格),用于点击命中检测;随 Resize 更新。
     let mut term_size: (u16, u16) = (cols, rows);
 
+    // MQTT:`enable` / `builtin_broker` 当 auto-start 标志。broker 只起不停(rumqttd 无 shutdown);
+    // client 可停/重起(oneshot cancel,见 mqtt::MqttHandle)。
+    let mut mqtt_broker_on = false;
+    let mut mqtt_client: Option<mqtt::MqttHandle> = None;
+    if let Some(cfg) = &mqtt_cfg {
+        if cfg.builtin_broker {
+            match broker::spawn_builtin(cfg) {
+                Ok(()) => {
+                    mqtt_broker_on = true;
+                    log::info!("[mqtt] broker auto-started on :{}", cfg.builtin_port);
+                }
+                Err(e) => log::warn!("[mqtt] broker auto-start failed: {e}"),
+            }
+        }
+        if cfg.enable {
+            mqtt_client = Some(mqtt::spawn(
+                cfg.for_client(),
+                cli_tx.clone(),
+                tx.clone(),
+                image_format,
+            ));
+            log::info!("[mqtt] client auto-started");
+        }
+    }
+    // footer MQTT 按钮:只要配了 [mqtt] 就显示(不再绑 builtin_broker)。
+    let mqtt_cfg_present = mqtt_cfg.is_some();
+
     // 统一重绘:画 screen/title + 按钮状态 + 对话框。`tui` 仅由此闭包借用。
-    let mut redraw =
-        |screen: &Arc<vt100::Screen>, title: &str, http: &HttpBtnState, modal: &ModalState| {
-            let _ = tui.draw(|f| crate::ui::render_frame(f, screen, title, "Vibetty", http, modal));
+    let mut redraw = |screen: &Arc<vt100::Screen>,
+                      title: &str,
+                      http: &HttpBtnState,
+                      mqtt_broker_on: bool,
+                      mqtt_client_on: bool,
+                      modal: &ModalState| {
+        let mqtt = MqttButtonsState {
+            broker_on: mqtt_broker_on,
+            client_on: mqtt_client_on,
         };
+        let mqtt_opt = mqtt_cfg_present.then_some(&mqtt);
+        let _ = tui
+            .draw(|f| crate::ui::render_frame(f, screen, title, "Vibetty", http, mqtt_opt, modal));
+    };
 
     loop {
         let terminal_read_event = terminal.read_pty_output();
@@ -270,7 +347,14 @@ pub async fn run_command(
 
                 // Render directly to TUI
                 let screen = Arc::new(vt_parser.screen().clone());
-                redraw(&screen, ui_title, &http, &modal);
+                redraw(
+                    &screen,
+                    ui_title,
+                    &http,
+                    mqtt_broker_on,
+                    mqtt_client.is_some(),
+                    &modal,
+                );
                 if tx
                     .send(ServerMessage::PtyOutput(output.into_bytes()))
                     .is_err()
@@ -351,12 +435,259 @@ pub async fn run_command(
                                 ModalState::PortInput { input }
                             }
                         }
+                        ModalState::MqttPanel {
+                            mut tcp,
+                            mut ws,
+                            mut url,
+                            mut focus,
+                        } => {
+                            // 导航:Tab / ↓ 下一项,↑ 上一项(Tcp → Ws → BrokerStart → Url → ClientToggle 循环)。
+                            if bytes == b"\t" || bytes == b"\x1b[B" {
+                                focus = match focus {
+                                    MqttFocus::Tcp => MqttFocus::Ws,
+                                    MqttFocus::Ws => MqttFocus::BrokerStart,
+                                    MqttFocus::BrokerStart => MqttFocus::Url,
+                                    MqttFocus::Url => MqttFocus::ClientToggle,
+                                    MqttFocus::ClientToggle => MqttFocus::Tcp,
+                                };
+                                ModalState::MqttPanel {
+                                    tcp,
+                                    ws,
+                                    url,
+                                    focus,
+                                }
+                            } else if bytes == b"\x1b[A" {
+                                focus = match focus {
+                                    MqttFocus::Tcp => MqttFocus::ClientToggle,
+                                    MqttFocus::Ws => MqttFocus::Tcp,
+                                    MqttFocus::BrokerStart => MqttFocus::Ws,
+                                    MqttFocus::Url => MqttFocus::BrokerStart,
+                                    MqttFocus::ClientToggle => MqttFocus::Url,
+                                };
+                                ModalState::MqttPanel {
+                                    tcp,
+                                    ws,
+                                    url,
+                                    focus,
+                                }
+                            } else if bytes == b"\x1b" {
+                                ModalState::None // Esc 取消
+                            } else if bytes == b"\r" || bytes == b"\n" {
+                                // Enter 行为随聚焦项不同:
+                                //  Tcp/Ws       -> 解析存盘(有改动则写 config)+ 跳到 BrokerStart。
+                                //  BrokerStart  -> 起 broker(已起则无动作,rumqttd 停不掉)。
+                                //  Url          -> broker URL 改动了则写回 [mqtt] broker + 跳到 ClientToggle。
+                                //  ClientToggle -> 切换 client:已起则 stop(oneshot),否则 spawn。
+                                match focus {
+                                    MqttFocus::Tcp | MqttFocus::Ws => {
+                                        match parse_and_save(&tcp, &ws, &mut mqtt_cfg) {
+                                            Ok(_) => {
+                                                focus = MqttFocus::BrokerStart;
+                                                ModalState::MqttPanel {
+                                                    tcp,
+                                                    ws,
+                                                    url,
+                                                    focus,
+                                                }
+                                            }
+                                            Err(e) => ModalState::Error(e),
+                                        }
+                                    }
+                                    MqttFocus::BrokerStart => {
+                                        if mqtt_broker_on {
+                                            // 已起,rumqttd 停不掉 -> 无动作,留在面板。
+                                            ModalState::MqttPanel {
+                                                tcp,
+                                                ws,
+                                                url,
+                                                focus,
+                                            }
+                                        } else {
+                                            match parse_and_save(&tcp, &ws, &mut mqtt_cfg) {
+                                                Ok((t, w)) => match tokio::net::TcpListener::bind((
+                                                    "0.0.0.0", t,
+                                                ))
+                                                .await
+                                                {
+                                                    Ok(_) => {
+                                                        let mut cfg = mqtt_cfg
+                                                            .as_ref()
+                                                            .expect(
+                                                                "mqtt_cfg_present implies mqtt_cfg",
+                                                            )
+                                                            .clone();
+                                                        cfg.builtin_port = t;
+                                                        cfg.builtin_ws_port = w;
+                                                        match broker::spawn_builtin(&cfg) {
+                                                            Ok(()) => {
+                                                                log::info!(
+                                                                    "[mqtt] broker started on :{t}"
+                                                                );
+                                                                mqtt_broker_on = true;
+                                                                ModalState::None
+                                                            }
+                                                            Err(e) => ModalState::Error(format!(
+                                                                "broker start failed: {e}"
+                                                            )),
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        log::warn!(
+                                                            "[mqtt] port {t} unavailable: {e}"
+                                                        );
+                                                        ModalState::Error(format!(
+                                                            "port {t} unavailable: {e}"
+                                                        ))
+                                                    }
+                                                },
+                                                Err(e) => ModalState::Error(e),
+                                            }
+                                        }
+                                    }
+                                    MqttFocus::Url => {
+                                        // 只在用户改动了(与「当前生效 URL」不同)时写回 config,
+                                        // 避免把默认本地地址回写污染 cfg.broker。
+                                        // 生效 URL = for_client().broker(config 填了用配置值,空 + 内置才默认本地)。
+                                        let new_url = url.value().trim().to_string();
+                                        let effective = mqtt_cfg
+                                            .as_ref()
+                                            .map(|c| c.for_client().broker)
+                                            .unwrap_or_default();
+                                        if new_url == effective {
+                                            focus = MqttFocus::ClientToggle;
+                                            ModalState::MqttPanel {
+                                                tcp,
+                                                ws,
+                                                url,
+                                                focus,
+                                            }
+                                        } else if let Some(cfg) = mqtt_cfg.as_mut() {
+                                            cfg.broker = new_url.clone();
+                                            match crate::setup::save_mqtt(cfg, None) {
+                                                Ok(()) => {
+                                                    log::info!("[mqtt] saved broker url={new_url}");
+                                                    focus = MqttFocus::ClientToggle;
+                                                    ModalState::MqttPanel {
+                                                        tcp,
+                                                        ws,
+                                                        url,
+                                                        focus,
+                                                    }
+                                                }
+                                                Err(e) => ModalState::Error(format!(
+                                                    "save url failed: {e}"
+                                                )),
+                                            }
+                                        } else {
+                                            focus = MqttFocus::ClientToggle;
+                                            ModalState::MqttPanel {
+                                                tcp,
+                                                ws,
+                                                url,
+                                                focus,
+                                            }
+                                        }
+                                    }
+                                    MqttFocus::ClientToggle => {
+                                        if let Some(h) = mqtt_client.take() {
+                                            h.stop();
+                                            log::info!("[mqtt] client stopped via panel");
+                                        } else {
+                                            let cfg = mqtt_cfg
+                                                .as_ref()
+                                                .expect("mqtt_cfg_present implies mqtt_cfg")
+                                                .for_client();
+                                            mqtt_client = Some(mqtt::spawn(
+                                                cfg,
+                                                cli_tx.clone(),
+                                                tx.clone(),
+                                                image_format,
+                                            ));
+                                            log::info!("[mqtt] client started via panel");
+                                        }
+                                        ModalState::None
+                                    }
+                                }
+                            } else {
+                                // 编辑聚焦的输入字段(BrokerStart/ClientToggle 聚焦时不编辑)。
+                                // 端口只收数字;URL 收 URL 合法字符。方向/Home/End/Backspace 通用。
+                                if focus == MqttFocus::Tcp
+                                    || focus == MqttFocus::Ws
+                                    || focus == MqttFocus::Url
+                                {
+                                    let req = if bytes == b"\x1b[D" {
+                                        Some(InputRequest::GoToPrevChar)
+                                    } else if bytes == b"\x1b[C" {
+                                        Some(InputRequest::GoToNextChar)
+                                    } else if bytes == b"\x1b[H" {
+                                        Some(InputRequest::GoToStart)
+                                    } else if bytes == b"\x1b[F" {
+                                        Some(InputRequest::GoToEnd)
+                                    } else if bytes == [0x08] || bytes == [0x7f] {
+                                        Some(InputRequest::DeletePrevChar)
+                                    } else if bytes.len() == 1 {
+                                        let c = bytes[0];
+                                        let is_url = focus == MqttFocus::Url;
+                                        let allowed = if is_url {
+                                            c.is_ascii_alphanumeric()
+                                                || matches!(
+                                                    c,
+                                                    b':' | b'/' | b'.' | b'_' | b'-' | b'~' | b'@'
+                                                )
+                                        } else {
+                                            c.is_ascii_digit()
+                                        };
+                                        let cur_len = match focus {
+                                            MqttFocus::Ws => ws.value().chars().count(),
+                                            MqttFocus::Tcp => tcp.value().chars().count(),
+                                            MqttFocus::Url => url.value().chars().count(),
+                                            _ => 0,
+                                        };
+                                        let cap = if is_url { 60 } else { 5 };
+                                        if allowed && cur_len < cap {
+                                            Some(InputRequest::InsertChar(c as char))
+                                        } else {
+                                            None
+                                        }
+                                    } else {
+                                        None
+                                    };
+                                    if let Some(req) = req {
+                                        match focus {
+                                            MqttFocus::Ws => {
+                                                ws.handle(req);
+                                            }
+                                            MqttFocus::Tcp => {
+                                                tcp.handle(req);
+                                            }
+                                            MqttFocus::Url => {
+                                                url.handle(req);
+                                            }
+                                            MqttFocus::BrokerStart | MqttFocus::ClientToggle => {}
+                                        }
+                                    }
+                                }
+                                ModalState::MqttPanel {
+                                    tcp,
+                                    ws,
+                                    url,
+                                    focus,
+                                }
+                            }
+                        }
                         ModalState::Error(_) => ModalState::None, // 任意键关闭
                         ModalState::None => ModalState::None,
                     };
                     modal = next;
                     let screen = Arc::new(vt_parser.screen().clone());
-                    redraw(&screen, ui_title, &http, &modal);
+                    redraw(
+                        &screen,
+                        ui_title,
+                        &http,
+                        mqtt_broker_on,
+                        mqtt_client.is_some(),
+                        &modal,
+                    );
                 }
             }
             TerminalEvent::UIEvent(crate::ui::UIEvent::Click { col, row }) => {
@@ -386,7 +717,49 @@ pub async fn run_command(
                                 input: tui_input::Input::new(default_bind.clone()),
                             };
                             let screen = Arc::new(vt_parser.screen().clone());
-                            redraw(&screen, ui_title, &http, &modal);
+                            redraw(
+                                &screen,
+                                ui_title,
+                                &http,
+                                mqtt_broker_on,
+                                mqtt_client.is_some(),
+                                &modal,
+                            );
+                        }
+                    }
+                    // MQTT 按钮(HTTP 右边):只要配了 [mqtt] 就开控制面板(起停都在面板里,不看 off 态)。
+                    if mqtt_cfg_present {
+                        let hl = button_label("HTTP", &http);
+                        let mlabel = mqtt_footer_label(&MqttButtonsState {
+                            broker_on: mqtt_broker_on,
+                            client_on: mqtt_client.is_some(),
+                        });
+                        let mbtn = mqtt_button_rect(area, &hl, &mlabel);
+                        if col >= mbtn.x
+                            && col < mbtn.x + mbtn.width
+                            && row >= mbtn.y
+                            && row < mbtn.y + mbtn.height
+                        {
+                            let cfg = mqtt_cfg
+                                .as_ref()
+                                .expect("mqtt_cfg_present implies mqtt_cfg");
+                            modal = ModalState::MqttPanel {
+                                tcp: tui_input::Input::new(cfg.builtin_port.to_string()),
+                                ws: tui_input::Input::new(cfg.builtin_ws_port.to_string()),
+                                // 预填生效 URL(见 MqttConfig::for_client):填了 broker 就用配置值,
+                                // 没填 + 内置 broker 才默认本地。
+                                url: tui_input::Input::new(cfg.for_client().broker),
+                                focus: MqttFocus::Tcp,
+                            };
+                            let screen = Arc::new(vt_parser.screen().clone());
+                            redraw(
+                                &screen,
+                                ui_title,
+                                &http,
+                                mqtt_broker_on,
+                                mqtt_client.is_some(),
+                                &modal,
+                            );
                         }
                     }
                 }
@@ -400,7 +773,14 @@ pub async fn run_command(
                     .screen_mut()
                     .set_scrollback(s.saturating_add(delta));
                 let screen = Arc::new(vt_parser.screen().clone());
-                redraw(&screen, ui_title, &http, &modal);
+                redraw(
+                    &screen,
+                    ui_title,
+                    &http,
+                    mqtt_broker_on,
+                    mqtt_client.is_some(),
+                    &modal,
+                );
 
                 send_screen(&tx, screen);
             }
@@ -413,7 +793,14 @@ pub async fn run_command(
                     .screen_mut()
                     .set_scrollback(s.saturating_sub(delta));
                 let screen = Arc::new(vt_parser.screen().clone());
-                redraw(&screen, ui_title, &http, &modal);
+                redraw(
+                    &screen,
+                    ui_title,
+                    &http,
+                    mqtt_broker_on,
+                    mqtt_client.is_some(),
+                    &modal,
+                );
 
                 send_screen(&tx, screen);
             }
@@ -425,7 +812,14 @@ pub async fn run_command(
                 vt_parser.screen_mut().set_size(vt_rows, vt_cols);
                 let _ = terminal.resize(vt_rows, vt_cols);
                 let screen = Arc::new(vt_parser.screen().clone());
-                redraw(&screen, ui_title, &http, &modal);
+                redraw(
+                    &screen,
+                    ui_title,
+                    &http,
+                    mqtt_broker_on,
+                    mqtt_client.is_some(),
+                    &modal,
+                );
                 send_screen(&tx, screen);
             }
             TerminalEvent::Input(ClientMessage::Sync { width, height }) => {
@@ -447,7 +841,14 @@ pub async fn run_command(
                 }
                 let screen = Arc::new(vt_parser.screen().clone());
                 // 立即重绘本地 TUI,否则要等下一次 PTY 输出才看得到 resize/居中效果。
-                redraw(&screen, ui_title, &http, &modal);
+                redraw(
+                    &screen,
+                    ui_title,
+                    &http,
+                    mqtt_broker_on,
+                    mqtt_client.is_some(),
+                    &modal,
+                );
                 send_screen(&tx, screen);
             }
             TerminalEvent::Input(ClientMessage::PtyInput(input)) => {
