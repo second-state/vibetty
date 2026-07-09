@@ -319,10 +319,12 @@ async fn run_bridge(
     // 暂时停发 pty_out(调试期只发 screen PNG);恢复时取消下面注释即可。
     // let pty_out_topic = format!("{prefix}/pty_out");
     let screen_topic = format!("{prefix}/screen");
-    // 最近一次 sync 的客户端显示高度(px);出站渲染时据此把图片高度补齐。
+    // 最近一次 sync 的客户端显示尺寸(px);出站渲染时据此把图片精确补齐到该尺寸。
+    let sync_width = Arc::new(AtomicU16::new(0));
     let sync_height = Arc::new(AtomicU16::new(0));
     let mut rx = tx.subscribe();
     let pub_client = client.clone();
+    let out_sync_width = sync_width.clone();
     let out_sync_height = sync_height.clone();
     let out_handle = tokio::spawn(async move {
         loop {
@@ -332,16 +334,10 @@ async fn run_bridge(
                     log::debug!("[mqtt] pty_out skipped ({} bytes)", bytes.len());
                 }
                 Ok(ServerMessage::Screen(screen)) => {
-                    let mut h = 0u16;
+                    let sync_w = out_sync_width.load(Ordering::Relaxed);
                     let sync_h = out_sync_height.load(Ordering::Relaxed);
-                    let target = (sync_h != 0).then_some(sync_h);
-                    match render_screen_to_image(
-                        screen.as_ref(),
-                        None,
-                        &mut h,
-                        image_format,
-                        target,
-                    ) {
+                    let target = (sync_w != 0 && sync_h != 0).then_some((sync_w, sync_h));
+                    match render_screen_to_image(screen.as_ref(), image_format, target) {
                         Ok(img) if !img.is_empty() => {
                             log::debug!(
                                 "[mqtt] screen image {} bytes -> {screen_topic}",
@@ -388,8 +384,9 @@ async fn run_bridge(
                         _ => None,
                     };
                     if let Some(cm) = msg {
-                        // 记下 sync 带的客户端高度,供出站渲染补齐图片高度用。
-                        if let ClientMessage::Sync { height, .. } = cm {
+                        // 记下 sync 带的客户端尺寸,供出站渲染补齐图片到该尺寸用。
+                        if let ClientMessage::Sync { width, height } = cm {
+                            sync_width.store(width, Ordering::Relaxed);
                             sync_height.store(height, Ordering::Relaxed);
                         }
                         if let Err(e) = cli_tx.send(cm).await {

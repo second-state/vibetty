@@ -656,14 +656,7 @@ pub async fn run_command(
         match event {
             TerminalEvent::ScreenGetter(getter) => {
                 let screen = vt_parser.screen().clone();
-                let mut window_scrollback = 0;
-                let result = render_screen_to_image(
-                    &screen,
-                    None,
-                    &mut window_scrollback,
-                    image_format,
-                    None,
-                );
+                let result = render_screen_to_image(&screen, image_format, None);
 
                 let jpeg = match result {
                     Ok(data) => Ok(data),
@@ -895,21 +888,25 @@ pub async fn run_command(
                 send_screen(&tx, screen);
             }
             TerminalEvent::Input(ClientMessage::Sync { width, height }) => {
-                // sync 只决定宽度:按客户端像素宽换算列数;高度(行数)保持当前不变。
-                // 但高度用来记「一页」行数(= 能塞下 − 1),供 scroll rows=0 时用。
+                // sync 按客户端像素 (width,height) 换算 cols×rows:各减去两侧 padding 后除以
+                // 字符格尺寸。整张图(= cols×rows 网格 + 四周 padding)就与 sync 的 (width,height)
+                // 对齐——之前只换算 cols、rows 保留旧值,图片高度和 sync 对不上。(字符网格 8×18
+                // 精度内,会有 <1 格的 floor 余量。)height 另算 page_rows(= 能塞下 − 1)供 scroll。
                 page_rows = page_rows_from_height(height);
                 let avail_w = (width as u32).saturating_sub(2 * SCREEN_PADDING);
+                let avail_h = (height as u32).saturating_sub(2 * SCREEN_PADDING);
                 let cols = (avail_w / SCREEN_CHAR_WIDTH).max(8) as u16; // 最低 8 列
-                // 列数和当前一致就不 resize(避免抖屏);但 sync 本身也是「请求刷屏」,仍回送屏幕。
-                let (rows, cur_cols) = vt_parser.screen().size(); // rows = 原始高度,保留
-                if cur_cols != cols {
+                let rows = (avail_h / SCREEN_CHAR_HEIGHT).max(2) as u16; // 最低 2 行(防 vt100 0 行)
+                // 尺寸没变就不 resize(避免抖屏);但 sync 本身也是「请求刷屏」,仍回送屏幕。
+                let (cur_rows, cur_cols) = vt_parser.screen().size();
+                if cur_cols != cols || cur_rows != rows {
                     log::info!(
-                        "Sync: {width}px wide -> resize PTY cols {cur_cols} -> {cols} (rows kept {rows})"
+                        "Sync: {width}×{height}px -> resize PTY {cur_cols}×{cur_rows} -> {cols}×{rows}"
                     );
                     vt_parser.screen_mut().set_size(rows, cols);
                     let _ = terminal.resize(rows, cols);
                 } else {
-                    log::debug!("Sync: cols unchanged ({cols}), skip resize");
+                    log::debug!("Sync: size unchanged ({cols}×{rows}), skip resize");
                 }
                 let screen = Arc::new(vt_parser.screen().clone());
                 // 立即重绘本地 TUI,否则要等下一次 PTY 输出才看得到 resize/居中效果。
@@ -955,10 +952,8 @@ pub async fn run_command(
 /// Render a vt100 screen to image bytes (JPEG or PNG)
 pub(crate) fn render_screen_to_image(
     screen: &vt100::Screen,
-    window_size: Option<(u16, u16)>, // (width, height)
-    window_h_offset: &mut u16,
     format: crate::protocol::ImageFormat,
-    target_height: Option<u16>, // 把图片高度补齐到该值(不足补到该值,超过补到 8 的倍数)
+    target_size: Option<(u16, u16)>, // 把图片精确补/裁到该 (width,height),不足补背景色(主要用于 MQTT 出站)
 ) -> anyhow::Result<Vec<u8>> {
     let config = crate::screenshot::ScreenshotConfig {
         show_decorations: false,
@@ -969,96 +964,16 @@ pub(crate) fn render_screen_to_image(
         .map_err(|e| anyhow::anyhow!("Failed to capture screen: {}", e))?;
 
     let mut dyn_image = image::DynamicImage::ImageRgba8(image);
-    let is_png = matches!(format, crate::protocol::ImageFormat::Png);
 
-    if let Some((width, height)) = window_size {
-        let orig_width = dyn_image.width();
-        let orig_height = dyn_image.height();
-        log::debug!(
-            "Original image size: {}x{}, requested window size: {}x{}",
-            orig_width,
-            orig_height,
-            width,
-            height
-        );
-        let scale = width as f32 / orig_width as f32;
-        let new_height = (orig_height as f32 * scale).round() as u32;
-
-        dyn_image = image::DynamicImage::ImageRgba8(image::imageops::resize(
-            &dyn_image,
-            width as u32,
-            new_height,
-            image::imageops::FilterType::Lanczos3,
-        ));
-
-        // 根据垂直偏移截取
-        let crop_height = height as u32;
-        if *window_h_offset == u16::MAX {
-            *window_h_offset = (new_height - crop_height) as u16;
-        }
-
-        let y_offset = *window_h_offset as u32;
-
-        if crop_height > new_height {
-            // 在顶部填充缺失的部分（图片高度不足）
-            log::debug!(
-                "Padding image: crop_height {} > new_height {}, padding {} pixels at top",
-                crop_height,
-                new_height,
-                crop_height - new_height
-            );
-            let padding_top = crop_height - new_height;
-
-            if is_png {
-                let mut padded = image::RgbaImage::new(width as u32, crop_height);
-                for pixel in padded.pixels_mut() {
-                    *pixel = image::Rgba([30, 30, 30, 255]);
-                }
-                image::imageops::overlay(&mut padded, &dyn_image.to_rgba8(), 0, padding_top as i64);
-                dyn_image = image::DynamicImage::ImageRgba8(padded);
-            } else {
-                let mut padded = image::RgbImage::new(width as u32, crop_height);
-                for pixel in padded.pixels_mut() {
-                    *pixel = image::Rgb([30, 30, 30]);
-                }
-                image::imageops::overlay(&mut padded, &dyn_image.to_rgb8(), 0, padding_top as i64);
-                dyn_image = image::DynamicImage::ImageRgb8(padded);
-            }
-        } else if y_offset + crop_height > new_height {
-            // 偏移量过大，调整到对齐底部
-            log::warn!(
-                "Vertical offset {} + crop height {} exceeds image height {}, adjusting offset",
-                y_offset,
-                crop_height,
-                new_height
-            );
-            *window_h_offset = (new_height - crop_height) as u16;
-            return Ok(Vec::new());
-        } else {
-            // 正常截取
-            dyn_image =
-                image::imageops::crop(&mut dyn_image, 0, y_offset, width as u32, crop_height)
-                    .to_image()
-                    .into();
-        }
-    }
-
-    // 按目标高度补齐图片高度(主要用于 MQTT 出站):不足 sync 高度就补到该高度,
-    // 超过就补到 8 的倍数。内容保持在上,下方用背景色填。
-    if let Some(sync_h) = target_height {
-        let cur_h = dyn_image.height();
-        let target = if cur_h < sync_h as u32 {
-            sync_h as u32
-        } else {
-            cur_h.div_ceil(8) * 8
-        };
-        if target > cur_h {
-            let mut padded = image::RgbaImage::new(dyn_image.width(), target);
-            for p in padded.pixels_mut() {
-                *p = image::Rgba([30, 30, 30, 255]);
-            }
-            image::imageops::overlay(&mut padded, &dyn_image.to_rgba8(), 0, 0);
-            dyn_image = image::DynamicImage::ImageRgba8(padded);
+    // 精确补齐到目标尺寸(主要用于 MQTT 出站):画布做到 (tw,th) 并填满背景色,再把当前图
+    // overlay 到 (0,0)——原图比目标小则四周补背景色,比目标大则等价裁切。PTY 已按 sync
+    // resize 成 cols×rows,故原图通常 ≤ 目标,只差字符网格 8×18 的 floor 余量,走「补背景色」。
+    if let Some((tw, th)) = target_size {
+        let (tw, th) = (tw as u32, th as u32);
+        if dyn_image.width() != tw || dyn_image.height() != th {
+            let mut canvas = image::RgbaImage::from_pixel(tw, th, image::Rgba([30, 30, 30, 255]));
+            image::imageops::overlay(&mut canvas, &dyn_image.to_rgba8(), 0, 0);
+            dyn_image = image::DynamicImage::ImageRgba8(canvas);
         }
     }
 
