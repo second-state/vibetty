@@ -17,8 +17,8 @@ use crate::ui::{
     quit_button_rect,
 };
 
-/// Image broadcast frame interval (ms)
-const IMAGE_FRAME_INTERVAL_MS: u64 = 300;
+/// Image broadcast frame interval
+const IMAGE_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 /// 终端截图里单个字符单元格的像素宽。`vibetty-screenshot` 在 font_size=14.0 +
 /// 内嵌字体 Sarasa Mono SC Light(swash 后端)下由 `get_char_metrics(14.0)` 实测得到。
 /// 客户端 Sync 发的是【像素】,要除以它换算成 PTY 列数。
@@ -582,9 +582,7 @@ pub async fn run_command(
     let mut vt_parser =
         vt100::Parser::new_with_callbacks(vt_rows, vt_cols, 8096, WindowCallbacks::new());
 
-    // Frame rate limit for image broadcast (default 2 fps)
-    let frame_interval = std::time::Duration::from_millis(IMAGE_FRAME_INTERVAL_MS);
-    let mut last_frame_time = std::time::Instant::now() - frame_interval;
+    let mut last_frame_time = std::time::Instant::now() - IMAGE_FRAME_INTERVAL;
 
     // 「一页」的行数:由最近一次 sync 的像素高度推算(能塞下的行数 − 1)。滚动 rows=0 时用它。
     // 还没 sync 过就用初始终端行数兜底。
@@ -709,7 +707,8 @@ pub async fn run_command(
 
                 // Generate JPEG and broadcast chunks for img subscribers (rate limited)
                 let now = std::time::Instant::now();
-                if now.duration_since(last_frame_time) >= frame_interval
+                if (now.duration_since(last_frame_time) >= IMAGE_FRAME_INTERVAL
+                    && screen.scrollback() == 0)
                     || ui_title.starts_with("✳")
                 {
                     last_frame_time = now;
@@ -846,7 +845,10 @@ pub async fn run_command(
                     hover,
                 );
 
-                send_screen(&tx, screen);
+                // scroll 已到边界、scrollback 没变 → 屏幕内容无变化,不重发图。
+                if after != before {
+                    send_screen(&tx, screen);
+                }
             }
             TerminalEvent::UIEvent(crate::ui::UIEvent::ScrollDown { rows })
             | TerminalEvent::Input(ClientMessage::ScrollDown { rows }) => {
@@ -868,7 +870,10 @@ pub async fn run_command(
                     hover,
                 );
 
-                send_screen(&tx, screen);
+                // scroll 已到边界、scrollback 没变 → 屏幕内容无变化,不重发图。
+                if after != before {
+                    send_screen(&tx, screen);
+                }
             }
             TerminalEvent::UIEvent(crate::ui::UIEvent::Resize(cols, rows)) => {
                 log::info!("Resize: cols={}, rows={}", cols, rows);
