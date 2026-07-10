@@ -66,7 +66,7 @@ footer 按钮的**外观与鼠标交互**(按钮**功能**见上节):
 
 ### client 可中断/重启(oneshot cancel)
 
-`mqtt::spawn` 返回 `MqttHandle{cancel: oneshot::Sender<()>}`;`run_bridge` 主轮询循环 `select!` 同时监听 cancel。`MqttHandle::stop()` 发信号 → break → `client.disconnect()` + `abort()` 心跳/出站子任务(否则它们会一直往死连接上发、刷 warn)。真正的下线清理靠 **LWT**(空 retained):连接一断 broker 自动清 presence。**停 client 期间的消息不会缓存、重启不补发**(broadcast 只投递给当前订阅者)。
+`mqtt::spawn` 返回 `MqttHandle{cancel: oneshot::Sender<()>}`;`run_bridge` 主循环**一个 `select!` 同时跑三路**:cancel、入站 `eventloop.poll()`、出站 `rx.recv()`(收 `Screen` 渲染补齐后 publish)。`MqttHandle::stop()` 发 cancel → break → `client.disconnect()` + `abort()` 心跳任务(出站已并入主 select,随 break 一同停,无需单独 abort;否则心跳会一直往死连接上发、刷 warn)。真正的下线清理靠 **LWT**(空 retained):连接一断 broker 自动清 presence。**停 client 期间的消息不会缓存、重启不补发**(broadcast 只投递给当前订阅者)。
 
 ### 协议(用户拍板)
 
@@ -79,7 +79,7 @@ Topic 前缀 `{user}/{device}/{pid}/vibetty`:`device`=SHA256(machine-uid) 前 16
 
 ### 改动要点
 
-- `mqtt.rs`:`spawn()->MqttHandle` + `run_bridge(cfg, cli_tx, tx, fmt, cancel)`。出站任务订阅 broadcast 只转 `Screen`(→`ws::render_screen_to_image`);入站 `eventloop.poll()`→strip 前缀→`pty_in`/`control`→`cli_tx`。`select!` cancel + 退出时 disconnect + abort 子任务。
+- `mqtt.rs`:`spawn()->MqttHandle` + `run_bridge(cfg, cli_tx, tx, fmt, cancel)`。出/入站都在主 `select!` 里:出站 `rx.recv()` 分支(收 `Screen`→`render_screen_to_image` 补齐到 sync 尺寸→publish)、入站 `eventloop.poll()`→strip 前缀→`pty_in`/`control`→`cli_tx`、外加 cancel 分支。sync 尺寸是普通 `u16` 局部变量(出/入站同任务顺序访问,不再需要 `Arc<AtomicU16>`)。退出时 disconnect + abort 心跳。
 - `config.rs`:`MqttConfig` 见上;`for_client()`(URL 解析,唯一一处)。`RunArgs::mqtt_config()` 固定从 `~/.vibetty/config.toml` 读 `[mqtt]`。
 - `main.rs`:**不再 boot 起 transport**;只 `args.mqtt_config()` 拿 `mqtt_cfg` + `cli_tx` 传给 `run_command`。
 - `ws.rs`:`run_command` 负责 boot 自动起(client if enable、broker if builtin_broker)+ footer 按钮起停 + MqttPanel 弹窗;新增 `cli_tx` 形参(运行期重 spawn client 用)。`parse_and_save` 同步更新内存 `mqtt_cfg`(避免改端口后重启 client 连旧端口)。`render_screen_to_image` 是 `pub(crate)` 供 mqtt.rs 用。

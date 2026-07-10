@@ -36,8 +36,6 @@
 
 use bytes::Bytes;
 use rumqttc::{AsyncClient, Event, LastWill, MqttOptions, Packet, QoS, Transport};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU16, Ordering};
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::config::MqttConfig;
@@ -320,53 +318,12 @@ async fn run_bridge(
     // let pty_out_topic = format!("{prefix}/pty_out");
     let screen_topic = format!("{prefix}/screen");
     // 最近一次 sync 的客户端显示尺寸(px);出站渲染时据此把图片精确补齐到该尺寸。
-    let sync_width = Arc::new(AtomicU16::new(0));
-    let sync_height = Arc::new(AtomicU16::new(0));
+    let mut sync_width: u16 = 0;
+    let mut sync_height: u16 = 0;
     let mut rx = tx.subscribe();
-    let pub_client = client.clone();
-    let out_sync_width = sync_width.clone();
-    let out_sync_height = sync_height.clone();
-    let out_handle = tokio::spawn(async move {
-        loop {
-            match rx.recv().await {
-                Ok(ServerMessage::PtyOutput(bytes)) => {
-                    // 暂时不往 MQTT 发 pty_out(调试期只发 screen PNG)。
-                    log::debug!("[mqtt] pty_out skipped ({} bytes)", bytes.len());
-                }
-                Ok(ServerMessage::Screen(screen)) => {
-                    let sync_w = out_sync_width.load(Ordering::Relaxed);
-                    let sync_h = out_sync_height.load(Ordering::Relaxed);
-                    let target = (sync_w != 0 && sync_h != 0).then_some((sync_w, sync_h));
-                    match render_screen_to_image(screen.as_ref(), image_format, target) {
-                        Ok(img) if !img.is_empty() => {
-                            log::debug!(
-                                "[mqtt] screen image {} bytes -> {screen_topic}",
-                                img.len()
-                            );
-                            if let Err(e) = pub_client
-                                .publish(&screen_topic, QoS::AtMostOnce, true, img)
-                                .await
-                            {
-                                log::warn!("[mqtt] publish screen failed: {e}");
-                            }
-                        }
-                        Ok(_) => {}
-                        Err(e) => log::warn!("[mqtt] render screen failed: {e}"),
-                    }
-                }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    log::warn!("[mqtt] broadcast lagged {n} messages");
-                }
-                Err(broadcast::error::RecvError::Closed) => {
-                    log::info!("[mqtt] broadcast closed, stop outbound");
-                    break;
-                }
-            }
-        }
-    });
 
-    // 入站:poll eventloop,按 topic 后缀构造 ClientMessage -> cli_tx。
-    // select! 同时监听取消信号:`MqttHandle::stop()` 发信号即 break,随后 disconnect + abort 子任务。
+    // 出站(rx 收 Screen → 渲染补齐 → publish)+ 入站(poll eventloop → ClientMessage → cli_tx)
+    // 都在这一个 select! 里,同时监听 cancel:`MqttHandle::stop()` 发信号即 break,随后 disconnect + abort 心跳。
     let pfx = format!("{prefix}/");
     loop {
         tokio::select! {
@@ -386,8 +343,8 @@ async fn run_bridge(
                     if let Some(cm) = msg {
                         // 记下 sync 带的客户端尺寸,供出站渲染补齐图片到该尺寸用。
                         if let ClientMessage::Sync { width, height } = cm {
-                            sync_width.store(width, Ordering::Relaxed);
-                            sync_height.store(height, Ordering::Relaxed);
+                            sync_width = width;
+                            sync_height = height;
                         }
                         if let Err(e) = cli_tx.send(cm).await {
                             log::error!("[mqtt] cli_tx send failed: {e}");
@@ -402,15 +359,49 @@ async fn run_bridge(
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 }
             },
+            msg = rx.recv() => match msg {
+                Ok(ServerMessage::PtyOutput(bytes)) => {
+                    // 暂时不往 MQTT 发 pty_out(调试期只发 screen PNG)。
+                    log::debug!("[mqtt] pty_out skipped ({} bytes)", bytes.len());
+                }
+                Ok(ServerMessage::Screen(screen)) => {
+                    let sync_w = sync_width;
+                    let sync_h = sync_height;
+                    let target = (sync_w != 0 && sync_h != 0).then_some((sync_w, sync_h));
+                    match render_screen_to_image(screen.as_ref(), image_format, target) {
+                        Ok(img) if !img.is_empty() => {
+                            log::debug!(
+                                "[mqtt] screen image {} bytes -> {screen_topic}",
+                                img.len()
+                            );
+                            if let Err(e) = client
+                                .publish(&screen_topic, QoS::AtMostOnce, true, img)
+                                .await
+                            {
+                                log::warn!("[mqtt] publish screen failed: {e}");
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) => log::warn!("[mqtt] render screen failed: {e}"),
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    log::warn!("[mqtt] broadcast lagged {n} messages");
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    log::info!("[mqtt] broadcast closed, stop client");
+                    break;
+                }
+            },
         }
     }
 
-    // 收到取消:best-effort disconnect(可能不 flush——已不再 poll eventloop),再 abort 心跳/出站子任务,
-    // 防止它们继续往已断开的连接上发(否则会一直每 15s 刷 heartbeat failed)。
+    // 收到取消:best-effort disconnect(可能不 flush——已不再 poll eventloop),再 abort 心跳子任务,
+    // 防止它继续往已断开的连接上发(否则会一直每 15s 刷 heartbeat failed)。出站已并入主 select,
+    // 随 cancel 一同 break,无需单独 abort。
     // 连接断开后 broker 触发 LWT(空 retained)清空 presence —— 正是主动停 client 想要的下线效果。
     let _ = client.disconnect().await;
     hb_handle.abort();
-    out_handle.abort();
     log::info!("[mqtt] client stopped");
 }
 
