@@ -4724,6 +4724,7 @@ dependencies = [
  "strip-ansi-escapes",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
+ "tracing",
  "tui-input",
  "tui-term",
  "uuid",

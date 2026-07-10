@@ -14,8 +14,8 @@ use crate::config::MqttConfig;
 
 /// 启动内置 rumqttd broker(后台 OS 线程)。返回后 broker 已在跑。
 ///
-/// 这里返回的失败仅限构造配置 / 建线程阶段;broker 运行时错误走日志(它自己
-/// 内部用 tracing,vibetty 没装 tracing subscriber 时这些日志会被丢弃,不影响功能)。
+/// 这里返回的失败仅限构造配置 / 建线程阶段;broker 运行时错误走 tracing(它自己
+/// 内部用 tracing),已由 main::logger_init 装的 NullSubscriber 全局 tracing subscriber 接管屏蔽。
 pub fn spawn_builtin(cfg: &MqttConfig) -> anyhow::Result<()> {
     let rcfg = build_config(cfg)?;
     std::thread::Builder::new()

@@ -50,3 +50,5 @@ rumqttc = "0.25.1"
 machine-uid = "0.6.0"
 sha2 = "0.11.0"
 rumqttd = { version = "0.20.0", features = ["websocket"] }
+# 接管 rumqttd 的 tracing 事件(它用 tracing,不是 log);见 main::logger_init 的 NullSubscriber。
+tracing = "0.1"

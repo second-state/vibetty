@@ -18,10 +18,54 @@ use config::{Cli, Commands};
 mod setup;
 mod static_page;
 
+/// 空操作 tracing subscriber:吞掉所有 tracing 事件。用于屏蔽 rumqttd 的 tracing 日志
+/// (rumqttd 用 tracing,不是 log)。见 `logger_init`。
+mod null_subscriber {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use tracing::{Event, Metadata, Subscriber, span};
+
+    pub struct Null {
+        next: AtomicU64,
+    }
+
+    impl Null {
+        pub const fn new() -> Self {
+            Self {
+                next: AtomicU64::new(1),
+            }
+        }
+    }
+
+    impl Subscriber for Null {
+        fn enabled(&self, _: &Metadata<'_>) -> bool {
+            false
+        }
+        fn new_span(&self, _: &span::Attributes<'_>) -> span::Id {
+            span::Id::from_u64(self.next.fetch_add(1, Ordering::Relaxed))
+        }
+        fn record(&self, _: &span::Id, _: &span::Record<'_>) {}
+        fn record_follows_from(&self, _: &span::Id, _: &span::Id) {}
+        fn event(&self, _: &Event<'_>) {}
+        fn enter(&self, _: &span::Id) {}
+        fn exit(&self, _: &span::Id) {}
+    }
+}
+
 fn logger_init() -> anyhow::Result<flexi_logger::LoggerHandle> {
     use flexi_logger::{FileSpec, Logger, WriteMode};
 
-    let logger = Logger::try_with_env_or_str("info")?
+    // rumqttd 用 tracing,装个空 subscriber 吞掉它的日志(走 set_global_default,不抢 log logger)。
+    let _ = tracing::subscriber::set_global_default(null_subscriber::Null::new());
+
+    // 默认 info(RUST_LOG 优先)。rumqttc 用 log crate,强制 off 屏蔽。
+    let spec = {
+        let parsed = flexi_logger::LogSpecification::env_or_parse("info")?;
+        let mut builder =
+            flexi_logger::LogSpecBuilder::from_module_filters(parsed.module_filters());
+        builder.module("rumqttc", flexi_logger::LevelFilter::Off);
+        builder.finalize()
+    };
+    let logger = Logger::with(spec)
         .log_to_file(FileSpec::default().suppress_timestamp())
         .append() // 每次启动接着上次写;达到 rotate 的 10MB 才轮转成新文件
         .write_mode(WriteMode::BufferAndFlush)
