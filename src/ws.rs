@@ -696,6 +696,7 @@ pub async fn run_command(
                 vt_parser.process(output.as_bytes());
 
                 // Check for title update from callbacks
+                let mut became_waiting = false;
                 {
                     let cb = vt_parser.callbacks_mut();
                     if cb.update_title {
@@ -714,8 +715,15 @@ pub async fn run_command(
                                 title: ui_title.clone(),
                                 state: agent_type.state(),
                             });
+                            // 翻转到 waiting:agent 在等用户操作,把滚动拉回最新(scrollback=0),
+                            // 免得用户停在历史区看漏新提示。cb 正借用 vt_parser,先标记、出块再改 screen。
+                            became_waiting = agent_type.state().is_waiting();
                         }
                     }
+                }
+                // 出块后 screen_mut 可用:重置滚动到最新(0=底部),随后的 redraw/发图都基于此。
+                if became_waiting {
+                    vt_parser.screen_mut().set_scrollback(0);
                 }
 
                 // Render directly to TUI
