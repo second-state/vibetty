@@ -343,9 +343,14 @@ async fn run_bridge(
                     let sync_h = sync_height;
                     let target = (sync_w != 0 && sync_h != 0).then_some((sync_w, sync_h));
                     match render_screen_to_image(screen.as_ref(), image_format, target) {
-                        Ok(img) if !img.is_empty() => {
+                        Ok(mut img) if !img.is_empty() => {
+                            // 图片末尾追加当前 scrollback offset(u32 大端=网络序,4 字节):IEND/EOI
+                            // 之后解码器忽略,接收端读末 4 字节即知「这张图截自滚到第 N 行」
+                            // (0=底部/最新)。offset 直接从 Screen 读——它自带 scrollback_offset 字段。
+                            let offset = screen.as_ref().scrollback() as u32;
+                            img.extend_from_slice(&offset.to_be_bytes());
                             log::debug!(
-                                "[mqtt] screen image {} bytes -> {screen_topic}",
+                                "[mqtt] screen image {} bytes (trailer offset={offset}) -> {screen_topic}",
                                 img.len()
                             );
                             if let Err(e) = client
