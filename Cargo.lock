@@ -4749,8 +4749,7 @@ dependencies = [
 [[package]]
 name = "vt100"
 version = "0.16.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "054ff75fb8fa83e609e685106df4faeffdf3a735d3c74ebce97ec557d5d36fd9"
+source = "git+https://github.com/second-state/vt100-rust?rev=a34c13a#a34c13a22acb5ba16dab30f103c85f27c9dad930"
 dependencies = [
  "itoa",
  "unicode-width",

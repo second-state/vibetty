@@ -52,3 +52,11 @@ sha2 = "0.11.0"
 rumqttd = { version = "0.20.0", features = ["websocket"] }
 # 接管 rumqttd 的 tracing 事件(它用 tracing,不是 log);见 main::logger_init 的 NullSubscriber。
 tracing = "0.1"
+
+[patch.crates-io]
+# 本地补丁:vt100 0.16.2 的 scroll_up 在「滚动区顶 == 屏顶」时不把滚出的行存进 scrollback
+# (上游用 !scroll_region_active(),只要设了滚动区就丢弃)。codex 这类 inline TUI 靠
+# SetScrollRegion(1..viewport_top) + \r\n 把 finalized 历史顶进 scrollback,因此永远攒不出
+# 历史可滚。fix:scroll_up 改成 scroll_top == 0。fork 在 second-state/vt100-rust 分支
+# vibetty-scrollback-fix(commit a34c13a),已提上游 PR doy/vt100-rust#33;合并后可撤掉本补丁。
+vt100 = { git = "https://github.com/second-state/vt100-rust", rev = "a34c13a" }

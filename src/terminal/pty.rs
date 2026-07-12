@@ -38,7 +38,7 @@ pub async fn new_with_command<S: AsRef<str>>(
     cmd.env("LINES", row.to_string());
     cmd.env("FORCE_COLOR", "1");
     cmd.env("COLORTERM", "truecolor");
-    cmd.env("PYTHONUNBUFFERED", "1");
+    // cmd.env("PYTHONUNBUFFERED", "1");
 
     for (key, value) in env {
         cmd.env(key.as_ref(), value.as_ref());
@@ -62,19 +62,22 @@ pub async fn new_with_command<S: AsRef<str>>(
     let (read_tx, read_rx) = mpsc::channel::<Vec<u8>>(128);
     let (write_tx, mut write_rx) = mpsc::channel::<WriteMsg>(128);
     // A second handle on the write channel so the reader thread can answer
-    // terminal queries (e.g. ConPTY's cursor-position report).
+    // ConPTY's startup cursor-position report on Windows (see below).
     let query_tx = write_tx.clone();
 
     // Reader thread: owns the blocking PTY reader, pushes output chunks onto a
-    // channel consumed by the async `read()` path. It also answers the
-    // cursor-position-report request (`ESC[6n`) that Windows ConPTY sends on
-    // startup — ConPTY stalls until the host replies, and Unix shells never
-    // send it, which is why this only manifested on Windows.
+    // channel consumed by the async `read()` path.
+    //
+    // It answers exactly one terminal query: the cursor-position report
+    // (`ESC[6n`) that Windows ConPTY emits in its first output chunk at startup.
+    // ConPTY blocks until it gets a reply, and since vibetty is only a screen
+    // emulator it would otherwise never answer — stalling the Windows PTY. Unix
+    // PTYs / shells never send it, so on macOS/Linux this branch is a no-op.
+    // Capability probes (DA1/DA2/DSR) from TUI apps are intentionally left
+    // unanswered — empirically (e.g. codex) apps render correctly without them.
     tokio::task::spawn_blocking(move || {
         let mut buf = [0u8; 8192];
-        // ConPTY only sends ESC[6n once, at startup, so only scan the first
-        // read for it — never the steady-state output stream.
-        let mut first = true;
+        let mut first = true; // only inspect the first chunk for ConPTY's ESC[6n
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break, // EOF
