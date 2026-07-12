@@ -626,6 +626,11 @@ pub async fn run_command(
         });
     };
 
+    // presence 心跳由 ws 主循环驱动:每 PRESENCE_INTERVAL_SECS 发一次 Presence(含 title+state)。
+    // interval 首次 tick 立即返回 → 充当上线公告(初始 presence)。
+    let mut presence_interval =
+        tokio::time::interval(std::time::Duration::from_secs(mqtt::PRESENCE_INTERVAL_SECS));
+
     loop {
         let event = tokio::select! {
             result = terminal.read_pty_output() => match result {
@@ -652,7 +657,15 @@ pub async fn run_command(
                     log::error!("[{}] Screenshot request channel closed", terminal.session_id());
                     TerminalEvent::Error
                 }
-            }
+            },
+            _ = presence_interval.tick() => {
+                // presence 心跳(上线/状态):定期由 ws 触发,含当前 title + agent 状态。
+                let _ = tx.send(ServerMessage::Presence {
+                    title: ui_title.clone(),
+                    state: agent_type.state(),
+                });
+                continue;
+            },
         };
 
         match event {
@@ -690,13 +703,20 @@ pub async fn run_command(
                     if cb.update_title {
                         cb.update_title = false;
                         let new_title = cb.title.clone();
-                        agent_type.update_by_title(&new_title);
+                        let state_changed = agent_type.update_by_title(&new_title);
                         *ui_title = new_title;
                         log::info!(
                             "[{}] Window title updated: {}",
                             terminal.session_id(),
                             ui_title
                         );
+                        // 状态翻转(codex/claude working↔waiting)→ 立即重发 presence(含新 title+state)。
+                        if state_changed {
+                            let _ = tx.send(ServerMessage::Presence {
+                                title: ui_title.clone(),
+                                state: agent_type.state(),
+                            });
+                        }
                     }
                 }
 

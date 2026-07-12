@@ -40,10 +40,11 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::config::MqttConfig;
 use crate::protocol::{ClientMessage, ImageFormat, ServerMessage};
+use crate::terminal::agent::AgentState;
 use crate::ws::render_screen_to_image;
 
 /// 传输 client 的停止句柄:持有 oneshot 发送端。`stop()` 发信号让 `run_bridge`
-/// 优雅退出并 abort 心跳 / 出站子任务;连接断开后 broker 触发 LWT 清空 presence(实例下线)。
+/// 优雅退出(出站随 cancel 一同 break);连接断开后 broker 触发 LWT 清空 presence(实例下线)。
 pub struct MqttHandle {
     cancel: oneshot::Sender<()>,
 }
@@ -86,12 +87,14 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// presence 公告 JSON:声明本实例存在,含 `prefix`(ESP32 据此控制)+ `client_id` + `ts`。
-fn presence_payload(prefix: &str, client_id: &str) -> String {
+/// presence 公告 JSON:`prefix`/`client_id`/`ts` 由 MQTT 端填,`title`/`state` 由 ws 随事件带来。
+fn presence_payload(prefix: &str, client_id: &str, title: &str, state: AgentState) -> String {
     serde_json::json!({
         "prefix": prefix,
         "client_id": client_id,
         "ts": now_secs(),
+        "title": title,
+        "state": state,
     })
     .to_string()
 }
@@ -144,7 +147,7 @@ fn instance_prefix(username: Option<&str>, device: &str) -> String {
 const INBOUND_TOPICS: &[(&str, u8)] = &[("pty_in", 0), ("control", 1)];
 
 /// presence 公告(心跳)重发间隔;ESP32 靠 payload 的 `ts` 判断实例是否存活。
-const PRESENCE_INTERVAL_SECS: u64 = 15;
+pub const PRESENCE_INTERVAL_SECS: u64 = 15;
 
 /// 解析 `{prefix}/control` 的 JSON payload。复用 `ClientMessage` 的 serde 形式
 /// (`{"type":"input_text","data":"ls"}` 等),只接受控制类消息(input/sync/scroll_*);
@@ -276,28 +279,14 @@ async fn run_bridge(
         }
     }
 
-    // 上线公告:在本实例前缀 topic 发 retained,声明存在。
-    // ESP32 订阅 `{user}/+/+/vibetty` 即可发现该用户所有实例(retained 保证新订阅立即收到)。
-    let presence = presence_payload(&prefix, &client_id);
-    if let Err(e) = client
-        .publish(prefix.clone(), QoS::AtLeastOnce, true, presence)
-        .await
-    {
-        log::warn!("[mqtt] initial presence publish failed: {e}");
-    }
-
-    // 心跳:定期重发 presence 更新 ts,让 ESP32 判断存活。并入下方主 select 的
-    // interval.tick() 分支。进程退出 → 心跳随 cancel break → ts 停止更新 → ESP32 超时判离线(LWT 兜底异常断连)。
-    let mut hb_interval =
-        tokio::time::interval(std::time::Duration::from_secs(PRESENCE_INTERVAL_SECS));
-    hb_interval.tick().await; // 跳过首次(上线公告刚发过)
-
+    // presence(上线公告 + 心跳 + 状态)统一由 ws 主循环发 ServerMessage::Presence 触发;
+    // 本线程只负责收到后 publish 到 {prefix}(retained),不再自带定时心跳。
     log::info!(
         "[mqtt] bridging: prefix={prefix} tls={} (pty_in raw + control JSON, no msgpack)",
         broker.use_tls
     );
 
-    // 出站任务:订阅 broadcast,只转发 Screen(整张图),其余忽略。
+    // 出站:订阅 broadcast,转发 Screen(整张图)+ Presence(上线/心跳/状态)。
     // 暂时停发 pty_out(调试期只发 screen PNG);恢复时取消下面注释即可。
     // let pty_out_topic = format!("{prefix}/pty_out");
     let screen_topic = format!("{prefix}/screen");
@@ -306,8 +295,9 @@ async fn run_bridge(
     let mut sync_height: u16 = 0;
     let mut rx = tx.subscribe();
 
-    // 出站(rx 收 Screen → 渲染补齐 → publish)+ 入站(poll eventloop → ClientMessage → cli_tx)
-    // 都在这一个 select! 里,同时监听 cancel:`MqttHandle::stop()` 发信号即 break,随后 disconnect + abort 心跳。
+    // 出站(rx 收 Screen → 渲染补齐 → publish;Presence → publish)+ 入站(poll eventloop
+    // → ClientMessage → cli_tx)都在这一个 select! 里,同时监听 cancel:`MqttHandle::stop()`
+    // 发信号即 break,随后 disconnect。连接断开后 broker 触发 LWT 清空 presence。
     let pfx = format!("{prefix}/");
     loop {
         tokio::select! {
@@ -369,6 +359,16 @@ async fn run_bridge(
                         Err(e) => log::warn!("[mqtt] render screen failed: {e}"),
                     }
                 }
+                Ok(ServerMessage::Presence { title, state }) => {
+                    // ws 主循环定期(心跳)+ 状态翻转时发来 → publish presence(retained)。
+                    let payload = presence_payload(&prefix, &client_id, &title, state);
+                    if let Err(e) = client
+                        .publish(prefix.clone(), QoS::AtLeastOnce, true, payload)
+                        .await
+                    {
+                        log::warn!("[mqtt] presence publish failed: {e}");
+                    }
+                }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     log::warn!("[mqtt] broadcast lagged {n} messages");
                 }
@@ -377,20 +377,11 @@ async fn run_bridge(
                     break;
                 }
             },
-            _ = hb_interval.tick() => {
-                let payload = presence_payload(&prefix, &client_id);
-                if let Err(e) = client
-                    .publish(prefix.clone(), QoS::AtLeastOnce, true, payload)
-                    .await
-                {
-                    log::warn!("[mqtt] presence heartbeat failed: {e}");
-                }
-            },
         }
     }
 
-    // 收到取消:best-effort disconnect(可能不 flush——已不再 poll eventloop)。出站、心跳都已并入
-    // 主 select,随 cancel 一同 break,无需单独 abort,也不会继续往死连接上发 heartbeat。
+    // 收到取消:best-effort disconnect(可能不 flush——已不再 poll eventloop)。出站(Screen/Presence)
+    // 都在主 select 里,随 cancel 一同 break,无需单独 abort。
     // 连接断开后 broker 触发 LWT(空 retained)清空 presence —— 正是主动停 client 想要的下线效果。
     let _ = client.disconnect().await;
     log::info!("[mqtt] client stopped");

@@ -2,6 +2,8 @@ use std::fmt::Debug;
 
 use serde::{Deserialize, Serialize};
 
+use crate::terminal::agent::AgentState;
+
 // ========== 客户端 -> 服务器 ==========
 
 /// 客户端发送的消息
@@ -68,6 +70,12 @@ pub enum ServerMessage {
     /// 整张终端屏幕(MQTT 出站据此渲染成图片;不走 serde 序列化)
     #[serde(skip)]
     Screen(std::sync::Arc<vt100::Screen>),
+
+    /// presence 公告(含窗口 title + agent 工作状态),由 ws 主循环定期(心跳)及状态
+    /// 翻转时发出。MQTT 收到后在本实例前缀 topic 发 retained presence。`#[serde(skip)]`
+    /// —— 只走 MQTT,不走 WS 浏览器。
+    #[serde(skip)]
+    Presence { title: String, state: AgentState },
 }
 
 // ========== 辅助类型 ==========

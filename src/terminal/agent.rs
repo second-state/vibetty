@@ -1,14 +1,13 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum AgentState {
     Working,
     Waiting,
 }
 
 impl AgentState {
-    pub fn is_working(&self) -> bool {
-        matches!(self, AgentState::Working)
-    }
-
     pub fn is_waiting(&self) -> bool {
         matches!(self, AgentState::Waiting)
     }
