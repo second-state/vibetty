@@ -67,6 +67,7 @@ pub(crate) enum HoveredBtn {
     None,
     Http,
     Mqtt,
+    Fit,
     Quit,
 }
 
@@ -182,7 +183,7 @@ pub fn render_frame(
         f.render_widget(pseudo_term, area);
     }
 
-    // 顶部按钮行(第 1 行):左 HTTP(+ MQTT 在其右)+ 右退出按钮。悬停的按钮高亮。
+    // 顶部按钮行(第 1 行):左 HTTP(+ MQTT 在其右)+ Fit(重置终端尺寸)+ 右退出按钮。悬停高亮。
     {
         let http_label = button_label("HTTP", http);
         render_button(
@@ -191,15 +192,22 @@ pub fn render_frame(
             &http_label,
             hover == HoveredBtn::Http,
         );
-        if let Some(mqtt) = mqtt {
-            let mqtt_label = mqtt_button_label(mqtt);
+        let mqtt_label = mqtt.map(mqtt_button_label);
+        if let Some(ml) = &mqtt_label {
             render_button(
                 f,
-                mqtt_button_rect(f.area(), &http_label, &mqtt_label),
-                &mqtt_label,
+                mqtt_button_rect(f.area(), &http_label, ml),
+                ml,
                 hover == HoveredBtn::Mqtt,
             );
         }
+        // Fit:把终端尺寸重置成当前窗口(适配本地,撤销 ESP32 sync 改的小屏);紧跟 MQTT/HTTP 右侧。
+        render_button(
+            f,
+            fit_button_rect(f.area(), &http_label, mqtt_label.as_deref()),
+            "Fit",
+            hover == HoveredBtn::Fit,
+        );
         render_button(
             f,
             quit_button_rect(f.area(), "Quit"),
@@ -450,6 +458,22 @@ pub(crate) fn mqtt_button_rect(frame_area: Rect, http_label: &str, mqtt_label: &
     Rect::new(http.x + http.width + 1, http.y, width, http.height)
 }
 
+/// 「Fit 按钮」的 Rect,紧跟 MQTT 右侧(无 MQTT 配置时跟 HTTP 右侧)。点击重置终端尺寸。
+/// render 画按钮、`run_command` 命中检测共用。
+pub(crate) fn fit_button_rect(
+    frame_area: Rect,
+    http_label: &str,
+    mqtt_label: Option<&str>,
+) -> Rect {
+    let prev = match mqtt_label {
+        Some(ml) => mqtt_button_rect(frame_area, http_label, ml),
+        None => http_button_rect(frame_area, http_label),
+    };
+    let label = "Fit";
+    let width = label.chars().count() as u16 + 2; // +2:左右各留白 1 格(灰底填充,无边框)
+    Rect::new(prev.x + prev.width + 1, prev.y, width, prev.height)
+}
+
 /// footer 右侧「退出按钮」的 Rect(右对齐,宽度随 `label` 变化,左右各留白 1 格)。
 /// render 画按钮、`run_command` 命中检测共用;Layout 与 `render_frame` 相同。
 pub(crate) fn quit_button_rect(frame_area: Rect, label: &str) -> Rect {
@@ -482,21 +506,24 @@ pub(crate) fn button_row_at(
     if hit_test(col, row, quit_button_rect(area, "Quit")) {
         return HoveredBtn::Quit;
     }
-    if matches!(http, HttpBtnState::Off)
-        && hit_test(
-            col,
-            row,
-            http_button_rect(area, &button_label("HTTP", http)),
-        )
+    let http_label = button_label("HTTP", http);
+    let mqtt_label = mqtt.map(mqtt_button_label);
+    if matches!(http, HttpBtnState::Off) && hit_test(col, row, http_button_rect(area, &http_label))
     {
         return HoveredBtn::Http;
     }
-    if let Some(m) = mqtt {
-        let http_label = button_label("HTTP", http);
-        let mqtt_label = mqtt_button_label(m);
-        if hit_test(col, row, mqtt_button_rect(area, &http_label, &mqtt_label)) {
-            return HoveredBtn::Mqtt;
-        }
+    if let Some(ml) = &mqtt_label
+        && hit_test(col, row, mqtt_button_rect(area, &http_label, ml))
+    {
+        return HoveredBtn::Mqtt;
+    }
+    // Fit 总是可悬停(不依赖 HTTP off 态或 MQTT 配置)。
+    if hit_test(
+        col,
+        row,
+        fit_button_rect(area, &http_label, mqtt_label.as_deref()),
+    ) {
+        return HoveredBtn::Fit;
     }
     HoveredBtn::None
 }

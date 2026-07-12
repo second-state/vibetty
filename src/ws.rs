@@ -13,7 +13,8 @@ use crate::mqtt;
 use crate::protocol::{ClientMessage, ServerMessage};
 use crate::ui::{
     HoveredBtn, HttpBtnState, ModalState, MqttButtonsState, MqttFocus, button_label, button_row_at,
-    hit_test, http_button_rect, mqtt_button_label, mqtt_button_rect, quit_button_rect,
+    fit_button_rect, hit_test, http_button_rect, mqtt_button_label, mqtt_button_rect,
+    quit_button_rect,
 };
 
 /// Image broadcast frame interval
@@ -158,12 +159,13 @@ enum TerminalEvent {
     Error,
 }
 
-/// 点击 footer 按钮的结果:退出程序 / 打开对话框 / 无命中。
-/// `Modal` 装箱:另两个变体无数据,装箱避免整个枚举撑到 ModalState 的大小
+/// 点击顶部按钮的结果:退出程序 / 打开对话框 / 重置终端尺寸 / 无命中。
+/// `Modal` 装箱:另几个变体无数据,装箱避免整个枚举撑到 ModalState 的大小
 /// (clippy::large_enum_variant);该值每次点击产生后立即消费,一次分配可忽略。
 enum ClickOutcome {
     Quit,
     Modal(Box<ModalState>),
+    FitSize,
     None,
 }
 
@@ -535,6 +537,16 @@ fn handle_click(
             }));
         }
     }
+    // Fit 按钮(MQTT 右边或 HTTP 右边):把终端尺寸重置成当前窗口。
+    let http_label = button_label("HTTP", http);
+    let mqtt_label = mqtt_cfg.map(|_| mqtt_button_label(&mqtt));
+    if hit_test(
+        col,
+        row,
+        fit_button_rect(area, &http_label, mqtt_label.as_deref()),
+    ) {
+        return ClickOutcome::FitSize;
+    }
     ClickOutcome::None
 }
 
@@ -829,6 +841,25 @@ pub async fn run_command(
                                 &modal,
                                 hover,
                             );
+                        }
+                        ClickOutcome::FitSize => {
+                            // 把终端尺寸重置成当前 TUI 窗口(适配本地;撤销 ESP32 sync 改的小屏)。
+                            let vt_cols = term_size.0.saturating_sub(TUI_COLS_PADDING);
+                            let vt_rows = term_size.1.saturating_sub(TUI_ROWS_PADDING);
+                            vt_parser.screen_mut().set_size(vt_rows, vt_cols);
+                            let _ = terminal.resize(vt_rows, vt_cols);
+                            log::info!("Fit: resize terminal to {vt_cols}x{vt_rows}");
+                            let screen = Arc::new(vt_parser.screen().clone());
+                            redraw(
+                                &screen,
+                                ui_title,
+                                &http,
+                                mqtt_broker_on,
+                                mqtt_client.is_some(),
+                                &modal,
+                                hover,
+                            );
+                            send_screen(&tx, screen);
                         }
                         ClickOutcome::None => {}
                     }
