@@ -12,9 +12,8 @@ use crate::config::MqttConfig;
 use crate::mqtt;
 use crate::protocol::{ClientMessage, ServerMessage};
 use crate::ui::{
-    HoveredBtn, HttpBtnState, ModalState, MqttButtonsState, MqttFocus, button_label,
-    footer_button_at, hit_test, http_button_rect, mqtt_button_rect, mqtt_footer_label,
-    quit_button_rect,
+    HoveredBtn, HttpBtnState, ModalState, MqttButtonsState, MqttFocus, button_label, button_row_at,
+    hit_test, http_button_rect, mqtt_button_label, mqtt_button_rect, quit_button_rect,
 };
 
 /// Image broadcast frame interval
@@ -31,12 +30,12 @@ pub(crate) const SCREEN_CHAR_HEIGHT: u32 = 18;
 /// 整张图 = cols×`SCREEN_CHAR_WIDTH` + 2×`SCREEN_PADDING` 宽、
 ///         rows×`SCREEN_CHAR_HEIGHT` + 2×`SCREEN_PADDING` 高。
 pub(crate) const SCREEN_PADDING: u32 = 16;
-/// Columns reserved for TUI decorations: the terminal pane's left + right
-/// borders (1 column each).
-const TUI_COLS_PADDING: u16 = 2;
-/// Rows reserved for TUI decorations: header pane (3) + footer pane (1,单行按钮) +
-/// the terminal pane's top + bottom borders (1 row each).
-const TUI_ROWS_PADDING: u16 = 6;
+/// Columns reserved for TUI decorations: the terminal pane has no left/right borders
+/// (only top + bottom), so nothing is reserved horizontally.
+const TUI_COLS_PADDING: u16 = 0;
+/// Rows reserved for TUI decorations: top button row (1) + the terminal pane's top border
+/// (1 row; no bottom border). (Header 标题块已移除。)
+const TUI_ROWS_PADDING: u16 = 2;
 
 type ServerTx = broadcast::Sender<ServerMessage>;
 
@@ -523,7 +522,7 @@ fn handle_click(
     // MQTT 按钮(HTTP 右边):只要配了 [mqtt] 就开控制面板(起停都在面板里,不看 off 态)。
     if let Some(cfg) = mqtt_cfg {
         let hl = button_label("HTTP", http);
-        let mlabel = mqtt_footer_label(&mqtt);
+        let mlabel = mqtt_button_label(&mqtt);
         let mbtn = mqtt_button_rect(area, &hl, &mlabel);
         if hit_test(col, row, mbtn) {
             return ClickOutcome::Modal(Box::new(ModalState::MqttPanel {
@@ -621,9 +620,8 @@ pub async fn run_command(
             client_on: mqtt_client_on,
         };
         let mqtt_opt = mqtt_cfg_present.then_some(&mqtt);
-        let _ = tui.draw(|f| {
-            crate::ui::render_frame(f, screen, title, "Vibetty", http, mqtt_opt, modal, hover)
-        });
+        let _ =
+            tui.draw(|f| crate::ui::render_frame(f, screen, title, http, mqtt_opt, modal, hover));
     };
 
     // presence 心跳由 ws 主循环驱动:每 PRESENCE_INTERVAL_SECS 发一次 Presence(含 title+state)。
@@ -837,7 +835,7 @@ pub async fn run_command(
                         broker_on: mqtt_broker_on,
                         client_on: mqtt_client.is_some(),
                     };
-                    let now = footer_button_at(
+                    let now = button_row_at(
                         col,
                         row,
                         Rect::new(0, 0, term_size.0, term_size.1),

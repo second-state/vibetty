@@ -153,7 +153,6 @@ pub fn render_frame(
     f: &mut Frame,
     screen: &vt100::Screen,
     title: &str,
-    header_text: &str,
     http: &HttpBtnState,
     mqtt: Option<&MqttButtonsState>,
     modal: &ModalState,
@@ -163,40 +162,27 @@ pub fn render_frame(
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(0),
-            Constraint::Length(1),
-        ])
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(size);
 
-    let header_display = if title.is_empty() {
-        header_text.to_string()
-    } else {
-        format!("{} - {}", header_text, title)
-    };
-    let header = Paragraph::new(header_display)
-        .block(Block::new().borders(Borders::ALL))
-        .alignment(Alignment::Center);
-    f.render_widget(header, chunks[0]);
+    // chunks[0] = 顶部按钮行(单行);chunks[1] = 终端 pane。header 标题块已移除,
+    // 动态 title 显示在终端 pane 的上边框左上角(见下方 block)。
 
     {
         let (term_rows, term_cols) = screen.size();
         // 终端屏幕有固定的 cols×rows,可能小于 pane(如 ESP32 sync 把 PTY resize 成小屏后,
-        // 本地 TUI pane 仍很大)。按屏幕尺寸(+边框各 1)在 pane 内居中;屏幕大于 pane 时铺满并裁切。
+        // 本地 TUI pane 仍很大)。按屏幕尺寸在 pane 内居中(高度 +1 给上边框,左右/下无边框);
+        // 屏幕大于 pane 时铺满并裁切。
         // 先 Clear 整个 pane:居中的终端只重绘自己的 rect,不清的话 pane 其余区域会残留上一帧
         // (更宽时的)旧内容,滚动时尤其明显,看着像重复行。
         f.render_widget(Clear, chunks[1]);
-        let area = centered_rect(
-            chunks[1],
-            term_cols.saturating_add(2),
-            term_rows.saturating_add(2),
-        );
-        let pseudo_term = PseudoTerminal::new(screen).block(Block::new().borders(Borders::ALL));
+        let area = centered_rect(chunks[1], term_cols, term_rows.saturating_add(1));
+        let pseudo_term =
+            PseudoTerminal::new(screen).block(Block::new().borders(Borders::TOP).title(title));
         f.render_widget(pseudo_term, area);
     }
 
-    // footer:左 HTTP 开关(+ MQTT 开关在其右)+ 右退出按钮。悬停的按钮高亮。
+    // 顶部按钮行(第 1 行):左 HTTP(+ MQTT 在其右)+ 右退出按钮。悬停的按钮高亮。
     {
         let http_label = button_label("HTTP", http);
         render_button(
@@ -206,7 +192,7 @@ pub fn render_frame(
             hover == HoveredBtn::Http,
         );
         if let Some(mqtt) = mqtt {
-            let mqtt_label = mqtt_footer_label(mqtt);
+            let mqtt_label = mqtt_button_label(mqtt);
             render_button(
                 f,
                 mqtt_button_rect(f.area(), &http_label, &mqtt_label),
@@ -432,7 +418,7 @@ pub(crate) fn button_label(prefix: &str, state: &HttpBtnState) -> String {
 }
 
 /// footer MQTT 按钮文字:据 broker/client 两个开关组合出简洁状态(render 与点击命中检测共用)。
-pub(crate) fn mqtt_footer_label(mqtt: &MqttButtonsState) -> String {
+pub(crate) fn mqtt_button_label(mqtt: &MqttButtonsState) -> String {
     match (mqtt.broker_on, mqtt.client_on) {
         (false, false) => "MQTT off".to_string(),
         (true, false) => "MQTT brkr".to_string(),
@@ -447,18 +433,13 @@ pub(crate) fn mqtt_footer_label(mqtt: &MqttButtonsState) -> String {
 pub(crate) fn http_button_rect(frame_area: Rect, label: &str) -> Rect {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(0),
-            Constraint::Length(1),
-        ])
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(frame_area);
-    let footer = chunks[2];
+    let button_row = chunks[0];
     let want = label.chars().count() as u16 + 2; // +2:左右各留白 1 格(灰底填充,无边框)
-    let width = want.min(footer.width);
-    // x + 1 内缩:对齐 header 内容区(header 是带边框 block,内容在边框内 1 格)。
-    // 按钮去掉自身边框后,按钮块要从 header 内容列开始,而非 header 边框列。
-    Rect::new(footer.x + 1, footer.y, width, footer.height)
+    let width = want.min(button_row.width);
+    // x + 1 左缩 1 格留白,与终端 pane 上边框 title 左沿视觉对齐。
+    Rect::new(button_row.x + 1, button_row.y, width, button_row.height)
 }
 
 /// footer 中「MQTT 按钮」的 Rect,紧跟 HTTP 按钮右侧(间隔 1 格)。
@@ -474,18 +455,14 @@ pub(crate) fn mqtt_button_rect(frame_area: Rect, http_label: &str, mqtt_label: &
 pub(crate) fn quit_button_rect(frame_area: Rect, label: &str) -> Rect {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(0),
-            Constraint::Length(1),
-        ])
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
         .split(frame_area);
-    let footer = chunks[2];
+    let button_row = chunks[0];
     let want = label.chars().count() as u16 + 2; // +2:左右各留白 1 格(灰底填充,无边框)
-    let width = want.min(footer.width);
-    // 右侧也内缩 1 格(-1),右沿与 header 内容区右沿对齐(见 http_button_rect)。
-    let x = footer.x + footer.width - 1 - width;
-    Rect::new(x, footer.y, width, footer.height)
+    let width = want.min(button_row.width);
+    // 右侧也内缩 1 格(-1),与左侧对称(见 http_button_rect)。
+    let x = button_row.x + button_row.width - 1 - width;
+    Rect::new(x, button_row.y, width, button_row.height)
 }
 
 /// 点击/悬停坐标是否落在 `r` 内。
@@ -493,9 +470,9 @@ pub(crate) fn hit_test(col: u16, row: u16, r: Rect) -> bool {
     col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
 }
 
-/// (col, row) 当前悬停在哪个 footer 按钮上(`None` = 不在任何按钮上)。与点击同源:
+/// (col, row) 当前悬停在顶部按钮行的哪个按钮上(`None` = 不在任何按钮上)。与点击同源:
 /// HTTP 按钮只在 Off 态视为可悬停(On 态点击无反应,不该看上去可点),MQTT 按钮在配置存在时才悬停。
-pub(crate) fn footer_button_at(
+pub(crate) fn button_row_at(
     col: u16,
     row: u16,
     area: Rect,
@@ -516,7 +493,7 @@ pub(crate) fn footer_button_at(
     }
     if let Some(m) = mqtt {
         let http_label = button_label("HTTP", http);
-        let mqtt_label = mqtt_footer_label(m);
+        let mqtt_label = mqtt_button_label(m);
         if hit_test(col, row, mqtt_button_rect(area, &http_label, &mqtt_label)) {
             return HoveredBtn::Mqtt;
         }
@@ -534,15 +511,11 @@ pub fn spawn_event_loop(ui_tx: UITx) {
 
 fn event_loop_thread(tx_to_pty: UITx) -> anyhow::Result<()> {
     let timeout = Duration::from_millis(500);
-    // footer 占屏幕最后一行(Length(1)),悬停高亮只关心鼠标是否落在那一行的按钮上。
-    // Moved 在此按「是否在最后一行」过滤,终端区内的滑动事件直接丢弃不进 channel:
-    // 只放行 ① row 在最后一行(进入 / 在 footer 行内移动)和 ② 刚离开最后一行(发最后一次
-    // 让消费者把高亮清掉)。last_row 随 Resize 事件同步;主循环侧的「变化才重绘」仍作兜底。
-    let mut last_row = match crossterm::terminal::size() {
-        Ok((_, r)) if r > 0 => r - 1,
-        _ => 23, // headless 兜底 80×24
-    };
-    let mut was_on_footer = false;
+    // 按钮在屏幕第一行(row 0,Length(1)),悬停高亮只关心鼠标是否落在那一行。
+    // Moved 在此按「是否在第一行」过滤,终端区内的滑动事件直接丢弃不进 channel:
+    // 只放行 ① row==0(进入 / 在按钮行内移动)和 ② 刚离开第一行(发最后一次
+    // 让消费者把高亮清掉)。第一行不随窗口高度变化(恒为 0);主循环侧的「变化才重绘」仍作兜底。
+    let mut was_on_button_row = false;
     loop {
         if event::poll(timeout)? {
             let evt = event::read()?;
@@ -586,23 +559,22 @@ fn event_loop_thread(tx_to_pty: UITx) -> anyhow::Result<()> {
                         });
                     }
                     MouseEventKind::Moved => {
-                        let on_footer = mouse.row == last_row;
-                        // on_footer:进入或在 footer 行内移动 → 放行(消费者命中检测高亮按钮)。
-                        // was_on_footer:刚从 footer 行移出 → 放行最后一次,让消费者清高亮。
-                        if on_footer || was_on_footer {
+                        let on_button_row = mouse.row == 0;
+                        // on_button_row:进入或在按钮行内移动 → 放行(消费者命中检测高亮按钮)。
+                        // was_on_button_row:刚从按钮行移出 → 放行最后一次,让消费者清高亮。
+                        if on_button_row || was_on_button_row {
                             let _ = tx_to_pty.blocking_send(UIEvent::Hover {
                                 col: mouse.column,
                                 row: mouse.row,
                             });
                         }
-                        was_on_footer = on_footer;
+                        was_on_button_row = on_button_row;
                     }
                     _ => {}
                 }
             } else if let Event::Resize(cols, rows) = evt {
-                // footer 行随窗口高度变;重置悬停状态(不假设鼠标还停在新 footer 行)。
-                last_row = rows.saturating_sub(1);
-                was_on_footer = false;
+                // 重置悬停状态(不假设鼠标还停在新按钮行)。
+                was_on_button_row = false;
                 let _ = tx_to_pty.blocking_send(UIEvent::Resize(cols, rows));
             }
         }

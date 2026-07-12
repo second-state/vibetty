@@ -44,24 +44,24 @@ keep_alive_secs = 30
 
 **URL 解析(`MqttConfig::for_client`,config.rs)**:client 连的 broker URL 一律以 config 里 `broker` 为准;**只有** `broker` 空 **且** `builtin_broker=true` 时才默认填本地 `mqtt://127.0.0.1:{builtin_port}`。即:即便内置 broker 开着,只要 `broker` 填了,client 就连填的地址。boot 自动起、面板(重)spawn、URL 预填/比对都走这一处(唯一真相源)。
 
-### TUI 控制(footer MQTT 按钮)
+### TUI 控制(顶部按钮行)
 
-footer 是 `HTTP | MQTT | Quit`;`[mqtt]` 配置存在即显示 `MQTT` 按钮(不再绑 `builtin_broker`),点击弹 **MqttPanel**(上下两块):
+顶部按钮行(屏幕第 1 行,原 footer)是 `HTTP | MQTT | Quit`;`[mqtt]` 配置存在即显示 `MQTT` 按钮(不再绑 `builtin_broker`),点击弹 **MqttPanel**(上下两块):
 - **Broker 块**:`TCP:` / `WS :` 端口可编辑(Enter 存回 config)+ `Start broker`(起内置 rumqttd;**只能起不能停**——rumqttd 无 shutdown API,起了之后变只读 `● broker running :{port}`)。
 - **Client 块**:`URL:` broker 地址可编辑(Enter 存回 `[mqtt] broker`)+ `Start client`/`Stop client`。
 - `Tab`/`↑↓` 在 `TCP → WS → BrokerStart → URL → ClientToggle` 循环;Enter 行为随聚焦项变(端口=存盘、BrokerStart=起 broker、URL=存 URL、ClientToggle=切 client);底部提示也随聚焦项动态变化。
-- footer MQTT 按钮文字反映组合状态:`MQTT off` / `MQTT brkr` / `MQTT conn` / `MQTT on`(brkr=broker 在跑 client 没跑,以此类推)。
+- MQTT 按钮文字反映组合状态:`MQTT off` / `MQTT brkr` / `MQTT conn` / `MQTT on`(brkr=broker 在跑 client 没跑,以此类推)。
 
-### footer 渲染与悬停高亮(ui/mod.rs + ws.rs,`9cb9c69`)
+### 顶部按钮行渲染与悬停高亮(ui/mod.rs + ws.rs)
 
-footer 按钮的**外观与鼠标交互**(按钮**功能**见上节):
-- footer 是 `Layout::Vertical` 第三段 `Length(1)`——**单行**,不是以前带边框的 3 行 block。`TUI_ROWS_PADDING=6` = header 3 + footer 1 + 终端 pane 上下边框各 1。
+按钮原在 footer,现已移到屏幕**第 1 行**(header 标题块已删,动态 title 改挂终端 pane 上边框左上角)。外观与鼠标交互(按钮**功能**见上节):
+- 布局 `Layout::Vertical` 两段:`[Length(1) 按钮行, Min(0) 终端 pane]`。`TUI_ROWS_PADDING=2` = 按钮 1 + 终端 pane 上边框 1(无下边框);`TUI_COLS_PADDING=0`(终端 pane 只有上边框、无左右下)。
 - 按钮**无边框**:`render_button` 用 `Paragraph`+`Style.bg` 整块填色(默认 `DarkGray`,悬停 `LightBlue`+黑字),不是 `Block::borders`(`borders` 会让按钮高 3 行)。
-- 按钮**左右各内缩 1 格**对齐 header **内容区**:header 是带边框 block、内容在边框内 1 格;按钮去边框后若从 `footer.x` 起会落到 header 边框列,视觉错位。故 `http_button_rect`=`footer.x+1`、`quit_button_rect`=`footer.x+footer.width-1-width`;MQTT 按钮从 HTTP 右侧推导、自动跟随。
-- **命中 rect 三处共用**:`render_frame` 渲染、`handle_click` 点击、`footer_button_at` 悬停命中都走 `*_button_rect`/同一 `Layout`——改按钮布局要同步这几处。
+- 按钮**左右各内缩 1 格**留白(与终端上边框 title 左沿视觉对齐):`http_button_rect`=`button_row.x+1`、`quit_button_rect`=`button_row.x+button_row.width-1-width`;MQTT 按钮从 HTTP 右侧推导、自动跟随。
+- **命中 rect 三处共用**:`render_frame` 渲染、`handle_click` 点击、`button_row_at` 悬停命中都走 `*_button_rect`/同一 `Layout`——改按钮布局要同步这几处。
 - **悬停高亮**靠 crossterm `?1003h`(any-event,`Moved` 无需按键上报),两层节流避免刷屏:
-  1. producer 侧(`event_loop_thread`):维护 `last_row`(init `terminal::size()`、Resize 同步),`Moved` 只在 `row==last_row`(footer 行)或刚离开 footer 行时转发;终端区滑动直接丢、不进 channel。
-  2. consumer 侧(`run_command` Hover 分支):`footer_button_at` 算当前悬停按钮,只在变化时重绘。
+  1. producer 侧(`event_loop_thread`):按钮在第 1 行(`row==0`,不随窗口高度变),`Moved` 只在 `row==0`(进入/在按钮行内移动)或刚离开按钮行时转发;终端区滑动直接丢、不进 channel。
+  2. consumer 侧(`run_command` Hover 分支):`button_row_at` 算当前悬停按钮,只在变化时重绘。
   - `hover`(`HoveredBtn`,Copy)是普通 `let mut` 变量、当参数传进 `redraw` 闭包。
 
 ### client 可中断/重启(oneshot cancel)
@@ -82,7 +82,7 @@ Topic 前缀 `{user}/{device}/{pid}/vibetty`:`device`=SHA256(machine-uid) 前 16
 - `mqtt.rs`:`spawn()->MqttHandle` + `run_bridge(cfg, cli_tx, tx, fmt, cancel)`。出/入站都在主 `select!` 里:出站 `rx.recv()` 分支(收 `Screen`→`render_screen_to_image` 补齐到 sync 尺寸→publish)、入站 `eventloop.poll()`→strip 前缀→`pty_in`/`control`→`cli_tx`、外加 cancel 分支。sync 尺寸是普通 `u16` 局部变量(出/入站同任务顺序访问,不再需要 `Arc<AtomicU16>`)。退出时 disconnect + abort 心跳。
 - `config.rs`:`MqttConfig` 见上;`for_client()`(URL 解析,唯一一处)。`RunArgs::mqtt_config()` 固定从 `~/.vibetty/config.toml` 读 `[mqtt]`。
 - `main.rs`:**不再 boot 起 transport**;只 `args.mqtt_config()` 拿 `mqtt_cfg` + `cli_tx` 传给 `run_command`。
-- `ws.rs`:`run_command` 负责 boot 自动起(client if enable、broker if builtin_broker)+ footer 按钮起停 + MqttPanel 弹窗;新增 `cli_tx` 形参(运行期重 spawn client 用)。`parse_and_save` 同步更新内存 `mqtt_cfg`(避免改端口后重启 client 连旧端口)。`render_screen_to_image` 是 `pub(crate)` 供 mqtt.rs 用。
+- `ws.rs`:`run_command` 负责 boot 自动起(client if enable、broker if builtin_broker)+ 顶部按钮起停 + MqttPanel 弹窗;新增 `cli_tx` 形参(运行期重 spawn client 用)。`parse_and_save` 同步更新内存 `mqtt_cfg`(避免改端口后重启 client 连旧端口)。`render_screen_to_image` 是 `pub(crate)` 供 mqtt.rs 用。
 - `setup.rs`:`vibetty setup` 是 ratatui TUI,编辑 `[mqtt]` 全部字段写回 config;`save_mqtt` 是 `pub(crate)`(ws.rs 写 config 复用),用 `toml::Table` 保留其它段。
 - broker.rs:`spawn_builtin(&cfg)` 在独立 OS 线程跑 rumqttd(TCP + WS,匿名,1MB payload)。**无 shutdown**。
 
