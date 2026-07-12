@@ -1,13 +1,13 @@
-name: Release
+name: Pre-Release
 
 on:
   push:
     tags:
-      - 'v*'
+      - 'v*-*'
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Release tag (e.g. v0.1.0)'
+        description: 'Pre-release tag (e.g. v0.4.0-rc.1)'
         required: true
         type: string
 
@@ -16,8 +16,6 @@ permissions:
 
 jobs:
   build:
-    # 跳过预发布 tag(带 `-`),交给 prerelease.yml 处理,避免两者抢同一个 tag
-    if: ${{ !contains(inputs.release_tag || github.ref_name, '-') }}
     strategy:
       matrix:
         include:
@@ -63,9 +61,10 @@ jobs:
         with:
           path: artifacts
 
-      - name: Create release
+      - name: Create prerelease
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.release_tag || github.ref_name }}
+          tag_name: ${{ inputs.release_tag || github.ref_name }}
+          prerelease: true
           generate_release_notes: true
           files: artifacts/**/*
