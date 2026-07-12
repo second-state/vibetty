@@ -564,8 +564,12 @@ pub async fn run_command(
     let vt_cols = cols.saturating_sub(TUI_COLS_PADDING);
     let vt_rows = rows.saturating_sub(TUI_ROWS_PADDING);
 
+    let process_command = command.first().unwrap().as_str();
+
+    let mut agent_type = crate::terminal::agent::AgentType::new(process_command);
+
     let mut terminal = crate::terminal::pty::new_with_command(
-        command.first().unwrap().as_str(),
+        process_command,
         &command[1..],
         &[(
             "VIBETTY_PORT".to_string(),
@@ -672,7 +676,12 @@ pub async fn run_command(
                     );
                     break;
                 }
-                log::trace!("[{}] PTY output: {}", terminal.session_id(), output.len());
+                log::trace!(
+                    "[{}] PTY : hide_cursor {}",
+                    terminal.session_id(),
+                    vt_parser.screen().hide_cursor()
+                );
+                log::trace!("[{}] PTY output: {output:?}", terminal.session_id());
                 vt_parser.process(output.as_bytes());
 
                 // Check for title update from callbacks
@@ -681,8 +690,13 @@ pub async fn run_command(
                     if cb.update_title {
                         cb.update_title = false;
                         let new_title = cb.title.clone();
-                        let _ = cb;
+                        agent_type.update_by_title(&new_title);
                         *ui_title = new_title;
+                        log::info!(
+                            "[{}] Window title updated: {}",
+                            terminal.session_id(),
+                            ui_title
+                        );
                     }
                 }
 
@@ -709,7 +723,7 @@ pub async fn run_command(
                 let now = std::time::Instant::now();
                 if (now.duration_since(last_frame_time) >= IMAGE_FRAME_INTERVAL
                     && screen.scrollback() == 0)
-                    || ui_title.starts_with("✳")
+                    || agent_type.state().is_waiting()
                 {
                     last_frame_time = now;
                     send_screen(&tx, screen);

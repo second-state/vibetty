@@ -1,6 +1,7 @@
 use portable_pty::{Child, MasterPty, PtySize};
 use tokio::sync::{mpsc, oneshot};
 
+pub mod agent;
 pub mod pty;
 
 /// A write request handed off to the blocking writer thread: the bytes to
