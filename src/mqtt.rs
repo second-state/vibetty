@@ -286,27 +286,11 @@ async fn run_bridge(
         log::warn!("[mqtt] initial presence publish failed: {e}");
     }
 
-    // 心跳:定期重发 presence 更新 ts,让 ESP32 判断存活。
-    // 进程退出 → 心跳停 → ts 停止更新 → ESP32 超时判定离线(LWT 兜底异常断连)。
-    let hb_client = client.clone();
-    let hb_topic = prefix.clone();
-    let hb_prefix = prefix.clone();
-    let hb_client_id = client_id.clone();
-    let hb_handle = tokio::spawn(async move {
-        let mut interval =
-            tokio::time::interval(std::time::Duration::from_secs(PRESENCE_INTERVAL_SECS));
-        interval.tick().await; // 跳过首次(上线公告刚发过)
-        loop {
-            interval.tick().await;
-            let payload = presence_payload(&hb_prefix, &hb_client_id);
-            if let Err(e) = hb_client
-                .publish(&hb_topic, QoS::AtLeastOnce, true, payload)
-                .await
-            {
-                log::warn!("[mqtt] presence heartbeat failed: {e}");
-            }
-        }
-    });
+    // 心跳:定期重发 presence 更新 ts,让 ESP32 判断存活。并入下方主 select 的
+    // interval.tick() 分支。进程退出 → 心跳随 cancel break → ts 停止更新 → ESP32 超时判离线(LWT 兜底异常断连)。
+    let mut hb_interval =
+        tokio::time::interval(std::time::Duration::from_secs(PRESENCE_INTERVAL_SECS));
+    hb_interval.tick().await; // 跳过首次(上线公告刚发过)
 
     log::info!(
         "[mqtt] bridging: prefix={prefix} tls={} (pty_in raw + control JSON, no msgpack)",
@@ -393,15 +377,22 @@ async fn run_bridge(
                     break;
                 }
             },
+            _ = hb_interval.tick() => {
+                let payload = presence_payload(&prefix, &client_id);
+                if let Err(e) = client
+                    .publish(prefix.clone(), QoS::AtLeastOnce, true, payload)
+                    .await
+                {
+                    log::warn!("[mqtt] presence heartbeat failed: {e}");
+                }
+            },
         }
     }
 
-    // 收到取消:best-effort disconnect(可能不 flush——已不再 poll eventloop),再 abort 心跳子任务,
-    // 防止它继续往已断开的连接上发(否则会一直每 15s 刷 heartbeat failed)。出站已并入主 select,
-    // 随 cancel 一同 break,无需单独 abort。
+    // 收到取消:best-effort disconnect(可能不 flush——已不再 poll eventloop)。出站、心跳都已并入
+    // 主 select,随 cancel 一同 break,无需单独 abort,也不会继续往死连接上发 heartbeat。
     // 连接断开后 broker 触发 LWT(空 retained)清空 presence —— 正是主动停 client 想要的下线效果。
     let _ = client.disconnect().await;
-    hb_handle.abort();
     log::info!("[mqtt] client stopped");
 }
 
