@@ -901,7 +901,7 @@ pub async fn run_command(
                     .screen_mut()
                     .set_scrollback(before.saturating_add(delta));
                 let after = vt_parser.screen().scrollback();
-                log::info!("ScrollUp rows={rows} delta={delta} offset {before} -> {after}");
+                log::debug!("ScrollUp rows={rows} delta={delta} offset {before} -> {after}");
                 let screen = Arc::new(vt_parser.screen().clone());
                 redraw(
                     &screen,
@@ -926,7 +926,7 @@ pub async fn run_command(
                     .screen_mut()
                     .set_scrollback(before.saturating_sub(delta));
                 let after = vt_parser.screen().scrollback();
-                log::info!("ScrollDown rows={rows} delta={delta} offset {before} -> {after}");
+                log::debug!("ScrollDown rows={rows} delta={delta} offset {before} -> {after}");
                 let screen = Arc::new(vt_parser.screen().clone());
                 redraw(
                     &screen,
@@ -944,7 +944,7 @@ pub async fn run_command(
                 }
             }
             TerminalEvent::UIEvent(crate::ui::UIEvent::Resize(cols, rows)) => {
-                log::info!("Resize: cols={}, rows={}", cols, rows);
+                log::debug!("Resize: cols={}, rows={}", cols, rows);
                 term_size = (cols, rows);
                 let vt_cols = cols.saturating_sub(TUI_COLS_PADDING);
                 let vt_rows = rows.saturating_sub(TUI_ROWS_PADDING);
@@ -975,7 +975,7 @@ pub async fn run_command(
                 // 尺寸没变就不 resize(避免抖屏);但 sync 本身也是「请求刷屏」,仍回送屏幕。
                 let (cur_rows, cur_cols) = vt_parser.screen().size();
                 if cur_cols != cols || cur_rows != rows {
-                    log::info!(
+                    log::debug!(
                         "Sync: {width}×{height}px -> resize PTY {cur_cols}×{cur_rows} -> {cols}×{rows}"
                     );
                     vt_parser.screen_mut().set_size(rows, cols);
@@ -997,7 +997,7 @@ pub async fn run_command(
                 send_screen(&tx, screen);
             }
             TerminalEvent::Input(ClientMessage::PtyInput(input)) => {
-                log::info!(
+                log::debug!(
                     "Sending input to terminal: {:?}",
                     String::from_utf8_lossy(&input)
                 );
@@ -1005,7 +1005,7 @@ pub async fn run_command(
                 terminal.send_bytes(&input).await?;
             }
             TerminalEvent::Input(ClientMessage::Input(text)) => {
-                log::info!("Sending text input to terminal: {:?}", text);
+                log::debug!("Sending text input to terminal: {:?}", text);
                 terminal.send_text(&text).await?;
                 if auto_submit {
                     terminal.send_enter().await?;
