@@ -1,109 +1,112 @@
-# Vibetty
+# vibetty
 
-WebSocket 终端服务器，支持语音输入和 Claude AI 智能交互。
+把运行在你 PC 上的交互式终端会话（`claude`、`codex`）通过 MQTT **实时**分享给远端设备（ESP32、MCU、另一台机器）。
+
+vibetty 在一个 PTY 里跑程序，把终端画面渲染成图片后发布到 MQTT。远端客户端订阅它来显示实时画面，并把按键发回来。两端都只是连同一个 broker 的 MQTT 客户端，**你的 PC 不需要对外暴露任何端口**。
+
+> 0.4.0 引入 MQTT 作为主要的分享通道，另保留一条可选的 HTTP 通道，两者共用同一个 PTY 会话。MQTT 是可选的：只有配置里存在 `[mqtt]` 段时才启用，否则完全不碰 MQTT。详见[更新日志](../CHANGELOG.md)。
 
 ## 功能特性
 
-- **WebSocket 终端** - 基于 Axum 框架的实时终端 Web 接口
-- **语音输入** - 支持语音转文字，可通过语音执行命令
-- **Claude AI 集成** - 使用 `echokit_terminal` 实现 AI 辅助终端交互
-- **多种 ASR 支持**
-  - OpenAI Whisper API
-  - 阿里云 Paraformer 实时语音识别(todo)
+- **MQTT 实时分享终端** —— 把屏幕作为 JPEG 截图发布，远端设备订阅显示、回传按键。
+- **内置 broker** —— 进程内 rumqttd broker（TCP + WebSocket）可开机自启，零外部依赖。
+- **多实例发现** —— 每个实例以 retained presence 自我公告；客户端用一条通配订阅即可发现你的全部实例。
+- **Agent 状态识别** —— 解析终端标题判断 Codex / Claude Code 处于 `working` 还是 `waiting`，并随 presence 一并广播。
+- **TUI 控制** —— ratatui 界面顶部有 `HTTP` / `MQTT` / `Fit` / `Quit` 按钮；`MQTT` 按钮文字反映组合状态（`off` / `brkr` / `conn` / `on`）。
+- **可选 HTTP 通道** —— `/screenshot` 取图端点 + `/mqtt_ws` 调试页，按需启动。
+- **跨平台** —— Linux、macOS、Windows（ConPTY）。
 
 ## 快速开始
 
-### ASR 配置
+### 1. 安装
 
-Vibetty 支持两种语音识别模式：
+从 [Releases 页面](https://github.com/second-state/vibetty/releases) 下载对应平台的预编译二进制，放到 `PATH` 上（推荐 `~/.cargo/bin`）。
 
-#### 交互式配置（推荐）
+<details>
+<summary>从源码编译</summary>
 
-运行配置向导来交互式配置 ASR：
+```bash
+git clone https://github.com/second-state/vibetty
+cd vibetty
+cargo build --release
+# 二进制：./target/release/vibetty
+```
+</details>
+
+### 2. 配置 broker（一次性）
 
 ```bash
 vibetty setup
 ```
 
-启动后会进入 TUI 界面，可以：
-1. 选择平台：**Whisper** 或 **WebVosk**
-2. 如果选择 Whisper，可以选择提供商预设：**OpenAI**、**ByteFuture**、**Groq**、**GLM** 或 **Custom**
-3. 填写 API Key 等配置项
-4. 配置保存到 `~/.vibetty/config.toml`
+打开 TUI 填写 `[mqtt]` 各字段，写入 `~/.vibetty/config.toml`。最简单的是用内置 broker——无需任何外部服务：
 
-#### 手动配置
-
-也可以通过环境变量手动配置 ASR。
-
-##### 选项 1：Whisper API（服务器端）
-
-创建 `.env` 文件并配置 Whisper API（推荐使用 Groq）：
-
-```bash
-VIBECODE_ASR_API_KEY=your_api_key_here
-VIBECODE_ASR_URL=https://api.groq.com/openai/v1/audio/transcriptions
-VIBECODE_ASR_MODEL=whisper-large-v3
-VIBECODE_ASR_LANG=zh
-VIBECODE_ASR_PROMPT=
+```toml
+[mqtt]
+enable = true
+builtin_broker = true
+builtin_port = 1883      # 内置 broker TCP 端口
+builtin_ws_port = 9001   # 内置 broker WebSocket 端口
 ```
 
-然后启动服务：
+或指向你自己的 broker / 免费 MQTT 云服务：
 
-```bash
-# 使用 cargo 直接运行
-cargo run -- -- claude
-
-# 或者先编译再运行
-cargo build --release
-./target/release/vibetty -- claude
+```toml
+[mqtt]
+enable = true
+broker = "mqtt://user:pass@broker.example.com:1883"   # mqtts:// 走 TLS
 ```
 
-##### 选项 2：WebVosk（浏览器端）
+> 没有 `[mqtt]` 段时，vibetty 不启用 MQTT，也不会连 broker。
 
-语音识别完全在浏览器中使用 Vosk 模型运行，无需 API 密钥。
+### 3. 运行
 
 ```bash
-# 设置 ASR 平台为 WebVosk
-VIBECODE_ASR_PLATFORM=web_vosk cargo run -- -- claude
+vibetty -- claude        # 分享一个 `claude` 会话
+vibetty -- codex         # 分享一个 `codex` 会话
 ```
 
-然后访问 WebVosk 界面：http://localhost:3000/vosk
+**必须**带 `-- <命令>`。TUI 顶部的 `MQTT` 按钮显示 `conn` 即表示已连接、正在分享。
 
-**注意：** 首次使用需要下载 Vosk 模型文件（每个约 40MB）。模型会缓存在浏览器中。
+让它在后台跑、不占用当前终端：
 
-更多参数可以使用 `--help` 命令查看：
 ```bash
-cargo run -- --help
+tmux new-session -d -s vibetty -c "$HOME/workspace" 'vibetty -- claude'
+tmux capture-pane -t vibetty -p | tail -20   # 确认已起来
 ```
 
-服务启动后访问: http://localhost:3000
+提示：`vibetty skill install --claude` 会装一个 `run-vibetty` skill，里面是完整的后台会话操作流程，可直接交给 agent。
 
-## API 参考
+## 命令行参考
 
-### 更改目录
-
-通过 HTTP API 更改当前工作目录。
-
-**接口地址：** `POST /api/change-dir`
-
-**请求格式：**
-```bash
-curl -X POST http://localhost:3000/api/change-dir \
-  -H "Content-Type: application/json" \
-  -d '{"path": "/path/to/directory"}'
+```
+vibetty -- <命令>                          运行模式：在 TUI 里分享给定命令（默认）
+vibetty setup                               用 TUI 配置 [mqtt]
+vibetty skill install    --claude [--codex] 安装 run-vibetty skill
+vibetty skill uninstall  --claude [--codex] 移除 run-vibetty skill
 ```
 
-**使用示例：**
-```bash
-# 切换到绝对路径
-curl -X POST http://localhost:3000/api/change-dir \
-  -H "Content-Type: application/json" \
-  -d '{"path": "/home/user/documents"}'
+运行模式选项：
 
-# 切换到相对路径
-curl -X POST http://localhost:3000/api/change-dir \
-  -H "Content-Type: application/json" \
-  -d '{"path": "../parent-folder"}'
-```
+| 参数 | 说明 | 默认值 |
+|---|---|---|
+| `-- <命令>` | 在 PTY 里跑的程序（如 `-- claude`） | _(必填)_ |
+| `--config <PATH>` | 覆盖配置文件路径 | `~/.vibetty/config.toml` |
+| `-b, --bind-addr <ADDR>` | HTTP 监听地址（作为对话框预填默认值） | `0.0.0.0:3000` |
+| `-a, --auto-submit` | 收到 `input_text` 时自动追加回车并执行 | `true` |
 
-**注意：** 出于安全考虑，此接口仅接受来自 localhost 的请求。
+## HTTP 端点（按需启动）
+
+HTTP 服务**默认关闭**，在 TUI 里点 `HTTP` 按钮启动。
+
+- `GET /screenshot` —— 当前终端画面图片（格式由 `-f` 决定）。
+- `GET /mqtt_ws` —— 浏览器 MQTT-over-WebSocket 查看页：连内置 broker 的 WS 端口、发现实例、显示画面、可发输入。没有硬件时用它测很方便。
+
+## 文档
+
+- **[详细使用文档](USAGE.zh.md)** —— 配置、TUI、完整 MQTT 协议、ESP32 / MCU 对接指南、调试与常见问题。（[English](USAGE.md)）
+- [中文更新日志](CHANGELOG.zh-CN.md) · [English changelog](../CHANGELOG.md)
+
+## 平台支持
+
+Linux、macOS、Windows（ConPTY）。
