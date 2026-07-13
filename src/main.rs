@@ -116,11 +116,11 @@ async fn main() {
 
     log::info!("Starting Vibetty with command: {:?}", args.command);
 
-    let (cli_tx, cli_rx) = tokio::sync::mpsc::channel(100);
-    let (tx, rx) = tokio::sync::broadcast::channel(100);
+    let (cli_tx, cli_rx) = tokio::sync::mpsc::channel(1024);
+    let (tx, rx) = tokio::sync::broadcast::channel(1024);
     drop(rx);
 
-    let (ui_tx, ui_rx) = tokio::sync::mpsc::channel(100);
+    let (ui_tx, ui_rx) = tokio::sync::mpsc::channel(1024);
 
     let (screenshot_tx, screenshot_rx) = tokio::sync::mpsc::channel(4);
 
