@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.0-rc.3] - 2026-07-14
+
+Screen traffic optimization + JPEG quality tiers. The screen is sent less aggressively now, and you can trade image size for quality via a new flag. (中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md).)
+
+### Added
+
+- **JPEG quality tiers (`-q, --quality`)**: screen output is always JPEG; pick `high` (q85 color, default), `medium` (q70 color), or `low` (q50 grayscale). Replaces the old `-f` image-format flag.
+- **Screen byte counter**: the MQTT outbound task now logs cumulative screen bytes (MB) on each publish, for traffic debugging.
+
+### Changed
+
+- **Less screen traffic**: the screen is no longer broadcast on every PTY output. On startup it waits for the PTY to settle (500ms quiet, 3s cap) before sending the first frame + presence; during a run, a single large PTY output (>512 bytes) triggers a 500ms debounce that coalesces bursts and sends the latest frame once quiet, while small outputs still send immediately.
+
 ## [0.4.0-rc.2] - 2026-07-13
 
 A small follow-up to rc.1: a new `skill` subcommand, an MQTT reconnect fix, and quieter logs. The docs are also overhauled. (中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md).)

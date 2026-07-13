@@ -1,5 +1,18 @@
 # 变更日志 (CHANGELOG)
 
+## [0.4.0-rc.3] - 2026-07-14
+
+屏幕流量优化 + JPEG 质量档位。现在 screen 发送更克制,并可通过新参数在体积和质量间取舍。(中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md)。)
+
+### 新增
+
+- **JPEG 质量档位(`-q, --quality`)**:出图统一为 JPEG,可选 `high`(q85 彩色,默认)、`medium`(q70 彩色)、`low`(q50 黑白)。取代旧的 `-f` 图片格式参数。
+- **screen 字节计数**:MQTT 出站任务每次 publish 时 log 累计 screen 字节数(MB),便于排查流量。
+
+### 变更
+
+- **更省流量**:screen 不再每次 PTY 输出都广播。启动时先等 PTY 静默满 500ms(上限 3s)再发第一帧 + presence;运行期单次大输出(>512 字节)触发 500ms 去抖,合并 burst、静默后发最新帧,小输出仍即时发送。
+
 ## [0.4.0-rc.2] - 2026-07-13
 
 rc.1 的小幅跟进:新增 `skill` 子命令、修复 MQTT 重连、降低日志噪声,并全面整理了文档。
