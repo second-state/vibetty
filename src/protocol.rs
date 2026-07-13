@@ -82,23 +82,19 @@ pub enum ServerMessage {
 
 // ========== 辅助类型 ==========
 
-/// 图片格式
+/// screen 出图的 JPEG 质量档位。出图始终为 JPEG;High/Medium 彩色,Low 黑白(灰度)。
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum ImageFormat {
-    Png,
-    Jpeg,
-    Gif,
+pub enum JpegQuality {
+    High,
+    Medium,
+    Low,
 }
 
-impl ImageFormat {
-    /// 对应的 HTTP MIME 类型
+impl JpegQuality {
+    /// 对应的 HTTP MIME 类型(三档都是 JPEG)
     pub fn mime_type(&self) -> &'static str {
-        match self {
-            ImageFormat::Png => "image/png",
-            ImageFormat::Jpeg => "image/jpeg",
-            ImageFormat::Gif => "image/gif",
-        }
+        "image/jpeg"
     }
 }
 

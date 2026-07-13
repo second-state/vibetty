@@ -39,7 +39,7 @@ use rumqttc::{AsyncClient, Event, LastWill, MqttOptions, Packet, QoS, Transport}
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::config::MqttConfig;
-use crate::protocol::{ClientMessage, ImageFormat, ServerMessage};
+use crate::protocol::{ClientMessage, JpegQuality, ServerMessage};
 use crate::terminal::agent::AgentState;
 use crate::ws::render_screen_to_image;
 
@@ -64,7 +64,7 @@ pub fn spawn(
     cfg: MqttConfig,
     cli_tx: mpsc::Sender<ClientMessage>,
     tx: broadcast::Sender<ServerMessage>,
-    image_format: ImageFormat,
+    image_format: JpegQuality,
 ) -> MqttHandle {
     let (cancel_tx, cancel_rx) = oneshot::channel();
     tokio::spawn(run_bridge(cfg, cli_tx, tx, image_format, cancel_rx));
@@ -230,7 +230,7 @@ async fn run_bridge(
     cfg: MqttConfig,
     cli_tx: mpsc::Sender<ClientMessage>,
     tx: broadcast::Sender<ServerMessage>,
-    image_format: ImageFormat,
+    image_format: JpegQuality,
     mut cancel: oneshot::Receiver<()>,
 ) {
     // broker 是完整 URL:mqtt(s)://[user:pass@]host[:port]。scheme 决定 TLS,

@@ -3,6 +3,7 @@ use clap::Parser;
 mod broker;
 mod config;
 mod mqtt;
+#[allow(dead_code)] // PNG 编码已不再走 render(只 JPEG);模块保留待后续清理
 mod png_encode;
 mod protocol;
 mod ws;

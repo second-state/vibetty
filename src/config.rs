@@ -87,8 +87,13 @@ pub struct Cli {
     #[arg(last = true)]
     pub command_args: Vec<String>,
 
-    /// Image format for screen rendering (png or jpeg)
-    #[arg(short = 'f', long, default_value = "jpeg", value_name = "FORMAT")]
+    /// JPEG quality for screen rendering (high, medium, low)
+    #[arg(
+        short = 'q',
+        long = "quality",
+        default_value = "high",
+        value_name = "QUALITY"
+    )]
     pub image_format: String,
 }
 
@@ -147,10 +152,11 @@ pub struct RunArgs {
 }
 
 impl RunArgs {
-    pub fn image_format(&self) -> crate::protocol::ImageFormat {
+    pub fn image_format(&self) -> crate::protocol::JpegQuality {
         match self.image_format.to_lowercase().as_str() {
-            "jpeg" | "jpg" => crate::protocol::ImageFormat::Jpeg,
-            _ => crate::protocol::ImageFormat::Png,
+            "medium" | "mid" | "m" => crate::protocol::JpegQuality::Medium,
+            "low" | "l" => crate::protocol::JpegQuality::Low,
+            _ => crate::protocol::JpegQuality::High,
         }
     }
 

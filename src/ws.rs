@@ -67,7 +67,7 @@ type ScreenshotTx = mpsc::Sender<tokio::sync::oneshot::Sender<Result<Vec<u8>, St
 #[derive(Clone)]
 pub struct AppState {
     pub screenshot_tx: ScreenshotTx,
-    pub image_format: crate::protocol::ImageFormat,
+    pub image_format: crate::protocol::JpegQuality,
 }
 
 fn send_screen(tx: &ServerTx, screen: Arc<vt100::Screen>) {
@@ -175,7 +175,7 @@ struct MqttCtx<'a> {
     client: &'a mut Option<mqtt::MqttHandle>,
     cli_tx: &'a mpsc::Sender<ClientMessage>,
     tx: &'a ServerTx,
-    image_format: crate::protocol::ImageFormat,
+    image_format: crate::protocol::JpegQuality,
 }
 
 /// 把原始按键解析成对 tui_input 的编辑请求:方向键/Home/End 导航、Backspace 删除、
@@ -215,7 +215,7 @@ fn autostart_mqtt(
     mqtt_cfg: &Option<MqttConfig>,
     cli_tx: &mpsc::Sender<ClientMessage>,
     tx: &ServerTx,
-    image_format: crate::protocol::ImageFormat,
+    image_format: crate::protocol::JpegQuality,
 ) -> (bool, Option<mqtt::MqttHandle>) {
     let Some(cfg) = mqtt_cfg else {
         return (false, None);
@@ -243,7 +243,7 @@ async fn handle_port_input(
     bytes: &[u8],
     http: &mut HttpBtnState,
     screenshot_tx: &ScreenshotTx,
-    image_format: crate::protocol::ImageFormat,
+    image_format: crate::protocol::JpegQuality,
 ) -> ModalState {
     // Enter:尝试按输入地址起 HTTP server。
     if bytes == b"\r" || bytes == b"\n" {
@@ -476,7 +476,7 @@ async fn handle_modal_input(
     http: &mut HttpBtnState,
     mqtt: &mut MqttCtx<'_>,
     screenshot_tx: &ScreenshotTx,
-    image_format: crate::protocol::ImageFormat,
+    image_format: crate::protocol::JpegQuality,
 ) -> ModalState {
     match modal {
         ModalState::PortInput { input } => {
@@ -561,7 +561,7 @@ pub async fn run_command(
     mut screenshot_rx: mpsc::Receiver<tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>>,
     tui: &mut crate::ui::TuiTerminal,
     ui_title: &mut String,
-    image_format: crate::protocol::ImageFormat,
+    image_format: crate::protocol::JpegQuality,
     auto_submit: bool,
 ) -> anyhow::Result<()> {
     // headless(无 TTY,例如纯 MQTT、无 WS 客户端)时 crossterm 返回 0×0 而非 Err,
@@ -1124,10 +1124,10 @@ pub async fn run_command(
     Ok(())
 }
 
-/// Render a vt100 screen to image bytes (JPEG or PNG)
+/// Render a vt100 screen to JPEG bytes(质量档位由 `format` 决定:High/Medium 彩色,Low 黑白)
 pub(crate) fn render_screen_to_image(
     screen: &vt100::Screen,
-    format: crate::protocol::ImageFormat,
+    format: crate::protocol::JpegQuality,
     target_size: Option<(u16, u16)>, // 把图片精确补/裁到该 (width,height),不足补背景色(主要用于 MQTT 出站)
 ) -> anyhow::Result<Vec<u8>> {
     let config = crate::screenshot::ScreenshotConfig {
@@ -1152,29 +1152,35 @@ pub(crate) fn render_screen_to_image(
         }
     }
 
-    // Encode based on format
+    // 按质量档位编码 JPEG:High=q85 彩色(默认),Medium=q70 彩色,Low=q50 黑白(灰度)。
     let mut buf = std::io::Cursor::new(Vec::new());
-    match format {
-        crate::protocol::ImageFormat::Png => {
-            let bytes = crate::png_encode::encode_paletted_png(&dyn_image)
-                .map_err(|e| anyhow::anyhow!("Failed to encode PNG: {}", e))?;
-            buf.get_mut().extend_from_slice(&bytes);
-        }
-        crate::protocol::ImageFormat::Jpeg => {
-            // Convert to RGB for JPEG
-            let rgb_image = dyn_image.to_rgb8();
-            let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 85);
+    let (quality, grayscale) = match format {
+        crate::protocol::JpegQuality::High => (85u8, false),
+        crate::protocol::JpegQuality::Medium => (70, false),
+        crate::protocol::JpegQuality::Low => (50, true),
+    };
+    {
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, quality);
+        if grayscale {
+            let luma = dyn_image.to_luma8();
             encoder
                 .encode(
-                    rgb_image.as_raw(),
-                    rgb_image.width(),
-                    rgb_image.height(),
+                    luma.as_raw(),
+                    luma.width(),
+                    luma.height(),
+                    image::ExtendedColorType::L8,
+                )
+                .map_err(|e| anyhow::anyhow!("Failed to encode JPEG: {}", e))?;
+        } else {
+            let rgb = dyn_image.to_rgb8();
+            encoder
+                .encode(
+                    rgb.as_raw(),
+                    rgb.width(),
+                    rgb.height(),
                     image::ExtendedColorType::Rgb8,
                 )
                 .map_err(|e| anyhow::anyhow!("Failed to encode JPEG: {}", e))?;
-        }
-        _ => {
-            return Err(anyhow::anyhow!("Unsupported image format: {:?}", format));
         }
     }
 
