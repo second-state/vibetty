@@ -221,6 +221,7 @@ vibetty skill uninstall  --claude [--codex] Remove the run-vibetty skill
 | `--config <PATH>` | Override the config file path. | `~/.vibetty/config.toml` |
 | `-b, --bind-addr <ADDR>` | HTTP listen address (used as the dialog default when starting HTTP). | `0.0.0.0:3000` |
 | `-a, --auto-submit` | Append Enter to `input_text` and execute it (also sets scrollback to 3, exposing a bit of history); turn off to only type the text with scrollback=0 (latest). | `true` |
+| `-q, --quality <QUALITY>` | JPEG quality for screen screenshots: `high` (q85 color), `medium` (q70 color), `low` (q50 grayscale). | `high` |
 
 ### Screenshot rendering parameters (fixed)
 
@@ -229,7 +230,7 @@ The terminal screen is rendered to an image with these parameters (the `SCREEN_*
 - Character cell: **8 × 18 pixels** (width × height).
 - Padding: **16 pixels** on each side.
 - Total image size = `cols × 8 + 32` (width) × `rows × 18 + 32` (height).
-- Encoded as JPEG (default quality 85).
+- Encoded as JPEG; quality tier is set by `-q, --quality` (see Run-mode options above): `high` = q85 color (default), `medium` = q70 color, `low` = q50 grayscale.
 
 ---
 

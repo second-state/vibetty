@@ -221,6 +221,7 @@ vibetty skill uninstall  --claude [--codex] 移除 run-vibetty skill
 | `--config <PATH>` | 覆盖配置文件路径。 | `~/.vibetty/config.toml` |
 | `-b, --bind-addr <ADDR>` | HTTP 监听地址（启动 HTTP 时作为对话框预填默认值）。 | `0.0.0.0:3000` |
 | `-a, --auto-submit` | 收到 `input_text` 时自动追加回车并执行（同时把 scrollback 设为 3，露出一点历史）；关掉则只输入文本、scrollback=0（最新）。 | `true` |
+| `-q, --quality <档位>` | 截图 JPEG 质量：`high`（q85 彩色）、`medium`（q70 彩色）、`low`（q50 黑白）。 | `high` |
 
 ### 截图渲染参数（固定）
 
@@ -229,7 +230,7 @@ vibetty skill uninstall  --claude [--codex] 移除 run-vibetty skill
 - 字符单元：**8 × 18 像素**（宽 × 高）。
 - 四周留白：**各 16 像素**。
 - 整图尺寸 = `cols × 8 + 32`（宽）× `rows × 18 + 32`（高）。
-- 编码为 JPEG（默认质量 85）。
+- 编码为 JPEG；质量档位由 `-q, --quality` 决定（见上方「运行模式选项」）：`high` = q85 彩色（默认）、`medium` = q70 彩色、`low` = q50 黑白。
 
 ---
 

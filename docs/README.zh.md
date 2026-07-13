@@ -94,12 +94,13 @@ vibetty skill uninstall  --claude [--codex] 移除 run-vibetty skill
 | `--config <PATH>` | 覆盖配置文件路径 | `~/.vibetty/config.toml` |
 | `-b, --bind-addr <ADDR>` | HTTP 监听地址（作为对话框预填默认值） | `0.0.0.0:3000` |
 | `-a, --auto-submit` | 收到 `input_text` 时自动追加回车并执行 | `true` |
+| `-q, --quality <档位>` | 截图 JPEG 质量：`high`（q85 彩色）、`medium`（q70 彩色）、`low`（q50 黑白） | `high` |
 
 ## HTTP 端点（按需启动）
 
 HTTP 服务**默认关闭**，在 TUI 里点 `HTTP` 按钮启动。
 
-- `GET /screenshot` —— 当前终端画面图片（格式由 `-f` 决定）。
+- `GET /screenshot` —— 当前终端画面图片（JPEG；质量由 `-q, --quality` 决定）。
 - `GET /mqtt_ws` —— 浏览器 MQTT-over-WebSocket 查看页：连内置 broker 的 WS 端口、发现实例、显示画面、可发输入。没有硬件时用它测很方便。
 
 ## 文档

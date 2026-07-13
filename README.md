@@ -94,12 +94,13 @@ Run-mode options:
 | `--config <PATH>` | Override the config file path | `~/.vibetty/config.toml` |
 | `-b, --bind-addr <ADDR>` | HTTP listen address (used as the dialog default) | `0.0.0.0:3000` |
 | `-a, --auto-submit` | Append Enter to `input_text` so a sent command is executed | `true` |
+| `-q, --quality <QUALITY>` | JPEG quality for screen screenshots: `high` (q85 color), `medium` (q70 color), `low` (q50 grayscale) | `high` |
 
 ## HTTP endpoints (started on demand)
 
 The HTTP server is **off by default**; toggle it with the `HTTP` button in the TUI.
 
-- `GET /screenshot` — the current terminal screen as a JPEG image.
+- `GET /screenshot` — the current terminal screen as a JPEG image (quality set by `-q, --quality`).
 - `GET /mqtt_ws` — a browser MQTT-over-WebSocket viewer. It connects to the built-in broker's WS port, discovers instances, shows the screen, and can send input. Handy for testing without hardware.
 
 ## Documentation
