@@ -1,5 +1,27 @@
 # 变更日志 (CHANGELOG)
 
+## [0.4.0-rc.2] - 2026-07-13
+
+rc.1 的小幅跟进:新增 `skill` 子命令、修复 MQTT 重连、降低日志噪声,并全面整理了文档。
+
+### 新增
+
+- **`vibetty skill` 子命令**:把内置的 `run-vibetty` SKILL.md 安装进 / 移出 Claude Code 和 / 或 Codex 的用户级 skills 目录。版本感知(同版本跳过、版本不同则升级),uninstall 安全(绝不用 `remove_dir_all`,仅在目录随后为空时才删除)。
+- **中英双语详细使用文档**:新增 `docs/USAGE.md`(英文)与 `docs/USAGE.zh.md`(中文),覆盖安装、配置、TUI、HTTP 端点、完整 MQTT 协议,以及 ESP32 / MCU 对接指南。
+
+### 修复
+
+- **MQTT 重连**:每次 ConnAck 都重新订阅入站 topic(`pty_in` / `control`),并在重连后补发 presence。此前重连可能出现「已连接却收不到消息」,且 presence 要等下一次 15s 心跳才恢复。
+- **移除无用的 `PtyOutput` 广播路径**:浏览器前端已删,`PtyOutput` 无人消费,清掉了这条残留广播。
+
+### 变更
+
+- **日志更安静**:把高频的 WebSocket 事件日志从 `info` 降为 `debug`。
+- **加大内部 channel**:broadcast / mpsc channel 容量 100 → 1024,避免负载高时丢消息。
+- **文档整理**:按当前功能重写 README(删掉已移除的 ASR / 语音内容);删除独立的 `docs/esp32-mqtt-integration.md`(其协议内容已并入使用文档)。
+
+---
+
 ## [0.4.0-rc.1] - 2026-07-13
 
 首个引入 MQTT 通信方案的预发布版本。在保留 WebSocket(`/ws`)通道的同时,新增一条可选的 MQTT 通道,便于 ESP32/MCU 等不便运行 WebSocket 的设备接入;两者并存,复用同一个 PTY 会话。仅在配置文件含 `[mqtt]` 段时启用,否则行为与旧版一致。

@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.4.0-rc.2] - 2026-07-13
+
+A small follow-up to rc.1: a new `skill` subcommand, an MQTT reconnect fix, and quieter logs. The docs are also overhauled. (中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md).)
+
+### Added
+
+- **`vibetty skill` subcommand**: install / uninstall the bundled `run-vibetty` SKILL.md into the Claude Code and/or Codex user-level skills directories. Version-aware (skips when the same version is already installed, upgrades on mismatch) and uninstall-safe (never `remove_dir_all`; only deletes the directory if it becomes empty).
+- **Bilingual usage guide**: a detailed `docs/USAGE.md` (English) and `docs/USAGE.zh.md` (中文), covering installation, configuration, the TUI, HTTP endpoints, the full MQTT protocol, and an ESP32 / MCU integration guide.
+
+### Fixed
+
+- **MQTT reconnect**: inbound topics (`pty_in` / `control`) are now re-subscribed on every ConnAck, and presence is re-published on reconnect. Previously a reconnect could leave the instance "connected but receiving nothing" until the next 15s heartbeat, and its presence stayed cleared until then.
+- **Dropped the dead `PtyOutput` broadcast path**: with the browser front-end removed, `PtyOutput` had no consumer, so the leftover broadcast was removed.
+
+### Changed
+
+- **Quieter logs**: high-frequency WebSocket event logs were demoted from `info` to `debug`.
+- **Larger internal channels**: broadcast / mpsc channel capacities were raised 100 → 1024 to avoid drops under load.
+- **Docs overhaul**: rewrote the README for the current feature set (dropped the removed ASR / voice content); removed the standalone `docs/esp32-mqtt-integration.md` (its protocol content now lives in the usage guide).
+
+---
+
 ## [0.4.0-rc.1] - 2026-07-13
 
 The first release to introduce the MQTT transport. Alongside the existing WebSocket (`/ws`) channel, an optional MQTT channel is added so that devices that cannot easily run a WebSocket client (e.g. ESP32 / MCUs) can connect. Both channels coexist and are driven by the same PTY session. MQTT is only enabled when the config file contains a `[mqtt]` section; otherwise behavior is unchanged. (中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md).)
