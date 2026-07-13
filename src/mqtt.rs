@@ -289,6 +289,8 @@ async fn run_bridge(
     let mut sync_height: u16 = 0;
     // 最近一次 presence 的 title/state;重连后用它补发上线公告(见 ConnAck 分支)。
     let mut last_presence: Option<(String, AgentState)> = None;
+    // 累计发送的 screen image 字节数;每次 publish 时 log debug(单位 MB, f64)。
+    let mut total_screen_bytes: u64 = 0;
     let mut rx = tx.subscribe();
 
     // 出站(rx 收 Screen → 渲染补齐 → publish;Presence → publish)+ 入站(poll eventloop
@@ -371,9 +373,11 @@ async fn run_bridge(
                             // (0=底部/最新)。offset 直接从 Screen 读——它自带 scrollback_offset 字段。
                             let offset = screen.as_ref().scrollback() as u32;
                             img.extend_from_slice(&offset.to_be_bytes());
+                            total_screen_bytes += img.len() as u64;
                             log::debug!(
-                                "[mqtt] screen image {} bytes (trailer offset={offset}) -> {screen_topic}",
-                                img.len()
+                                "[mqtt] screen image {} bytes (trailer offset={offset}, total {:.2} MB) -> {screen_topic}",
+                                img.len(),
+                                total_screen_bytes as f64 / (1024.0 * 1024.0)
                             );
                             if let Err(e) = client
                                 .publish(&screen_topic, QoS::AtMostOnce, true, img)

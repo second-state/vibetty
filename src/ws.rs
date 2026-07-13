@@ -17,8 +17,6 @@ use crate::ui::{
     quit_button_rect,
 };
 
-/// Image broadcast frame interval
-const IMAGE_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 /// 终端截图里单个字符单元格的像素宽。`vibetty-screenshot` 在 font_size=14.0 +
 /// 内嵌字体 Sarasa Mono SC Light(swash 后端)下由 `get_char_metrics(14.0)` 实测得到。
 /// 客户端 Sync 发的是【像素】,要除以它换算成 PTY 列数。
@@ -597,8 +595,6 @@ pub async fn run_command(
     let mut vt_parser =
         vt100::Parser::new_with_callbacks(vt_rows, vt_cols, 8096, WindowCallbacks::new());
 
-    let mut last_frame_time = std::time::Instant::now() - IMAGE_FRAME_INTERVAL;
-
     // 「一页」的行数:由最近一次 sync 的像素高度推算(能塞下的行数 − 1)。滚动 rows=0 时用它。
     // 还没 sync 过就用初始终端行数兜底。
     let mut page_rows: u16 = vt_rows;
@@ -641,7 +637,88 @@ pub async fn run_command(
     let mut presence_interval =
         tokio::time::interval(std::time::Duration::from_secs(mqtt::PRESENCE_INTERVAL_SECS));
 
+    // ── 启动初始化去抖 ──────────────────────────────────────────────
+    // agent 刚启动时 PTY 狂输出(初始化 UI、motd、prompt 绘制…),而初始 title 往往让
+    // agent 被判 Waiting(见 agent.rs),主 loop 的 is_waiting 旁路会让每次输出都广播
+    // 一整张 screen JPEG → MQTT 流量爆发。这里在进主 loop 前先等 PTY 输出静默满
+    // INIT_SETTLE(500ms),稳定后只发一帧 screen + 一次 presence(上线);之后再进主
+    // loop,实时性不变(waiting 仍即时发、working 5s 一帧)。静默迟迟达不到时最多等
+    // INIT_MAX_WAIT,避免 agent 一启动就长跑导致 ESP32 长时间黑屏。期间键盘/鼠标、
+    // MQTT control/sync、HTTP screenshot 等事件都在各自 channel 里排队,进主 loop 后处理。
+    const INIT_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
+    const INIT_MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+    let init_started = tokio::time::Instant::now();
+    let mut last_pty_at = tokio::time::Instant::now();
+    'init: loop {
+        let settle_deadline = last_pty_at + INIT_SETTLE;
+        let max_deadline = init_started + INIT_MAX_WAIT;
+        tokio::select! {
+            result = terminal.read_pty_output() => match result {
+                Ok(output) if !output.is_empty() => {
+                    vt_parser.process(output.as_bytes());
+                    // title / agent 状态更新,与主 loop PtyOutput 分支一致。
+                    {
+                        let cb = vt_parser.callbacks_mut();
+                        if cb.update_title {
+                            cb.update_title = false;
+                            let new_title = cb.title.clone();
+                            agent_type.update_by_title(&new_title);
+                            *ui_title = new_title;
+                        }
+                    }
+                    last_pty_at = tokio::time::Instant::now();
+                    // 本地 TUI redraw(让本地用户看到启动过程);**不**广播 screen/presence,
+                    // MQTT 在此期间保持安静。
+                    let screen = Arc::new(vt_parser.screen().clone());
+                    redraw(
+                        &screen,
+                        ui_title,
+                        &http,
+                        mqtt_broker_on,
+                        mqtt_client.is_some(),
+                        &modal,
+                        hover,
+                    );
+                }
+                Ok(_) => break 'init, // 空 = PTY EOF(子进程秒退),交给主 loop 处理退出。
+                Err(e) => {
+                    log::error!(
+                        "[{}] init PTY read error: {:?}",
+                        terminal.session_id(),
+                        e
+                    );
+                    break 'init;
+                }
+            },
+            _ = tokio::time::sleep_until(settle_deadline) => break 'init, // 静默满 500ms → settled
+            _ = tokio::time::sleep_until(max_deadline) => break 'init,     // 上限保护
+        }
+    }
+    // 初始化完成(或达上限):发第一帧 screen + 上线 presence,然后进入主 loop。
+    let screen = Arc::new(vt_parser.screen().clone());
+    send_screen(&tx, screen);
+    let _ = tx.send(ServerMessage::Presence {
+        title: ui_title.clone(),
+        state: agent_type.state(),
+    });
+    log::info!(
+        "[{}] init settled after {}ms, sent first screen + presence",
+        terminal.session_id(),
+        init_started.elapsed().as_millis()
+    );
+
+    // screen 发送去抖:单次 PTY 输出字节超 SCREEN_DEBOUNCE_BYTES 时激活 500ms 等待(期间
+    // 有新输出就重置,合并 burst),停顿满 500ms 才发最新帧;小输出立即发(实时)。ESP32
+    // 保留最后一帧不会黑屏,持续输出期间静默(等停顿)即可,无需强制发送。
+    const SCREEN_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
+    const SCREEN_DEBOUNCE_BYTES: usize = 512;
+    let mut pending_screen: Option<Arc<vt100::Screen>> = None;
+    let mut send_deadline: Option<tokio::time::Instant> = None;
+
     loop {
+        // 每轮 copy 最新 send_deadline(Option<Instant> 是 Copy),让下面去抖 async 分支按最新
+        // deadline 等待;None 时该分支永不就绪。
+        let deadline_copy = send_deadline;
         let event = tokio::select! {
             result = terminal.read_pty_output() => match result {
                 Ok(r) => TerminalEvent::PtyOutput(r),
@@ -676,6 +753,19 @@ pub async fn run_command(
                 });
                 continue;
             },
+            // screen 去抖到期:发送最新 pending screen,清空去抖状态。
+            _ = async {
+                match deadline_copy {
+                    Some(d) => tokio::time::sleep_until(d).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                if let Some(screen) = pending_screen.take() {
+                    send_screen(&tx, screen);
+                }
+                send_deadline = None;
+                continue;
+            },
         };
 
         match event {
@@ -705,6 +795,11 @@ pub async fn run_command(
                     vt_parser.screen().hide_cursor()
                 );
                 log::trace!("[{}] PTY output: {output:?}", terminal.session_id());
+                log::debug!(
+                    "[{}] PTY output len: {} bytes",
+                    terminal.session_id(),
+                    output.len()
+                );
                 vt_parser.process(output.as_bytes());
 
                 // Check for title update from callbacks
@@ -754,14 +849,19 @@ pub async fn run_command(
                 // 发会撑爆容量、触发 Lagged(尤其重连期间 mqtt 不消费),纯属浪费。恢复 pty_out
                 // 时再发回这里。screen 推送见下方 send_screen(rate limited)。
 
-                // Generate JPEG and broadcast chunks for img subscribers (rate limited)
-                let now = std::time::Instant::now();
-                if (now.duration_since(last_frame_time) >= IMAGE_FRAME_INTERVAL
-                    && screen.scrollback() == 0)
-                    || agent_type.state().is_waiting()
-                {
-                    last_frame_time = now;
-                    send_screen(&tx, screen);
+                // screen 发送(条件去抖):大输出(output 字节超 SCREEN_DEBOUNCE_BYTES)或已在
+                // 去抖中 → 入队 pending 并(重)设 500ms 去抖计时器(合并 burst,停顿满发最新);
+                // 小输出且不在去抖中 → 立即发(实时)。在看历史(scrollback!=0)且非 waiting 时
+                // 整体不发,免得打扰。
+                if screen.scrollback() == 0 || agent_type.state().is_waiting() {
+                    if pending_screen.is_some() || output.len() > SCREEN_DEBOUNCE_BYTES {
+                        // 大输出激活去抖,或已在去抖中:入队 pending 并(重)设 500ms 计时器。
+                        pending_screen = Some(screen.clone());
+                        send_deadline = Some(tokio::time::Instant::now() + SCREEN_DEBOUNCE);
+                    } else {
+                        // 小输出 + 不在去抖中:立即发,保持实时。
+                        send_screen(&tx, screen);
+                    }
                 }
             }
 
