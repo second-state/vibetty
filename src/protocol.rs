@@ -63,8 +63,10 @@ impl Debug for ClientMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ServerMessage {
-    /// PTY 输出（终端输出显示）
+    /// PTY 输出（终端输出显示）。当前停发 broadcast(mqtt 停发 pty_out、WS 前端已删,
+    /// 无人消费),保留变体供将来恢复。`#[allow(dead_code)]` 抑制「无人构造」警告。
     #[serde(rename = "pty_out")]
+    #[allow(dead_code)]
     PtyOutput(Vec<u8>),
 
     /// 整张终端屏幕(MQTT 出站据此渲染成图片;不走 serde 序列化)

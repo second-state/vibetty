@@ -716,7 +716,7 @@ pub async fn run_command(
                         let new_title = cb.title.clone();
                         let state_changed = agent_type.update_by_title(&new_title);
                         *ui_title = new_title;
-                        log::info!(
+                        log::debug!(
                             "[{}] Window title updated: {}",
                             terminal.session_id(),
                             ui_title
@@ -749,13 +749,10 @@ pub async fn run_command(
                     &modal,
                     hover,
                 );
-                if tx
-                    .send(ServerMessage::PtyOutput(output.into_bytes()))
-                    .is_err()
-                {
-                    log::warn!("[{}] no active PTY subscribers", terminal.session_id());
-                    continue;
-                }
+                // PtyOutput 不再发 broadcast:唯一订阅者是 mqtt,而 mqtt 停发了 pty_out
+                // (调试期只发 screen),收到的 PtyOutput 直接丢弃。高频 PtyOutput 往 broadcast
+                // 发会撑爆容量、触发 Lagged(尤其重连期间 mqtt 不消费),纯属浪费。恢复 pty_out
+                // 时再发回这里。screen 推送见下方 send_screen(rate limited)。
 
                 // Generate JPEG and broadcast chunks for img subscribers (rate limited)
                 let now = std::time::Instant::now();
@@ -770,7 +767,7 @@ pub async fn run_command(
 
             TerminalEvent::UIEvent(crate::ui::UIEvent::Input(bytes)) => {
                 if matches!(modal, ModalState::None) {
-                    log::info!("UI Input: {:?}", String::from_utf8_lossy(&bytes));
+                    log::debug!("UI Input: {:?}", String::from_utf8_lossy(&bytes));
                     terminal.send_bytes(&bytes).await?;
                 } else {
                     // 模态打开:按键路由给对话框,不进 PTY。返回新 modal 后重绘。

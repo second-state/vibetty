@@ -268,16 +268,10 @@ async fn run_bridge(
     }
 
     let (client, mut eventloop) = AsyncClient::new(opts, 50);
-
-    for (name, qos) in INBOUND_TOPICS {
-        if let Err(e) = client
-            .subscribe(format!("{prefix}/{name}"), qos_from_u8(*qos))
-            .await
-        {
-            log::error!("[mqtt] subscribe {prefix}/{name} failed: {e}");
-            return;
-        }
-    }
+    // 入站订阅不在启动时一次性发起,而是改到每次(重)连接的 CONNACK 之后发起
+    // (见下方 select! 的 ConnAck 分支)。原因:网络断开重连后,broker 侧订阅会随
+    // session 失效而丢失(clean session / broker session 过期),只在启动订阅一次
+    // 会出现「重连成功、出站正常、入站收不到」。每次连接建立都重订阅,幂等且防御。
 
     // presence(上线公告 + 心跳 + 状态)统一由 ws 主循环发 ServerMessage::Presence 触发;
     // 本线程只负责收到后 publish 到 {prefix}(retained),不再自带定时心跳。
@@ -293,6 +287,8 @@ async fn run_bridge(
     // 最近一次 sync 的客户端显示尺寸(px);出站渲染时据此把图片精确补齐到该尺寸。
     let mut sync_width: u16 = 0;
     let mut sync_height: u16 = 0;
+    // 最近一次 presence 的 title/state;重连后用它补发上线公告(见 ConnAck 分支)。
+    let mut last_presence: Option<(String, AgentState)> = None;
     let mut rx = tx.subscribe();
 
     // 出站(rx 收 Screen → 渲染补齐 → publish;Presence → publish)+ 入站(poll eventloop
@@ -325,6 +321,32 @@ async fn run_bridge(
                             break;
                         }
                     }
+                }
+                Ok(Event::Incoming(Packet::ConnAck(_))) => {
+                    // 每次(重)连接建立后(重新)订阅入站 topic。重连后 broker 侧订阅
+                    // 可能已丢,不重订阅就会出现「能发收不到」。幂等:重复订阅 broker 去重。
+                    for (name, qos) in INBOUND_TOPICS {
+                        if let Err(e) = client
+                            .subscribe(format!("{prefix}/{name}"), qos_from_u8(*qos))
+                            .await
+                        {
+                            log::warn!("[mqtt] (re)subscribe {prefix}/{name} failed: {e}");
+                        }
+                    }
+                    // 重连后补发 presence:断连时 LWT 已清空,不补发 ESP32 要等下次心跳(15s)
+                    // 才知道实例又上线。用最新 title/state 重新生成 payload(带新 ts——不能
+                    // 复用旧 payload,旧 ts 会被 ESP32 当心跳超时)。首次连接时还没有 presence,
+                    // 跳过(等 ws 触发首次公告)。
+                    if let Some((title, state)) = last_presence.clone() {
+                        let payload = presence_payload(&prefix, &client_id, &title, state);
+                        if let Err(e) = client
+                            .publish(prefix.clone(), QoS::AtLeastOnce, true, payload)
+                            .await
+                        {
+                            log::warn!("[mqtt] presence re-publish on reconnect failed: {e}");
+                        }
+                    }
+                    log::info!("[mqtt] connected, (re)subscribed inbound topics under {prefix}/");
                 }
                 Ok(_) => {}
                 Err(e) => {
@@ -366,6 +388,8 @@ async fn run_bridge(
                 }
                 Ok(ServerMessage::Presence { title, state }) => {
                     // ws 主循环定期(心跳)+ 状态翻转时发来 → publish presence(retained)。
+                    // 缓存 title/state,供重连后补发(见 ConnAck 分支)。
+                    last_presence = Some((title.clone(), state));
                     let payload = presence_payload(&prefix, &client_id, &title, state);
                     if let Err(e) = client
                         .publish(prefix.clone(), QoS::AtLeastOnce, true, payload)
