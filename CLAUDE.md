@@ -10,6 +10,26 @@ axum 0.8 WebSocket 终端服务器。把一个 PTY 会话同时当成「浏览�
 
 ---
 
+## skill 子命令(`vibetty skill install/uninstall`)
+
+把内置的 `run-vibetty` SKILL.md 装进 / 移出 agent 的**用户级** skills 目录——方便别人 `cargo install vibetty` 后一条命令装好,不用手动复制 skill 文件夹。skill 内容是教用户「后台 tmux 起 vibetty 会话、经 MQTT 把终端画面分享给 ESP32」。
+
+```
+vibetty skill install --claude          # → ~/.claude/skills/run-vibetty/
+vibetty skill install --codex           # → ~/.agents/skills/run-vibetty/(Codex USER scope)
+vibetty skill install --claude --codex  # 两个都装
+vibetty skill uninstall --claude        # 移除(目录随后为空才删目录)
+```
+
+- `--claude` / `--codex` 是 bool flag,可同时给;都不给 → `anyhow::bail!` 报错退出。
+- 两边 SKILL.md 格式一致(name + description frontmatter + 渐进披露),仓库只内嵌**一份** `resources/skills/run-vibetty/SKILL.md`,用 `include_str!` 编译进二进制(`src/skill.rs`),按 flag 写到对应目录。
+- **版本感知**:install 前比 `env!("CARGO_PKG_VERSION")` 与目标目录下伴生文件 `.vibetty-version`(**不污染 SKILL.md frontmatter**)。同版本 → 跳过不重写;版本不同 / 无记录 → 覆盖升级。版本号唯一真相源是 `Cargo.toml`,发版自动跟随,不用手改 SKILL.md。
+- **uninstall 安全**:删 `SKILL.md` + `.vibetty-version`,只在目录随后变空时才 `remove_dir`(**绝不**用 `remove_dir_all`,避免误删 `~/.claude/skills/` 或 `~/.agents/skills/`)。
+- Codex 路径是 `~/.agents/skills/`(不是 `~/.codex/`):见 developers.openai.com/codex/skills 的 USER scope;旧 `~/.codex/prompts/` 已废弃。
+- 代码:`src/config.rs` 的 `Commands::Skill { action: SkillAction }`(嵌套子命令 `Install` / `Uninstall`,各自带 `claude` / `codex` bool)、`src/skill.rs`(`run_skill` + `Agent` + `install_one` / `uninstall_one`)、`main.rs` 的 dispatch arm 镜像 `Setup`。`run_skill` 不接 `cli.config`(skill 与 MQTT 配置无关)。
+
+---
+
 ## 终端截图:调色板 PNG(已上线 main,`dd4331b`)
 
 `ws.rs:968` 的 PNG 分支已从「image crate 默认编码」换成 `png_encode::encode_paletted_png`,终端截图体积 ~82.5K → ~22K(PSNR ~49dB)。JPEG 质量从 100 调到 85(`ws.rs:982`)。

@@ -16,6 +16,7 @@ pub use vibetty_screenshot as screenshot;
 use config::{Cli, Commands};
 
 mod setup;
+mod skill;
 mod static_page;
 
 /// 空操作 tracing subscriber:吞掉所有 tracing 事件。用于屏蔽 rumqttd 的 tracing 日志
@@ -91,6 +92,13 @@ async fn main() {
         Some(Commands::Setup) => {
             if let Err(e) = setup::run_setup(cli.config.clone()) {
                 eprintln!("Setup error: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        Some(Commands::Skill { action }) => {
+            if let Err(e) = skill::run_skill(action) {
+                eprintln!("Skill error: {e}");
                 std::process::exit(1);
             }
             return;

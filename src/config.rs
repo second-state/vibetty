@@ -96,6 +96,33 @@ pub struct Cli {
 pub enum Commands {
     /// Configure MQTT transport via TUI (writes ~/.vibetty/config.toml)
     Setup,
+    /// Install/uninstall the built-in run-vibetty SKILL.md into an agent's user-level skills dir
+    Skill {
+        #[command(subcommand)]
+        action: SkillAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SkillAction {
+    /// Write the bundled SKILL.md into ~/.claude/skills/run-vibetty/ and/or ~/.agents/skills/run-vibetty/
+    Install {
+        /// Target Claude Code (writes ~/.claude/skills/run-vibetty/SKILL.md)
+        #[arg(long)]
+        claude: bool,
+        /// Target Codex USER scope (writes ~/.agents/skills/run-vibetty/SKILL.md)
+        #[arg(long)]
+        codex: bool,
+    },
+    /// Remove the SKILL.md (and the dir if it becomes empty) from the agent's skills dir
+    Uninstall {
+        /// Target Claude Code
+        #[arg(long)]
+        claude: bool,
+        /// Target Codex
+        #[arg(long)]
+        codex: bool,
+    },
 }
 
 impl Cli {
