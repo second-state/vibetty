@@ -633,7 +633,9 @@ fn bytes_from_key(key: KeyEvent) -> Option<Vec<u8>> {
             }
         }
         KeyCode::BackTab => bytes.extend_from_slice(b"\x1b[Z"),
-        KeyCode::Backspace => bytes.push(0x08),
+        // Backspace 发 DEL(0x7f),不是 BS(0x08):现代终端/应用(readline、line editor、
+        // helix/zerostack 等)都把 Backspace 认作 0x7f;发 0x08 会被当成 Ctrl+H。
+        KeyCode::Backspace => bytes.push(0x7f),
         KeyCode::Esc => bytes.push(0x1b),
         KeyCode::Up => bytes.extend_from_slice(b"\x1b[A"),
         KeyCode::Down => bytes.extend_from_slice(b"\x1b[B"),
