@@ -707,11 +707,10 @@ pub async fn run_command(
         init_started.elapsed().as_millis()
     );
 
-    // screen 发送去抖:单次 PTY 输出字节超 SCREEN_DEBOUNCE_BYTES 时激活 500ms 等待(期间
-    // 有新输出就重置,合并 burst),停顿满 500ms 才发最新帧;小输出立即发(实时)。ESP32
-    // 保留最后一帧不会黑屏,持续输出期间静默(等停顿)即可,无需强制发送。
-    const SCREEN_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
-    const SCREEN_DEBOUNCE_BYTES: usize = 512;
+    // screen 发送去抖(无条件尾部去抖):每次 PTY 输出都激活 SCREEN_DEBOUNCE(100ms)计时器,
+    // 期间有新输出就刷新(重设)计时器,停顿满 100ms 才发最新帧。把一次 burst 合并成一张图,
+    // 省流量。ESP32 保留最后一帧不会黑屏,持续输出期间静默(等停顿)即可。
+    const SCREEN_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(100);
     let mut pending_screen: Option<Arc<vt100::Screen>> = None;
     let mut send_deadline: Option<tokio::time::Instant> = None;
 
@@ -849,19 +848,12 @@ pub async fn run_command(
                 // 发会撑爆容量、触发 Lagged(尤其重连期间 mqtt 不消费),纯属浪费。恢复 pty_out
                 // 时再发回这里。screen 推送见下方 send_screen(rate limited)。
 
-                // screen 发送(条件去抖):大输出(output 字节超 SCREEN_DEBOUNCE_BYTES)或已在
-                // 去抖中 → 入队 pending 并(重)设 500ms 去抖计时器(合并 burst,停顿满发最新);
-                // 小输出且不在去抖中 → 立即发(实时)。在看历史(scrollback!=0)且非 waiting 时
-                // 整体不发,免得打扰。
+                // screen 发送去抖:每次输出都入队 pending 并(重)设 100ms 计时器(有新输出就
+                // 刷新,停顿满发最新帧)。在看历史(scrollback!=0)且非 waiting 时整体不发,
+                // 免得打扰。
                 if screen.scrollback() == 0 || agent_type.state().is_waiting() {
-                    if pending_screen.is_some() || output.len() > SCREEN_DEBOUNCE_BYTES {
-                        // 大输出激活去抖,或已在去抖中:入队 pending 并(重)设 500ms 计时器。
-                        pending_screen = Some(screen.clone());
-                        send_deadline = Some(tokio::time::Instant::now() + SCREEN_DEBOUNCE);
-                    } else {
-                        // 小输出 + 不在去抖中:立即发,保持实时。
-                        send_screen(&tx, screen);
-                    }
+                    pending_screen = Some(screen.clone());
+                    send_deadline = Some(tokio::time::Instant::now() + SCREEN_DEBOUNCE);
                 }
             }
 
