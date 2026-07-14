@@ -141,10 +141,11 @@ fn scroll_delta(rows: u16, page_rows: u16) -> usize {
     }
 }
 
-/// 由客户端 sync 发的像素高度算「一页」的行数:能塞下的行数 − 1(滚动时留一行可见)。
+/// 由客户端 sync 发的像素高度算「一页」的行数:能塞下的行数 − 2(滚动时留两行可见,
+/// 上下滚都用这个 delta,故两方向都留两行重叠)。
 fn page_rows_from_height(height: u16) -> u16 {
     let fits = (height as u32).saturating_sub(2 * SCREEN_PADDING) / SCREEN_CHAR_HEIGHT;
-    fits.saturating_sub(1).max(1) as u16
+    fits.saturating_sub(2).max(1) as u16
 }
 
 /// 主事件循环统一的事件来源(PTY 输出 / 客户端消息 / TUI UI 事件 / 截图请求)。
