@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.0-rc.4] - 2026-07-15
+
+Codex status detection + simpler screen debounce + scroll context. (中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md).)
+
+### Added
+
+- **Better Codex status detection**: Codex's working/waiting state is now read from the braille spinner in the terminal title (⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏) — spinner present means *working* — so the presence state flips more reliably than the previous title-prefix matching.
+
+### Changed
+
+- **Simpler screen debounce**: every PTY output now starts (or refreshes) a 100ms timer and sends the latest frame once output has been quiet for 100ms, coalescing a burst into a single screen. This replaces the rc.3 conditional debounce (which only debounced outputs over 512 bytes; small outputs were sent immediately).
+- **Scroll keeps 2 rows**: paging up or down now keeps 2 rows of overlap with the previous view (was 1) for more context.
+
 ## [0.4.0-rc.3] - 2026-07-14
 
 Screen traffic optimization + JPEG quality tiers. The screen is sent less aggressively now, and you can trade image size for quality via a new flag. (中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md).)

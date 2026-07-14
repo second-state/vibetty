@@ -1,5 +1,18 @@
 # 变更日志 (CHANGELOG)
 
+## [0.4.0-rc.4] - 2026-07-15
+
+Codex 状态检测 + 更简洁的 screen 防抖 + 滚动上下文。(中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md)。)
+
+### 新增
+
+- **更准的 Codex 状态检测**:Codex 的 working/waiting 状态现在从终端 title 里的盲文 spinner(⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏)读取——有 spinner 即 *working*——比之前按 title 前缀匹配更可靠地翻转状态。
+
+### 变更
+
+- **更简洁的 screen 防抖**:每次 PTY 输出都启动(或刷新)一个 100ms 计时器,输出静默满 100ms 后才发最新帧,把一次 burst 合并成一张图。取代 rc.3 的条件去抖(仅对 >512 字节的输出去抖;小输出仍即时发送)。
+- **滚动留 2 行**:上下翻页现在保留 2 行与上一屏的重叠(原为 1 行),提供更多上下文。
+
 ## [0.4.0-rc.3] - 2026-07-14
 
 屏幕流量优化 + JPEG 质量档位。现在 screen 发送更克制,并可通过新参数在体积和质量间取舍。(中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md)。)
