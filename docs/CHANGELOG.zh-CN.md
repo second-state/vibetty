@@ -1,5 +1,14 @@
 # 变更日志 (CHANGELOG)
 
+## [0.4.0-rc.5] - 2026-07-15
+
+全屏编辑器(helix / vim / zerostack / …)的键盘输入修复。(中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md)。)
+
+### 修复
+
+- **Backspace 被当成 Ctrl+H**:Backspace 键之前编码成 `0x08`(BS = Ctrl+H)而非 `0x7f`(DEL),导致按 Backspace 删字符的编辑器收到的是 Ctrl+H。现在发 DEL。
+- **导航键的修饰键被丢弃**:方向键/Home/End/PgUp/PgDn/Delete/Insert 配合 Shift/Ctrl/Alt 时,修饰键被忽略、只发裸序列,导致编辑器快捷键(Shift+方向选中、Ctrl+←/→ 按词跳、Ctrl+Delete 等)失效。现在按 xterm「Modified Keys」规范编码修饰键(如 Ctrl+→ → `\x1b[1;5C`、Shift+↑ → `\x1b[1;2A`、Ctrl+Delete → `\x1b[3;5~`)。裸键(无修饰)行为不变。
+
 ## [0.4.0-rc.4] - 2026-07-15
 
 Codex 状态检测 + 更简洁的 screen 防抖 + 滚动上下文。(中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md)。)

@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.4.0-rc.5] - 2026-07-15
+
+Keyboard input fixes for full-screen editors (helix / vim / zerostack / …). (中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md).)
+
+### Fixed
+
+- **Backspace sent Ctrl+H**: the Backspace key was encoded as `0x08` (BS = Ctrl+H) instead of `0x7f` (DEL), so editors that key off Backspace received Ctrl+H instead. Now sends DEL.
+- **Navigation-key modifiers were dropped**: Shift/Ctrl/Alt held together with arrows, Home, End, PgUp, PgDn, Delete, or Insert were ignored and a plain sequence was sent, so editor shortcuts (Shift+Arrow to select, Ctrl+Left/Right to jump by word, Ctrl+Delete, …) did not work. Modifiers are now encoded per the xterm "Modified Keys" spec (e.g. Ctrl+Right → `\x1b[1;5C`, Shift+Up → `\x1b[1;2A`, Ctrl+Delete → `\x1b[3;5~`). Plain (unmodified) keys are unchanged.
+
 ## [0.4.0-rc.4] - 2026-07-15
 
 Codex status detection + simpler screen debounce + scroll context. (中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md).)
