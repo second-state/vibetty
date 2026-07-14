@@ -608,6 +608,43 @@ fn event_loop_thread(tx_to_pty: UITx) -> anyhow::Result<()> {
     }
 }
 
+/// 把修饰键编成 xterm 的 modifier code(2..=8),无修饰键返回 None。
+/// N = 1 + (shift?1:0) + (alt?2:0) + (ctrl?4:0):Shift=2、Alt=3、Alt+Shift=4、
+/// Ctrl=5、Ctrl+Shift=6、Ctrl+Alt=7、Ctrl+Alt+Shift=8。
+fn modifier_code(mods: KeyModifiers) -> Option<u8> {
+    let shift = mods.contains(KeyModifiers::SHIFT);
+    let alt = mods.contains(KeyModifiers::ALT);
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    if !(shift || alt || ctrl) {
+        return None;
+    }
+    Some(1 + shift as u8 + 2 * alt as u8 + 4 * ctrl as u8)
+}
+
+/// 拼一个(可能带修饰键的)CSI 导航/功能键序列。`param=None` 表示字母末尾键
+/// (方向键/Home/End):裸 `\x1b[A`、带修饰 `\x1b[1;3A`;`param=Some("5")` 表示
+/// `~` 末尾键(PgUp/Delete 等):裸 `\x1b[5~`、带修饰 `\x1b[5;3~`。修饰键存在时
+/// 按 xterm Modified Keys 规范插入 `;N`,否则发裸序列。
+fn push_csi_key(bytes: &mut Vec<u8>, param: Option<&str>, final_ch: char, mods: KeyModifiers) {
+    bytes.push(0x1b);
+    bytes.push(b'[');
+    match modifier_code(mods) {
+        None => {
+            if let Some(p) = param {
+                bytes.extend_from_slice(p.as_bytes());
+            }
+        }
+        Some(n) => {
+            // 字母键无 param → 用 1;数字键用原 param。再跟 `;N`(N 是 2..=8 的单数字)。
+            bytes.extend_from_slice(param.unwrap_or("1").as_bytes());
+            bytes.push(b';');
+            bytes.push(b'0' + n);
+        }
+    }
+    let mut buf = [0u8; 4];
+    bytes.extend_from_slice(final_ch.encode_utf8(&mut buf).as_bytes());
+}
+
 fn bytes_from_key(key: KeyEvent) -> Option<Vec<u8>> {
     let mut bytes = Vec::new();
 
@@ -637,16 +674,18 @@ fn bytes_from_key(key: KeyEvent) -> Option<Vec<u8>> {
         // helix/zerostack 等)都把 Backspace 认作 0x7f;发 0x08 会被当成 Ctrl+H。
         KeyCode::Backspace => bytes.push(0x7f),
         KeyCode::Esc => bytes.push(0x1b),
-        KeyCode::Up => bytes.extend_from_slice(b"\x1b[A"),
-        KeyCode::Down => bytes.extend_from_slice(b"\x1b[B"),
-        KeyCode::Left => bytes.extend_from_slice(b"\x1b[D"),
-        KeyCode::Right => bytes.extend_from_slice(b"\x1b[C"),
-        KeyCode::Home => bytes.extend_from_slice(b"\x1b[H"),
-        KeyCode::End => bytes.extend_from_slice(b"\x1b[F"),
-        KeyCode::PageUp => bytes.extend_from_slice(b"\x1b[5~"),
-        KeyCode::PageDown => bytes.extend_from_slice(b"\x1b[6~"),
-        KeyCode::Delete => bytes.extend_from_slice(b"\x1b[3~"),
-        KeyCode::Insert => bytes.extend_from_slice(b"\x1b[2~"),
+        // 导航键带修饰键时按 xterm 规范加 `;N` 后缀(Ctrl/Shift/Alt 组合),裸键不变。
+        // 例:Ctrl+→ = \x1b[1;5C、Shift+↑ = \x1b[1;2A、Ctrl+Delete = \x1b[3;5~。
+        KeyCode::Up => push_csi_key(&mut bytes, None, 'A', key.modifiers),
+        KeyCode::Down => push_csi_key(&mut bytes, None, 'B', key.modifiers),
+        KeyCode::Left => push_csi_key(&mut bytes, None, 'D', key.modifiers),
+        KeyCode::Right => push_csi_key(&mut bytes, None, 'C', key.modifiers),
+        KeyCode::Home => push_csi_key(&mut bytes, None, 'H', key.modifiers),
+        KeyCode::End => push_csi_key(&mut bytes, None, 'F', key.modifiers),
+        KeyCode::PageUp => push_csi_key(&mut bytes, Some("5"), '~', key.modifiers),
+        KeyCode::PageDown => push_csi_key(&mut bytes, Some("6"), '~', key.modifiers),
+        KeyCode::Delete => push_csi_key(&mut bytes, Some("3"), '~', key.modifiers),
+        KeyCode::Insert => push_csi_key(&mut bytes, Some("2"), '~', key.modifiers),
         KeyCode::F(1) => bytes.extend_from_slice(b"\x1bOP"),
         KeyCode::F(2) => bytes.extend_from_slice(b"\x1bOQ"),
         KeyCode::F(3) => bytes.extend_from_slice(b"\x1bOR"),
