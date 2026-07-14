@@ -20,9 +20,11 @@ pub trait Agent {
 }
 
 pub struct CodexAgent {
-    initial_title: String,
-    title_initialized: bool,
     current_state: AgentState,
+}
+
+fn is_codex_working_title(title: &str) -> bool {
+    title.starts_with(['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'])
 }
 
 impl Agent for CodexAgent {
@@ -31,18 +33,10 @@ impl Agent for CodexAgent {
     }
 
     fn update_by_title(&mut self, title: &str) -> bool {
-        if !self.title_initialized {
-            self.initial_title = title.to_string();
-            self.title_initialized = true;
-        }
-
-        let new_state = if title == self.initial_title
-            || title.starts_with("[ . ] Action Required")
-            || title.starts_with("[ ! ] Action Required")
-        {
-            AgentState::Waiting
-        } else {
+        let new_state = if is_codex_working_title(title) {
             AgentState::Working
+        } else {
+            AgentState::Waiting
         };
 
         let changed = self.current_state != new_state;
@@ -94,8 +88,6 @@ impl AgentType {
     pub fn new(agent_type: &str) -> Self {
         if agent_type.ends_with("codex") {
             Self::Codex(CodexAgent {
-                initial_title: String::new(),
-                title_initialized: false,
                 current_state: AgentState::Working,
             })
         } else if agent_type.ends_with("claude") {
