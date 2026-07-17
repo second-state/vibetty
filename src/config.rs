@@ -87,7 +87,7 @@ pub struct Cli {
     #[arg(last = true)]
     pub command_args: Vec<String>,
 
-    /// JPEG quality for screen rendering (high, medium, low)
+    /// Screen output format: high/medium/low (JPEG quality tiers) or text (plain-text screen, no image; vibeKEY unsupported)
     #[arg(
         short = 'q',
         long = "quality",
@@ -152,11 +152,12 @@ pub struct RunArgs {
 }
 
 impl RunArgs {
-    pub fn image_format(&self) -> crate::protocol::JpegQuality {
+    pub fn image_format(&self) -> crate::protocol::OutputFormat {
         match self.image_format.to_lowercase().as_str() {
-            "medium" | "mid" | "m" => crate::protocol::JpegQuality::Medium,
-            "low" | "l" => crate::protocol::JpegQuality::Low,
-            _ => crate::protocol::JpegQuality::High,
+            "medium" | "mid" | "m" => crate::protocol::OutputFormat::Medium,
+            "low" | "l" => crate::protocol::OutputFormat::Low,
+            "text" | "txt" | "t" => crate::protocol::OutputFormat::Text,
+            _ => crate::protocol::OutputFormat::High,
         }
     }
 

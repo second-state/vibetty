@@ -19,7 +19,7 @@ use crate::ui::{
 
 /// 终端截图里单个字符单元格的像素宽。`vibetty-screenshot` 在 font_size=14.0 +
 /// 内嵌字体 Sarasa Mono SC Light(swash 后端)下由 `get_char_metrics(14.0)` 实测得到。
-/// 客户端 Sync 发的是【像素】,要除以它换算成 PTY 列数。
+/// 客户端 Sync 在 `pixels=true` 时发的是【像素】,要除以它换算成 PTY 列数。
 /// ⚠️ 改 `render_screen_to_image` 的 font_size 或换字体时必须同步更新。
 pub(crate) const SCREEN_CHAR_WIDTH: u32 = 8;
 /// 单个字符单元格的像素高,同上(`get_char_metrics(14.0)` 返回 `(8, 18)`)。
@@ -67,11 +67,19 @@ type ScreenshotTx = mpsc::Sender<tokio::sync::oneshot::Sender<Result<Vec<u8>, St
 #[derive(Clone)]
 pub struct AppState {
     pub screenshot_tx: ScreenshotTx,
-    pub image_format: crate::protocol::JpegQuality,
+    pub image_format: crate::protocol::OutputFormat,
 }
 
 fn send_screen(tx: &ServerTx, screen: Arc<vt100::Screen>) {
+    // 广播整张屏幕;渲染成 JPEG 还是 ANSI 文本由 MQTT 端按 image_format 决定。
     let _ = tx.send(ServerMessage::Screen(screen));
+}
+
+/// 把屏幕渲染成带 ANSI 转义的「可重放」字节流(`-q text` 模式):直接用 vt300 的
+/// `Screen::contents_formatted`,内联 SGR 颜色/光标定位等转义码,喂给任何终端解析器即可还原画面
+/// (含颜色)。尊重 scrollback:滚到历史时输出的是历史那屏。
+pub(crate) fn render_screen_to_text(screen: &vt100::Screen) -> String {
+    String::from_utf8_lossy(&screen.contents_formatted()).into_owned()
 }
 
 /// 构造 HTTP 路由:/mqtt_ws 调试页 + /screenshot(与原启动期一致)。
@@ -141,13 +149,6 @@ fn scroll_delta(rows: u16, page_rows: u16) -> usize {
     }
 }
 
-/// 由客户端 sync 发的像素高度算「一页」的行数:能塞下的行数 − 2(滚动时留两行可见,
-/// 上下滚都用这个 delta,故两方向都留两行重叠)。
-fn page_rows_from_height(height: u16) -> u16 {
-    let fits = (height as u32).saturating_sub(2 * SCREEN_PADDING) / SCREEN_CHAR_HEIGHT;
-    fits.saturating_sub(2).max(1) as u16
-}
-
 /// 主事件循环统一的事件来源(PTY 输出 / 客户端消息 / TUI UI 事件 / 截图请求)。
 enum TerminalEvent {
     Input(crate::protocol::ClientMessage),
@@ -176,7 +177,7 @@ struct MqttCtx<'a> {
     client: &'a mut Option<mqtt::MqttHandle>,
     cli_tx: &'a mpsc::Sender<ClientMessage>,
     tx: &'a ServerTx,
-    image_format: crate::protocol::JpegQuality,
+    image_format: crate::protocol::OutputFormat,
 }
 
 /// 把原始按键解析成对 tui_input 的编辑请求:方向键/Home/End 导航、Backspace 删除、
@@ -216,7 +217,7 @@ fn autostart_mqtt(
     mqtt_cfg: &Option<MqttConfig>,
     cli_tx: &mpsc::Sender<ClientMessage>,
     tx: &ServerTx,
-    image_format: crate::protocol::JpegQuality,
+    image_format: crate::protocol::OutputFormat,
 ) -> (bool, Option<mqtt::MqttHandle>) {
     let Some(cfg) = mqtt_cfg else {
         return (false, None);
@@ -244,7 +245,7 @@ async fn handle_port_input(
     bytes: &[u8],
     http: &mut HttpBtnState,
     screenshot_tx: &ScreenshotTx,
-    image_format: crate::protocol::JpegQuality,
+    image_format: crate::protocol::OutputFormat,
 ) -> ModalState {
     // Enter:尝试按输入地址起 HTTP server。
     if bytes == b"\r" || bytes == b"\n" {
@@ -477,7 +478,7 @@ async fn handle_modal_input(
     http: &mut HttpBtnState,
     mqtt: &mut MqttCtx<'_>,
     screenshot_tx: &ScreenshotTx,
-    image_format: crate::protocol::JpegQuality,
+    image_format: crate::protocol::OutputFormat,
 ) -> ModalState {
     match modal {
         ModalState::PortInput { input } => {
@@ -562,7 +563,7 @@ pub async fn run_command(
     mut screenshot_rx: mpsc::Receiver<tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>>,
     tui: &mut crate::ui::TuiTerminal,
     ui_title: &mut String,
-    image_format: crate::protocol::JpegQuality,
+    image_format: crate::protocol::OutputFormat,
     auto_submit: bool,
 ) -> anyhow::Result<()> {
     // headless(无 TTY,例如纯 MQTT、无 WS 客户端)时 crossterm 返回 0×0 而非 Err,
@@ -714,6 +715,8 @@ pub async fn run_command(
     const SCREEN_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(100);
     let mut pending_screen: Option<Arc<vt100::Screen>> = None;
     let mut send_deadline: Option<tokio::time::Instant> = None;
+    // close 开关(Sync.close):true 时暂停 PTY 输出触发的自主 screen 推送。客户端不看时关掉省流量。
+    let mut screen_closed = false;
 
     loop {
         // 每轮 copy 最新 send_deadline(Option<Instant> 是 Copy),让下面去抖 async 分支按最新
@@ -771,13 +774,13 @@ pub async fn run_command(
         match event {
             TerminalEvent::ScreenGetter(getter) => {
                 let screen = vt_parser.screen().clone();
-                let result = render_screen_to_image(&screen, image_format, None);
-
-                let jpeg = match result {
-                    Ok(data) => Ok(data),
-                    Err(e) => Err(e.to_string()),
+                // text 模式返回纯文本字节,否则返回 JPEG(/screenshot 的 MIME 由 mime_type() 定)。
+                let result: Result<Vec<u8>, String> = if image_format.is_text() {
+                    Ok(render_screen_to_text(&screen).into_bytes())
+                } else {
+                    render_screen_to_image(&screen, image_format, None).map_err(|e| e.to_string())
                 };
-                let _ = getter.send(jpeg);
+                let _ = getter.send(result);
             }
             TerminalEvent::PtyOutput(output) => {
                 // 空 PTY 输出 = EOF / 子进程已退出(reader 线程读到 Ok(0) 后停掉、
@@ -844,15 +847,21 @@ pub async fn run_command(
                     &modal,
                     hover,
                 );
-                // PtyOutput 不再发 broadcast:唯一订阅者是 mqtt,而 mqtt 停发了 pty_out
-                // (调试期只发 screen),收到的 PtyOutput 直接丢弃。高频 PtyOutput 往 broadcast
-                // 发会撑爆容量、触发 Lagged(尤其重连期间 mqtt 不消费),纯属浪费。恢复 pty_out
-                // 时再发回这里。screen 推送见下方 send_screen(rate limited)。
+                // text 模式:实时把原始 PTY 字节发给 ESP32(它自己跑终端模拟器渲染),
+                // 仅在未 close 时发(close=true 暂停);不受 scrollback/waiting 门控——这是原始
+                // 流,ESP32 自行维护画面。⚠️ 高频 PtyOutput 每条 clone + 广播,可能撑爆 broadcast
+                // 容量(1024)触发 Lagged;真扛不住再改独立通道。
+                if image_format.is_text() && !screen_closed {
+                    let _ = tx.send(ServerMessage::PtyOutput(output.clone().into_bytes()));
+                }
 
-                // screen 发送去抖:每次输出都入队 pending 并(重)设 100ms 计时器(有新输出就
-                // 刷新,停顿满发最新帧)。在看历史(scrollback!=0)且非 waiting 时整体不发,
-                // 免得打扰。
-                if screen.scrollback() == 0 || agent_type.state().is_waiting() {
+                // jpeg 模式:走 screen 去抖(每次输出入队 pending + 重设 100ms 计时器,停顿满发
+                // 最新帧)。text 模式不发屏幕帧(靠上面的 pty_out 实时流)。看历史(scrollback!=0)
+                // 且非 waiting、或 close=true 暂停时,都不入队。
+                if !image_format.is_text()
+                    && !screen_closed
+                    && (screen.scrollback() == 0 || agent_type.state().is_waiting())
+                {
                     pending_screen = Some(screen.clone());
                     send_deadline = Some(tokio::time::Instant::now() + SCREEN_DEBOUNCE);
                 }
@@ -1055,21 +1064,44 @@ pub async fn run_command(
                 );
                 send_screen(&tx, screen);
             }
-            TerminalEvent::Input(ClientMessage::Sync { width, height }) => {
-                // sync 按客户端像素 (width,height) 换算 cols×rows:各减去两侧 padding 后除以
-                // 字符格尺寸。整张图(= cols×rows 网格 + 四周 padding)就与 sync 的 (width,height)
-                // 对齐——之前只换算 cols、rows 保留旧值,图片高度和 sync 对不上。(字符网格 8×18
-                // 精度内,会有 <1 格的 floor 余量。)height 另算 page_rows(= 能塞下 − 1)供 scroll。
-                page_rows = page_rows_from_height(height);
-                let avail_w = (width as u32).saturating_sub(2 * SCREEN_PADDING);
-                let avail_h = (height as u32).saturating_sub(2 * SCREEN_PADDING);
-                let cols = (avail_w / SCREEN_CHAR_WIDTH).max(8) as u16; // 最低 8 列
-                let rows = (avail_h / SCREEN_CHAR_HEIGHT).max(2) as u16; // 最低 2 行(防 vt100 0 行)
+            TerminalEvent::Input(ClientMessage::Sync {
+                width,
+                height,
+                pixels,
+                close,
+            }) => {
+                // close 开关:控制服务端【自主】推送(PTY 输出触发的 screen/screen_text)。
+                // close=true → 暂停并清掉在途的去抖帧;close=false → 恢复。sync 响应仍照发。
+                screen_closed = close;
+                if screen_closed {
+                    pending_screen = None;
+                    send_deadline = None;
+                    log::debug!(
+                        "[{}] sync close=true: autonomous screen push paused",
+                        terminal.session_id()
+                    );
+                }
+                // pixels=true:width/height 是像素,各减去两侧 padding 后除以字符格尺寸换算
+                // cols×rows(整张图 = cols×rows 网格 + 四周 padding,与 sync 像素尺寸对齐;8×18
+                // 精度内有 <1 格 floor 余量)。pixels=false:width/height 已是字符列/行,直接用
+                // (仍兜底 8×2,防 vt100 0 行)。两种模式都以最终 rows 算 page_rows(留两行重叠)。
+                let (cols, rows) = if pixels {
+                    let avail_w = (width as u32).saturating_sub(2 * SCREEN_PADDING);
+                    let avail_h = (height as u32).saturating_sub(2 * SCREEN_PADDING);
+                    (
+                        (avail_w / SCREEN_CHAR_WIDTH).max(8) as u16,
+                        (avail_h / SCREEN_CHAR_HEIGHT).max(2) as u16,
+                    )
+                } else {
+                    (width.max(8), height.max(2))
+                };
+                page_rows = rows.saturating_sub(2).max(1);
                 // 尺寸没变就不 resize(避免抖屏);但 sync 本身也是「请求刷屏」,仍回送屏幕。
                 let (cur_rows, cur_cols) = vt_parser.screen().size();
                 if cur_cols != cols || cur_rows != rows {
                     log::debug!(
-                        "Sync: {width}×{height}px -> resize PTY {cur_cols}×{cur_rows} -> {cols}×{rows}"
+                        "Sync: {width}×{height}{} -> resize PTY {cur_cols}×{cur_rows} -> {cols}×{rows}",
+                        if pixels { "px" } else { "cells" }
                     );
                     vt_parser.screen_mut().set_size(rows, cols);
                     let _ = terminal.resize(rows, cols);
@@ -1120,7 +1152,7 @@ pub async fn run_command(
 /// Render a vt100 screen to JPEG bytes(质量档位由 `format` 决定:High/Medium 彩色,Low 黑白)
 pub(crate) fn render_screen_to_image(
     screen: &vt100::Screen,
-    format: crate::protocol::JpegQuality,
+    format: crate::protocol::OutputFormat,
     target_size: Option<(u16, u16)>, // 把图片精确补/裁到该 (width,height),不足补背景色(主要用于 MQTT 出站)
 ) -> anyhow::Result<Vec<u8>> {
     let config = crate::screenshot::ScreenshotConfig {
@@ -1146,11 +1178,17 @@ pub(crate) fn render_screen_to_image(
     }
 
     // 按质量档位编码 JPEG:High=q85 彩色(默认),Medium=q70 彩色,Low=q50 黑白(灰度)。
+    // Text 模式不该走到这里(调用方先 is_text() 分流到 render_screen_to_text)。
     let mut buf = std::io::Cursor::new(Vec::new());
     let (quality, grayscale) = match format {
-        crate::protocol::JpegQuality::High => (85u8, false),
-        crate::protocol::JpegQuality::Medium => (70, false),
-        crate::protocol::JpegQuality::Low => (50, true),
+        crate::protocol::OutputFormat::High => (85u8, false),
+        crate::protocol::OutputFormat::Medium => (70, false),
+        crate::protocol::OutputFormat::Low => (50, true),
+        crate::protocol::OutputFormat::Text => {
+            return Err(anyhow::anyhow!(
+                "text format cannot render to image; use render_screen_to_text"
+            ));
+        }
     };
     {
         let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, quality);

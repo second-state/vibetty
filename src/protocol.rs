@@ -10,10 +10,22 @@ use crate::terminal::agent::AgentState;
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ClientMessage {
-    /// Sync:客户端声明自己显示区的【像素】尺寸 `width`/`height`,
-    /// 服务端按 char cell 尺寸换算成列/行后 resize PTY,并回送整张屏幕
+    /// Sync:客户端声明自己显示区尺寸 `width`/`height`。`pixels=true`(默认)时是【像素】,
+    /// 服务端按 char cell 尺寸换算成列/行;`pixels=false` 时 width/height 已是字符列/行,直接用。
+    /// 换算后 resize PTY 并回送整张屏幕。旧客户端不带 `pixels` → 默认 true(像素,向后兼容)。
+    ///
+    /// `close=true`:暂停服务端【自主】推送屏幕(PTY 输出触发的 screen/screen_text);`close=false`
+    /// (默认):恢复。客户端(如 ESP32)不看时关掉省流量;sync 响应与 scroll 这类客户端主动请求
+    /// 的回送不受影响。旧客户端不带 `close` → 默认 false(照常推送,向后兼容)。
     #[serde(rename = "sync")]
-    Sync { width: u16, height: u16 },
+    Sync {
+        width: u16,
+        height: u16,
+        #[serde(default = "default_sync_pixels")]
+        pixels: bool,
+        #[serde(default)]
+        close: bool,
+    },
 
     /// PTY 输入（键盘输入发送到终端）
     #[serde(rename = "pty_in")]
@@ -38,13 +50,25 @@ pub enum ClientMessage {
     },
 }
 
+/// `Sync.pixels` 的 serde 默认值:true(像素)。旧客户端不带该字段时按像素处理,向后兼容。
+fn default_sync_pixels() -> bool {
+    true
+}
+
 impl Debug for ClientMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ClientMessage::Sync { width, height } => f
+            ClientMessage::Sync {
+                width,
+                height,
+                pixels,
+                close,
+            } => f
                 .debug_struct("Sync")
                 .field("width", width)
                 .field("height", height)
+                .field("pixels", pixels)
+                .field("close", close)
                 .finish(),
             ClientMessage::PtyInput(data) => f
                 .debug_tuple("PtyInput")
@@ -63,13 +87,12 @@ impl Debug for ClientMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ServerMessage {
-    /// PTY 输出（终端输出显示）。当前停发 broadcast(mqtt 停发 pty_out、WS 前端已删,
-    /// 无人消费),保留变体供将来恢复。`#[allow(dead_code)]` 抑制「无人构造」警告。
+    /// PTY 输出（终端输出显示）。原始 PTY 字节,ws 主循环每收到一段 PTY 输出就广播,
+    /// MQTT 订阅后以 raw 二进制 publish 到 {prefix}/pty_out(QoS0,不 retained)。
     #[serde(rename = "pty_out")]
-    #[allow(dead_code)]
     PtyOutput(Vec<u8>),
 
-    /// 整张终端屏幕(MQTT 出站据此渲染成图片;不走 serde 序列化)
+    /// 整张终端屏幕(MQTT 出站据此渲染:JPEG 或 ANSI 文本,由 image_format 决定;不走 serde 序列化)
     #[serde(skip)]
     Screen(std::sync::Arc<vt100::Screen>),
 
@@ -82,19 +105,38 @@ pub enum ServerMessage {
 
 // ========== 辅助类型 ==========
 
-/// screen 出图的 JPEG 质量档位。出图始终为 JPEG;High/Medium 彩色,Low 黑白(灰度)。
+/// screen 出站格式档位。High/Medium 彩色 JPEG,Low 黑白(灰度)JPEG,Text 纯文本(不发图)。
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum JpegQuality {
+pub enum OutputFormat {
     High,
     Medium,
     Low,
+    Text,
 }
 
-impl JpegQuality {
-    /// 对应的 HTTP MIME 类型(三档都是 JPEG)
+impl OutputFormat {
+    /// 是否为文本模式(非图片)。
+    pub fn is_text(&self) -> bool {
+        matches!(self, OutputFormat::Text)
+    }
+
+    /// 字符串名(与 serde 序列化一致):`high`/`medium`/`low`/`text`。用于 presence 公告等。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            OutputFormat::High => "high",
+            OutputFormat::Medium => "medium",
+            OutputFormat::Low => "low",
+            OutputFormat::Text => "text",
+        }
+    }
+
+    /// 对应的 HTTP MIME 类型:High/Medium/Low 为 JPEG,Text 为纯文本。
     pub fn mime_type(&self) -> &'static str {
-        "image/jpeg"
+        match self {
+            OutputFormat::Text => "text/plain; charset=utf-8",
+            _ => "image/jpeg",
+        }
     }
 }
 
@@ -153,6 +195,50 @@ mod tests {
         match decoded {
             ClientMessage::Input(text) => {
                 assert_eq!(text, "测试文本");
+            }
+            _ => panic!("Wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_sync_pixels_roundtrip() {
+        // pixels=false + close=true 序列化/反序列化往返。
+        let msg = ClientMessage::Sync {
+            width: 320,
+            height: 240,
+            pixels: false,
+            close: true,
+        };
+        let json = msg.to_json().unwrap();
+        match ClientMessage::from_json(&json).unwrap() {
+            ClientMessage::Sync {
+                width,
+                height,
+                pixels,
+                close,
+            } => {
+                assert_eq!((width, height), (320, 240));
+                assert!(!pixels);
+                assert!(close);
+            }
+            _ => panic!("Wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_sync_legacy_defaults_to_pixels() {
+        // 老客户端不带 `pixels` / `close` 字段 → pixels 默认 true、close 默认 false,向后兼容。
+        let legacy = r#"{"type":"sync","data":{"width":100,"height":50}}"#;
+        match ClientMessage::from_json(legacy).unwrap() {
+            ClientMessage::Sync {
+                width,
+                height,
+                pixels,
+                close,
+            } => {
+                assert_eq!((width, height), (100, 50));
+                assert!(pixels, "legacy sync without `pixels` must default to true");
+                assert!(!close, "legacy sync without `close` must default to false");
             }
             _ => panic!("Wrong message type"),
         }
