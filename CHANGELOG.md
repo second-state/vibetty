@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.4.0-rc.6] - 2026-07-20
+
+Text output mode + MQTT protocol expansion (raw PTY stream, richer Sync, format discovery). (中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md).)
+
+### Added
+
+- **Text output mode (`-q text`)**: alongside the JPEG quality tiers, the screen can now be sent as an ANSI terminal stream on a new `{p}/screen_text` topic, instead of a JPEG image. Every payload starts with a 1-byte tag: `0x00` = full-frame baseline (`vt100` `contents_formatted`, replayable ANSI with colors) and `0x01` = realtime raw PTY delta. Full frames are retained, deltas are not (so a reconnect always receives a complete baseline). `/screenshot` returns `text/plain` in this mode.
+- **Realtime PTY stream in text mode**: PTY output is published immediately as `0x01` deltas on `{p}/screen_text` (the separate `{p}/pty_out` topic is gone — deltas merged into `screen_text`). JPEG mode is unchanged (debounced `{p}/screen` frames).
+- **`Sync.pixels` field**: when `false`, the client sends character cols/rows directly instead of pixels (server skips the pixel→cell conversion). Defaults to `true` (pixels) for backward compatibility.
+- **`Sync.close` field**: a pause switch for the server's autonomous screen push. `close=true` stops PTY-output-triggered publishing (and drops the in-flight debounced frame); `close=false` resumes. Defaults to `false`. Client-initiated responses (sync reply, scroll) are unaffected. Lets power-constrained clients mute the stream when not viewing.
+- **`format` in presence**: the instance's `-q` setting (`high`/`medium`/`low`/`text`) is now advertised in the presence JSON, so clients know whether to subscribe to `{p}/screen` (JPEG) or `{p}/screen_text` (text).
+
+### Changed
+
+- **`JpegQuality` → `OutputFormat`**: the enum was renamed now that it covers a non-JPEG (text) mode, and gained `Text` / `is_text()` / `as_str()`. Wire format unchanged for the existing tiers (`high`/`medium`/`low`); `text` added.
+- **Rendering decision moved to the MQTT bridge**: `ws` only broadcasts the `Screen`; the MQTT task renders it as JPEG or ANSI text based on `image_format`. `ScreenText` is no longer a separate protocol variant.
+- **Text-mode traffic now counted**: the MQTT outbound byte counter (`total_screen_bytes`) now accumulates text-mode full frames and deltas too (previously JPEG only); both log the running total in MB.
+
 ## [0.4.0-rc.5] - 2026-07-15
 
 Keyboard input fixes for full-screen editors (helix / vim / zerostack / …). (中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md).)

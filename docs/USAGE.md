@@ -221,7 +221,7 @@ vibetty skill uninstall  --claude [--codex] Remove the run-vibetty skill
 | `--config <PATH>` | Override the config file path. | `~/.vibetty/config.toml` |
 | `-b, --bind-addr <ADDR>` | HTTP listen address (used as the dialog default when starting HTTP). | `0.0.0.0:3000` |
 | `-a, --auto-submit` | Append Enter to `input_text` and execute it (also sets scrollback to 3, exposing a bit of history); turn off to only type the text with scrollback=0 (latest). | `true` |
-| `-q, --quality <QUALITY>` | JPEG quality for screen screenshots: `high` (q85 color), `medium` (q70 color), `low` (q50 grayscale). | `high` |
+| `-q, --quality <QUALITY>` | Screen output format: `high` (JPEG q85 color), `medium` (JPEG q70 color), `low` (JPEG q50 grayscale), or `text` (plain ANSI text stream on `P/screen_text`, no image — see §6.5b). | `high` |
 
 ### Screenshot rendering parameters (fixed)
 
@@ -230,7 +230,7 @@ The terminal screen is rendered to an image with these parameters (the `SCREEN_*
 - Character cell: **8 × 18 pixels** (width × height).
 - Padding: **16 pixels** on each side.
 - Total image size = `cols × 8 + 32` (width) × `rows × 18 + 32` (height).
-- Encoded as JPEG; quality tier is set by `-q, --quality` (see Run-mode options above): `high` = q85 color (default), `medium` = q70 color, `low` = q50 grayscale.
+- Encoded as JPEG; quality tier is set by `-q, --quality` (see Run-mode options above): `high` = q85 color (default), `medium` = q70 color, `low` = q50 grayscale. With `-q text` the screen is sent as an ANSI text stream instead of an image (no JPEG encoding).
 
 ---
 
@@ -270,11 +270,13 @@ Let `P = {user}/{device}/{pid}/vibetty` (the instance prefix):
 |-----------|-------|---------|----------------|-------------|
 | Device → vibetty | `P/pty_in` | **raw bytes** | QoS 0 / no | Raw keystroke bytes (single key / escape sequence) |
 | Device → vibetty | `P/control` | **JSON** | QoS 1 / no | Control messages (text input / sync / scroll) |
-| vibetty → device | `P/screen` | **raw bytes** (image + 4-byte offset at the end) | QoS 0 / **yes** | A full JPEG |
+| vibetty → device | `P/screen` | **raw bytes** (JPEG + 4-byte offset at the end) | QoS 0 / **yes** | A full JPEG screen frame. **JPEG mode only** (`-q high` / `medium` / `low`). |
+| vibetty → device | `P/screen_text` | **raw bytes** (`[1-byte tag] + ANSI text`, see 6.5b) | QoS 0 / full-frame **yes**, delta **no** | Text-mode screen stream (full-frame baseline + realtime pty delta). **Text mode only** (`-q text`). |
 | vibetty → device | `P` (the prefix itself) | **JSON** | QoS 1 / **yes** | Presence announcement (service discovery) |
-| ~~vibetty → device~~ | ~~`P/pty_out`~~ | — | — | **Not published currently** (debug period, only logged); do not rely on it |
 
-> `screen` is **retained**: the remote receives the **most recent image immediately** upon subscribing, without waiting for the next refresh.
+> **Two output modes** (`-q`, set at vibetty startup, fixed for the whole session): the instance publishes **either** `P/screen` (JPEG, `-q high/medium/low`) **or** `P/screen_text` (text, `-q text`), never both. The remote picks which to subscribe to based on the presence `format` field (see 6.7). There is **no separate `P/pty_out` topic** — in text mode the realtime pty bytes are carried inside `P/screen_text` as delta frames (tag `0x01`).
+>
+> `screen` and the full-frame `screen_text` are **retained**: the remote receives the most recent frame immediately upon subscribing. `screen_text` **delta** frames are not retained (so the retained message is always a complete baseline frame).
 
 ### 6.4 `control` JSON format
 
@@ -283,21 +285,23 @@ Reuses vibetty's `ClientMessage` serde form (`#[serde(tag="type", content="data"
 | type | data | Meaning |
 |------|------|---------|
 | `input_text` | string | Type a piece of text (e.g. a command). If the server has `--auto-submit` on, Enter is appended and the command is executed. |
-| `sync` | `{"width":W,"height":H}` | `width`/`height` are the **pixel** dimensions of the remote's display area; the server converts them to columns/rows, resizes the PTY, and refreshes the whole screen (see 6.6). |
-| `scroll_up` | `{"rows":N}` | Scroll up; `rows`=0 / omitted = scroll a full page (= the number of visible terminal rows). |
+| `sync` | `{"width":W,"height":H,"pixels":bool,"close":bool}` | Declare the remote's display size + control autonomous push. `pixels` (default `true`): `width`/`height` are **pixels** → server converts to cols/rows; `false`: already character cols/rows, used directly. `close` (default `false`): `true` = **pause** the server's autonomous screen push (saves bandwidth when the remote isn't viewing); `false` = resume. Server resizes the PTY and replies with a full screen frame. See 6.6. |
+| `scroll_up` | `{"rows":N}` | Scroll up; `rows`=0 / omitted = scroll a full page (= the number of visible terminal rows, minus 2 rows of overlap). |
 | `scroll_down` | `{"rows":N}` | Scroll down; same as above. |
 
-Examples:
+`sync`'s `pixels` and `close` are **optional and backward-compatible** (omitted ⇒ `pixels:true`, `close:false`). Examples:
 
 ```json
 {"type":"input_text","data":"ls -la\n"}
 {"type":"sync","data":{"width":320,"height":240}}
+{"type":"sync","data":{"width":80,"height":24,"pixels":false}}
+{"type":"sync","data":{"width":80,"height":24,"pixels":false,"close":true}}
 {"type":"scroll_up","data":{"rows":0}}
 ```
 
 > Difference between `pty_in` (raw single key) and `control`'s `input_text` (text string): **single keys / arrow keys / control characters** go via `pty_in` raw bytes; **whole text / command lines** go via `control`'s `input_text`.
 
-### 6.5 `screen` payload
+### 6.5 `screen` payload (JPEG mode)
 
 A full JPEG image as bytes, **no chunking, no signaling fields**. But **4 bytes are appended at the end**, which you must account for:
 
@@ -307,16 +311,47 @@ A full JPEG image as bytes, **no chunking, no signaling fields**. But **4 bytes 
    - `> 0` = captured after scrolling up N rows.
    - These 4 bytes come after the image's `EOI` (JPEG), so the decoder ignores them and decoding is unaffected.
 
-### 6.6 `sync` size conversion
+### 6.5b `screen_text` payload (text mode)
 
-`sync`'s `width`/`height` are in **pixels**, not terminal columns/rows. The server converts them using the screenshot rendering parameters (see section 5):
+Text mode (`-q text`) carries the screen as an **ANSI terminal stream** on `P/screen_text` — a "full-frame baseline + realtime delta" design. Every payload starts with a **1-byte tag**:
 
 ```
-cols = (width  - 32) / 8      # 32 = 16px padding on each side; 8 = char width
-rows = (height - 32) / 18     # 18 = char height
+payload = [ tag: 1 byte ] [ content ]
 ```
 
-Minimum `cols = 8`, `rows = 2` (to avoid a vt80 0-row panic). The remote **just reports its own screen's pixels truthfully**, and the server automatically computes a suitable terminal size and resizes.
+| tag | meaning | content | retained | when |
+|-----|---------|---------|----------|------|
+| `0x00` | **full-frame baseline** | vt300 `contents_formatted()` — a replayable ANSI stream (cursor-home + SGR colors + text); feed it to an empty terminal parser to reproduce the whole screen (with colors) | **yes** | startup first frame, and in response to every `sync` / `scroll_*` |
+| `0x01` | **pty delta** (incremental) | raw PTY output bytes (ANSI escapes + text) | **no** | every time the PTY produces output (realtime) |
+
+- **Why delta is not retained**: so the broker's retained message is always a complete `0x00` baseline. On reconnect the remote gets a usable full frame, not a stale delta that would produce garbage on a blank buffer.
+- **Recommended remote implementation**: keep a terminal-emulator buffer; on `0x00` reset the buffer and replay the full frame; on `0x01` feed the bytes in as incremental output (exactly like a real terminal receiving shell output). On connect, the retained `0x00` gives the baseline; if unsure, send a `sync` to force a fresh `0x00`.
+- The content **contains ANSI escape codes** (`\x1b[...`) — it is not plain trimmed text. Either render it through a terminal parser or strip the escapes yourself.
+- `close=true` stops the `0x01` deltas (autonomous push paused); `0x00` full frames still come in response to `sync` / `scroll_*`.
+
+### 6.6 `sync` size conversion + `close` switch
+
+**Size units** depend on the `pixels` field:
+
+- `pixels: true` (default): `width`/`height` are **pixels**. The server converts them using the screenshot rendering parameters (see section 5):
+
+  ```
+  cols = (width  - 32) / 8      # 32 = 16px padding on each side; 8 = char width
+  rows = (height - 32) / 18     # 18 = char height
+  ```
+
+- `pixels: false`: `width`/`height` are already **character columns/rows**; the server uses them directly.
+
+Minimum `cols = 8`, `rows = 2` (to avoid a vt100 0-row panic). The remote just reports its own display size truthfully and the server resizes the PTY accordingly.
+
+**`close` switch** (bandwidth saver): controls the server's **autonomous** screen push (the frames triggered by PTY output):
+
+| `close` | JPEG mode | Text mode |
+|---------|-----------|-----------|
+| `false` (default) | PTY output settles ≥ 100ms → send a `P/screen` frame | every PTY output → send a `P/screen_text` delta (`0x01`) |
+| `true` | stop sending `P/screen` (in-flight frame dropped too) | stop sending deltas (`0x01`) |
+
+Unaffected by `close` (client-initiated, always answered): the `sync` screen reply, `scroll_*` replies, and the presence heartbeat. Typical use: when the remote's display is off / the user isn't looking, send `close=true` to mute the stream; send `close=false` to resume.
 
 ### 6.7 Discovery / presence mechanism
 
@@ -328,7 +363,8 @@ On startup, vibetty publishes a **retained** presence on `P` (the prefix itself)
   "client_id": "vibetty-1a2b3c4d5e6f7a8b-12345",
   "ts": 1751300000,
   "title": "claude — workspace",
-  "state": "working"
+  "state": "working",
+  "format": "high"
 }
 ```
 
@@ -339,6 +375,7 @@ On startup, vibetty publishes a **retained** presence on `P` (the prefix itself)
 | `ts` | Current epoch seconds (the remote uses this for liveness) |
 | `title` | The terminal window title (set by the program via OSC), used for agent state detection |
 | `state` | The agent working state: `"working"` or `"waiting"` (lowercase). Codex / Claude Code are `waiting` when waiting for user action. |
+| `format` | **Output mode**: `"high"` / `"medium"` / `"low"` (JPEG → subscribe `P/screen`) or `"text"` (text → subscribe `P/screen_text`). Decide which screen topic to subscribe to from this. |
 
 - **Re-sent every 15s** (heartbeat, refreshes `ts`).
 - **Abnormal disconnect**: the broker triggers the LWT and publishes an **empty payload** to `P` (= deletes the retained message), so the remote immediately knows the instance went offline.
@@ -360,14 +397,15 @@ This section is for anyone working in the ESP32 repo. The goal: let the ESP32 co
 
 1. ✅ Connect to the broker (host/port/auth consistent with vibetty's config).
 2. ✅ **Discovery**: subscribe to the presence wildcard topic, parse payloads, maintain an "online instance list".
-3. ✅ After choosing a target instance, subscribe to `{P}/screen` (if there's no screen, you can skip subscribing to screen to save bandwidth and only send input).
-4. ✅ Receive `screen` → detect JPEG by magic bytes → decode and display → read the last 4 bytes for the scrollback offset.
+3. ✅ After choosing a target instance, subscribe to the screen topic **based on its `format`**: `"text"` → `{P}/screen_text`; otherwise (JPEG) → `{P}/screen`. (If you don't need the screen, skip subscribing to save bandwidth and only send input.)
+4. ✅ **JPEG mode**: receive `screen` → detect JPEG by magic bytes → decode and display → read the last 4 bytes for the scrollback offset. **Text mode**: receive `screen_text` → read the first byte (`0x00` = full-frame baseline → reset your terminal buffer and replay; `0x01` = pty delta → feed incrementally to the buffer).
 5. ✅ Send single keys → publish `{P}/pty_in` (raw bytes).
 6. ✅ Send text commands → publish `{P}/control` (JSON `input_text`).
-7. ✅ Report the display size → publish `{P}/control` (JSON `sync`).
+7. ✅ Report the display size (+ bandwidth switch) → publish `{P}/control` (JSON `sync` with `width`/`height`/`pixels`/`close`).
 8. ✅ **Liveness check**: presence `ts` (treat > ~30s without update as offline) + LWT empty payload (instance offline, remove immediately).
-9. ✅ **Switch target**: unsubscribe the old instance's `screen`, subscribe the new one's.
+9. ✅ **Switch target**: unsubscribe the old instance's screen topic (`screen` or `screen_text`), subscribe the new one's (per its `format`).
 10. ✅ (Optional) **Agent state**: use presence's `state` to decide whether to push the screen to the user.
+11. ✅ (Optional, **bandwidth saver**) **`close` switch**: when the display is off / user isn't viewing, send `sync` with `close=true` to pause the server's autonomous push; send `close=false` to resume.
 
 ### 7.2 Code skeleton (`esp-idf-svc`, structural reference)
 
@@ -399,6 +437,7 @@ client.subscribe("+/+/+/vibetty", QoS::AtLeastOnce).await?;
 
 ```rust
 let mut current_prefix: Option<String> = None;
+let mut current_format: Option<String> = None;   // the instance's `format` ("text" / "high" / ...)
 
 loop {
     let msg = client.next().await?;
@@ -413,14 +452,19 @@ loop {
                 // LWT: instance offline → clear the current target
                 current_prefix = None;
             } else {
-                // {"prefix","client_id","ts","title","state"}
+                // {"prefix","client_id","ts","title","state","format"}
                 let p: Presence = serde_json::from_slice(payload)?;
                 if current_prefix.as_deref() != Some(&p.prefix) {
-                    if let Some(old) = current_prefix.take() {
-                        client.unsubscribe(&format!("{old}/screen")).await?;
+                    // unsubscribe the old instance's screen topic (whichever it was)
+                    if let Some((old, fmt)) = current_prefix.take().zip(current_format.take()) {
+                        let topic = if fmt == "text" { "screen_text" } else { "screen" };
+                        client.unsubscribe(&format!("{old}/{topic}")).await?;
                     }
                     current_prefix = Some(p.prefix.clone());
-                    client.subscribe(&format!("{}/screen", p.prefix), QoS::AtLeastOnce).await?;
+                    current_format = Some(p.format.clone());
+                    // subscribe the screen topic based on the instance's `format`
+                    let topic = if p.format == "text" { "screen_text" } else { "screen" };
+                    client.subscribe(&format!("{}/{topic}", p.prefix), QoS::AtLeastOnce).await?;
                     // report our own display size so the server resizes
                     client.publish(
                         &format!("{}/control", p.prefix),
@@ -430,11 +474,17 @@ loop {
                 }
             }
         }
-        // screen image: [..., "vibetty", "screen"]
+        // JPEG screen image: [..., "vibetty", "screen"]
         [.., "vibetty", "screen"] => {
             // 1) detect JPEG by magic bytes → decode
             // 2) read the last 4 bytes = scrollback offset (0 = latest)
             // 3) display
+        }
+        // text screen stream: [..., "vibetty", "screen_text"]
+        [.., "vibetty", "screen_text"] => {
+            // payload[0] is the tag:
+            //   0x00 = full-frame baseline → reset terminal buffer, replay payload[1..]
+            //   0x01 = pty delta           → feed payload[1..] incrementally to the buffer
         }
         _ => {}
     }
@@ -470,6 +520,7 @@ client.publish(
 8. **TLS**: use `mqtts://` for 8883; the ESP32 connects to TCP MQTT directly, not over WebSocket.
 9. **Determining the `user` segment**: the remote's broker username **is** vibetty's `user` segment (provided vibetty set an account in the broker URL and the accounts match). If vibetty has no account (user segment = `root`), the remote uses the broad wildcard `+/+/+/vibetty`.
 10. **ASR is done locally on the ESP32**: the server does no speech transcription. After the ESP32 recognizes speech, it just sends the **text** back via `control`'s `input_text`, saving audio bandwidth.
+11. **Text mode (`format: "text"`)**: subscribe to `P/screen_text` (not `P/screen`) and dispatch on the leading tag byte (`0x00` full / `0x01` delta) — see §6.5b. Deltas are high-frequency and **not retained**, so the retained message is always a `0x00` baseline; if your terminal buffer gets out of sync, publish a `sync` to force a fresh `0x00`. The content contains ANSI escapes (needs a terminal parser, not a plain `print`). Use `sync.close=true` to mute the realtime deltas when not viewing.
 
 ### 7.4 Verify locally (without an ESP32)
 

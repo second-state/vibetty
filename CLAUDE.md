@@ -90,16 +90,18 @@ keep_alive_secs = 30
 
 ### 协议(用户拍板)
 
-**不用 msgpack**。原始按键走独立 raw topic(`pty_in`);控制类消息(输入文本/同步/滚动)合并到一个 `control` topic,payload 是 `ClientMessage` 的 serde JSON(`{"type":...,"data":...}`)。出站只发 `Screen`(整张 PNG/JPEG);`pty_out` 当前**调试期停发**(只 log);`notification`/`title` 不走 MQTT。
+**不用 msgpack**。原始按键走独立 raw topic(`pty_in`);控制类消息(输入文本/同步/滚动)合并到一个 `control` topic,payload 是 `ClientMessage` 的 serde JSON(`{"type":...,"data":...}`)。出站由 `-q`(`OutputFormat`)决定:**JPEG 模式**(high/medium/low)发 `{p}/screen`(整张 JPEG + 末尾 4 字节大端 scrollback offset);**text 模式**(text)发 `{p}/screen_text`(首字节 tag:`0x00`=全屏基线 `contents_formatted`、`0x01`=pty 增量原始字节;全屏帧 retained、增量帧不 retained)。text 模式实时增量靠 `PtyOutput` → mqtt 路由到 `screen_text` tag `0x01`(没有独立 `{p}/pty_out` topic)。`notification`/`title` 不走 MQTT。
 
 Topic 前缀 `{user}/{device}/{pid}/vibetty`:`device`=SHA256(machine-uid) 前 16 hex、`pid`=进程 pid、`user`=`username`(空则 `root`)。
 - 入站(订阅):`{p}/pty_in`(raw→PtyInput)、`{p}/control`(JSON→`parse_control`,只收 input/sync/scroll_*)。
-- 出站:`{p}/screen`(整张图←Screen,无分块,格式靠 magic bytes 区分)。
-- presence:`{p}` 上 retained 公告,15s 心跳;LWT 异常掉线清空。ESP32 订阅 `{user}/+/+/vibetty` 发现该用户所有实例。
+- 出站:`{p}/screen`(JPEG 模式,JPEG+offset trailer)、`{p}/screen_text`(text 模式,tag 字节流)。
+- presence:`{p}` 上 retained 公告(`{prefix,client_id,ts,title,state,format}`),15s 心跳;LWT 异常掉线清空。`format` 字段告诉 ESP32 该订 `screen` 还是 `screen_text`。ESP32 订阅 `{user}/+/+/vibetty` 发现该用户所有实例。
+- `Sync` 带 `pixels`(true=像素/false=字符列行,默认 true)、`close`(true=暂停自主推屏/false=恢复,默认 false),都向后兼容。`screen_closed` 状态在 ws 主循环门控 PTY 输出触发的自主推送。
 
 ### 改动要点
 
-- `mqtt.rs`:`spawn()->MqttHandle` + `run_bridge(cfg, cli_tx, tx, fmt, cancel)`。出/入站都在主 `select!` 里:出站 `rx.recv()` 分支(收 `Screen`→`render_screen_to_image` 补齐到 sync 尺寸→publish)、入站 `eventloop.poll()`→strip 前缀→`pty_in`/`control`→`cli_tx`、外加 cancel 分支。sync 尺寸是普通 `u16` 局部变量(出/入站同任务顺序访问,不再需要 `Arc<AtomicU16>`)。退出时 disconnect + abort 心跳。
+- `mqtt.rs`:`spawn()->MqttHandle` + `run_bridge(cfg, cli_tx, tx, fmt, cancel)`。出/入站都在主 `select!` 里:出站 `rx.recv()` 分支——`Screen` 按 `image_format.is_text()` 分流:text→`render_screen_to_text`(vt300 `contents_formatted`)前缀 `0x00` 发 `screen_text`(retained);否则→`render_screen_to_image` 补齐到 sync 尺寸 + 末尾 offset trailer 发 `screen`。`PtyOutput`(仅 text 模式,ws 在 `!screen_closed` 时才发)前缀 `0x01` 发 `screen_text`(不 retained)。入站 `eventloop.poll()`→strip 前缀→`pty_in`/`control`→`cli_tx`、外加 cancel 分支。sync 尺寸是普通 `u16` 局部变量(出/入站同任务顺序访问)。`total_screen_bytes` 统计 jpeg+text(全屏+增量)累计字节。退出时 disconnect + abort 心跳。
+- `ws.rs`:`OutputFormat`(`JpegQuality` 已改名)决定渲染;`render_screen_to_text`(`pub(crate)`,用 vt300 `Screen::contents_formatted`)供 mqtt + `/screenshot` 复用。`send_screen` 只广播 `Screen`(渲染决定在 mqtt)。PtyOutput arm 按 `is_text()` 分流:text 实时发 PtyOutput(仅 `!screen_closed`);jpeg 走 100ms 去抖发屏。`/screenshot`(ScreenGetter)也按 `is_text()` 返回 text/plain 或 JPEG。
 - `config.rs`:`MqttConfig` 见上;`for_client()`(URL 解析,唯一一处)。`RunArgs::mqtt_config()` 固定从 `~/.vibetty/config.toml` 读 `[mqtt]`。
 - `main.rs`:**不再 boot 起 transport**;只 `args.mqtt_config()` 拿 `mqtt_cfg` + `cli_tx` 传给 `run_command`。
 - `ws.rs`:`run_command` 负责 boot 自动起(client if enable、broker if builtin_broker)+ 顶部按钮起停 + MqttPanel 弹窗;新增 `cli_tx` 形参(运行期重 spawn client 用)。`parse_and_save` 同步更新内存 `mqtt_cfg`(避免改端口后重启 client 连旧端口)。`render_screen_to_image` 是 `pub(crate)` 供 mqtt.rs 用。
@@ -129,5 +131,5 @@ ASR 改由 **ESP32 本地**完成:ESP32 识别后把**文本**经 `{p}/control` 
 
 - 无配置回归:`~/.vibetty/config.toml` 不写 `[mqtt]`,启动 vibetty 应该零 MQTT 日志、WS 行为不变。
 - 本地 broker:`mosquitto -c /tmp/mosq.conf`(我用的最小配置:`listener 1883 127.0.0.1` + `allow_anonymous true`)。注意 `mosquitto_pub/sub` CLI 在本机 sandbox 下会报 "Bad file descriptor",用 Python `paho-mqtt` 代替更顺。
-- headless 下验出站:80×24 默认尺寸已兜底(不会再 panic),但要收到 `pty_out`/`screen` 仍需 PTY 有输出触发广播。
+- headless 下验出站:80×24 默认尺寸已兜底(不会再 panic),但要收到 `screen`/`screen_text` 仍需 PTY 有输出触发广播。
 - 日志:flexi_logger 写到 CWD 的文件,不是 stdout——跑完去 CWD 看 `vibetty*.log`。

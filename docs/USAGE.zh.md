@@ -221,7 +221,7 @@ vibetty skill uninstall  --claude [--codex] 移除 run-vibetty skill
 | `--config <PATH>` | 覆盖配置文件路径。 | `~/.vibetty/config.toml` |
 | `-b, --bind-addr <ADDR>` | HTTP 监听地址（启动 HTTP 时作为对话框预填默认值）。 | `0.0.0.0:3000` |
 | `-a, --auto-submit` | 收到 `input_text` 时自动追加回车并执行（同时把 scrollback 设为 3，露出一点历史）；关掉则只输入文本、scrollback=0（最新）。 | `true` |
-| `-q, --quality <档位>` | 截图 JPEG 质量：`high`（q85 彩色）、`medium`（q70 彩色）、`low`（q50 黑白）。 | `high` |
+| `-q, --quality <档位>` | 屏幕输出格式：`high`（JPEG q85 彩色）、`medium`（JPEG q70 彩色）、`low`（JPEG q50 黑白），或 `text`（在 `P/screen_text` 发纯 ANSI 文本流,不出图——见 §6.5b）。 | `high` |
 
 ### 截图渲染参数（固定）
 
@@ -230,7 +230,7 @@ vibetty skill uninstall  --claude [--codex] 移除 run-vibetty skill
 - 字符单元：**8 × 18 像素**（宽 × 高）。
 - 四周留白：**各 16 像素**。
 - 整图尺寸 = `cols × 8 + 32`（宽）× `rows × 18 + 32`（高）。
-- 编码为 JPEG；质量档位由 `-q, --quality` 决定（见上方「运行模式选项」）：`high` = q85 彩色（默认）、`medium` = q70 彩色、`low` = q50 黑白。
+- 编码为 JPEG；质量档位由 `-q, --quality` 决定（见上方「运行模式选项」）：`high` = q85 彩色（默认）、`medium` = q70 彩色、`low` = q50 黑白。`-q text` 时屏幕改发 ANSI 文本流,不出 JPEG。
 
 ---
 
@@ -270,11 +270,13 @@ vibetty skill uninstall  --claude [--codex] 移除 run-vibetty skill
 |------|-------|---------|----------------|------|
 | 设备 → vibetty | `P/pty_in` | **raw bytes** | QoS 0 / 否 | 原始按键字节（单键 / 转义序列） |
 | 设备 → vibetty | `P/control` | **JSON** | QoS 1 / 否 | 控制消息（输入文本 / 同步 / 滚动） |
-| vibetty → 设备 | `P/screen` | **raw bytes**（图 + 末尾 4 字节 offset） | QoS 0 / **是** | 整张 JPEG |
+| vibetty → 设备 | `P/screen` | **raw bytes**（JPEG + 末尾 4 字节 offset） | QoS 0 / **是** | 整张 JPEG 屏幕帧。**仅 JPEG 模式**（`-q high/medium/low`）。 |
+| vibetty → 设备 | `P/screen_text` | **raw bytes**（`[1 字节 tag] + ANSI 文本`，见 6.5b） | QoS 0 / 全屏帧 **是**、增量帧 **否** | text 模式屏幕流（全屏基线 + 实时 pty 增量）。**仅 text 模式**（`-q text`）。 |
 | vibetty → 设备 | `P`（前缀本身） | **JSON** | QoS 1 / **是** | presence 公告（服务发现） |
-| ~~vibetty → 设备~~ | ~~`P/pty_out`~~ | — | — | **当前调试期停发**（只 log），远端不要依赖 |
 
-> `screen` 是 **retained**：远端一订阅就**立即收到最近一张**图，不用等下一次刷新。
+> **两种输出模式**（`-q`,vibetty 启动时决定,整条会话固定):实例**要么**发 `P/screen`(JPEG,`-q high/medium/low`),**要么**发 `P/screen_text`(text,`-q text`),不会两个都发。远端按 presence 的 `format` 字段决定订哪个(见 6.7)。**没有独立的 `P/pty_out` topic**——text 模式的实时 pty 字节作为增量帧(tag `0x01`)合在 `P/screen_text` 里。
+>
+> `screen` 和 `screen_text` 的全屏帧都是 **retained**:远端一订阅就立即收到最近一帧。`screen_text` 的**增量帧不 retained**(这样 retained 的永远是完整基线)。
 
 ### 6.4 `control` 的 JSON 格式
 
@@ -283,21 +285,23 @@ vibetty skill uninstall  --claude [--codex] 移除 run-vibetty skill
 | type | data | 含义 |
 |------|------|------|
 | `input_text` | 字符串 | 输入一段文本（如命令）。若服务端开了 `--auto-submit`，会自动追加回车执行。 |
-| `sync` | `{"width":W,"height":H}` | `width`/`height` 是远端**显示区的像素**尺寸；服务端换算成列/行后 resize PTY 并刷新整屏（见 6.6）。 |
-| `scroll_up` | `{"rows":N}` | 向上滚动；`rows`=0 / 缺省 = 滚一整页（= 终端可见行数）。 |
+| `sync` | `{"width":W,"height":H,"pixels":bool,"close":bool}` | 声明远端显示尺寸 + 控制自主推送。`pixels`(默认 `true`):`width`/`height` 是**像素** → 服务端换算 cols/rows;`false`:已是字符列/行,直接用。`close`(默认 `false`):`true` = **暂停**服务端自主推屏(远端不看时省流量);`false` = 恢复。服务端 resize PTY 并回送一帧整屏(见 6.6)。 |
+| `scroll_up` | `{"rows":N}` | 向上滚动；`rows`=0 / 缺省 = 滚一整页（= 终端可见行数,留两行重叠）。 |
 | `scroll_down` | `{"rows":N}` | 向下滚动；同上。 |
 
-示例：
+`sync` 的 `pixels` / `close` 都是**可选、向后兼容**的(缺省 → `pixels:true`、`close:false`)。示例：
 
 ```json
 {"type":"input_text","data":"ls -la\n"}
 {"type":"sync","data":{"width":320,"height":240}}
+{"type":"sync","data":{"width":80,"height":24,"pixels":false}}
+{"type":"sync","data":{"width":80,"height":24,"pixels":false,"close":true}}
 {"type":"scroll_up","data":{"rows":0}}
 ```
 
 > `pty_in`（raw 单键）和 `control` 的 `input_text`（文本串）的区别：**单键 / 方向键 / 控制字符**走 `pty_in` 的 raw 字节；**整段文本 / 命令行**走 `control` 的 `input_text`。
 
-### 6.5 `screen` 的 payload
+### 6.5 `screen` 的 payload（JPEG 模式）
 
 整张 JPEG 图片字节，**无分块、无信令字段**。但**末尾追加了 4 字节**，需要注意：
 
@@ -307,16 +311,47 @@ vibetty skill uninstall  --claude [--codex] 移除 run-vibetty skill
    - `> 0` = 截自向上滚动了 N 行的位置。
    - 这 4 字节在图片的 `EOI`（JPEG）之后，解码器会忽略，所以不影响解码。
 
-### 6.6 `sync` 的尺寸换算
+### 6.5b `screen_text` 的 payload（text 模式）
 
-`sync` 的 `width`/`height` 单位是**像素**，不是终端的列/行。服务端按截图渲染参数换算（见第 5 节）：
+text 模式(`-q text`)把屏幕作为 **ANSI 终端流**发到 `P/screen_text`——「全屏基线 + 实时增量」设计。每个 payload 开头是 **1 字节 tag**:
 
 ```
-cols = (width  - 32) / 8      # 32 = 左右各 16px 留白；8 = 字符宽
-rows = (height - 32) / 18     # 18 = 字符高
+payload = [ tag: 1 字节 ] [ 内容 ]
 ```
 
-最低 `cols = 8`、`rows = 2`（防 vt100 0 行 panic）。远端**只要如实上报自己屏的像素**，服务端自动算出合适的终端尺寸并 resize。
+| tag | 含义 | 内容 | retained | 何时发 |
+|-----|------|------|----------|--------|
+| `0x00` | **全屏基线** | vt300 `contents_formatted()` 的输出:可重放的 ANSI 流(光标归位 + SGR 颜色 + 文本),喂给空终端解析器即可还原整屏(含颜色) | **是** | 启动首帧,以及每次 `sync` / `scroll_*` 的响应 |
+| `0x01` | **pty 增量**(实时) | 原始 PTY 输出字节(ANSI 转义 + 文本) | **否** | PTY 每次有输出就发(实时) |
+
+- **为什么增量不 retained**:这样 broker 上 retained 的永远是完整的 `0x00` 基线。重连时远端拿到的是可用的全屏帧,而不是一个会在空白 buffer 上产生乱码的陈旧增量。
+- **远端推荐实现**:维护一个终端模拟器 buffer;收到 `0x00` 就 reset 后重放整屏;收到 `0x01` 就把字节增量喂进去(就像真终端接收 shell 输出)。连上后 retained 的 `0x00` 提供基线;不放心就发一条 `sync` 强制再发一个 `0x00`。
+- 内容**含 ANSI 转义**(`\x1b[...`)——不是纯文本。要么用终端解析器渲染,要么自己剥离转义。
+- `close=true` 会停掉 `0x01` 增量(自主推送暂停);`0x00` 全屏帧在 `sync` / `scroll_*` 响应里照发。
+
+### 6.6 `sync` 的尺寸换算 + `close` 开关
+
+**尺寸单位**取决于 `pixels` 字段:
+
+- `pixels: true`(默认):`width`/`height` 是**像素**。服务端按截图渲染参数换算(见第 5 节):
+
+  ```
+  cols = (width  - 32) / 8      # 32 = 左右各 16px 留白；8 = 字符宽
+  rows = (height - 32) / 18     # 18 = 字符高
+  ```
+
+- `pixels: false`:`width`/`height` 已是**字符列/行**,服务端直接用。
+
+最低 `cols = 8`、`rows = 2`（防 vt100 0 行 panic）。远端只要如实上报自己的显示尺寸,服务端自动 resize。
+
+**`close` 开关**(省流量):控制服务端**自主**推屏(PTY 输出触发的那部分):
+
+| `close` | JPEG 模式 | text 模式 |
+|---------|-----------|-----------|
+| `false`(默认) | PTY 输出停顿满 100ms → 发一帧 `P/screen` | 每次 PTY 输出 → 发一条 `P/screen_text` 增量(`0x01`) |
+| `true` | 停止发 `P/screen`(在途帧也丢) | 停止发增量(`0x01`) |
+
+不受 `close` 影响(客户端主动请求,照常回送):`sync` 的屏幕响应、`scroll_*` 响应、presence 心跳。典型用法:远端息屏 / 用户没在看时发 `close=true` 静音推流;`close=false` 恢复。
 
 ### 6.7 Discovery / presence 机制
 
@@ -328,7 +363,8 @@ vibetty 上线时，在 `P`（前缀本身）发一条 **retained** presence：
   "client_id": "vibetty-1a2b3c4d5e6f7a8b-12345",
   "ts": 1751300000,
   "title": "claude — workspace",
-  "state": "working"
+  "state": "working",
+  "format": "high"
 }
 ```
 
@@ -339,6 +375,7 @@ vibetty 上线时，在 `P`（前缀本身）发一条 **retained** presence：
 | `ts` | 当前 epoch 秒（远端据此判活） |
 | `title` | 终端窗口标题（程序通过 OSC 设置），用于 agent 状态识别 |
 | `state` | agent 工作状态：`"working"` 或 `"waiting"`（小写）。Codex / Claude Code 在等用户操作时为 `waiting`。 |
+| `format` | **输出模式**:`"high"` / `"medium"` / `"low"`(JPEG → 订阅 `P/screen`)或 `"text"`(text → 订阅 `P/screen_text`)。据此决定订阅哪个屏 topic。 |
 
 - **每 15s 重发一次**（心跳，刷新 `ts`）。
 - **异常掉线**：broker 触发 LWT，向 `P` 发一条**空 payload**（= 删除 retained），远端立即知道实例下线。
@@ -360,14 +397,15 @@ vibetty 上线时，在 `P`（前缀本身）发一条 **retained** presence：
 
 1. ✅ 连接 broker（host/port/认证与 vibetty 配置一致）。
 2. ✅ **Discovery**：subscribe presence 通配 topic，解析 payload，维护「在线实例列表」。
-3. ✅ 选定目标实例后，subscribe `{P}/screen`（无屏可只发输入、不订阅 screen 省带宽）。
-4. ✅ 收 `screen` → 据 magic bytes 判 JPEG → 解码显示 → 读末 4 字节 scrollback offset。
+3. ✅ 选定目标实例后,**按它的 `format`** 订阅屏 topic:`"text"` → `{P}/screen_text`;否则(JPEG)→ `{P}/screen`。(无屏可只发输入、不订阅省带宽。)
+4. ✅ **JPEG 模式**:收 `screen` → 据 magic bytes 判 JPEG → 解码显示 → 读末 4 字节 scrollback offset。**text 模式**:收 `screen_text` → 读首字节(`0x00` = 全屏基线 → reset 终端 buffer 后重放;`0x01` = pty 增量 → 增量喂进 buffer)。
 5. ✅ 发单键 → publish `{P}/pty_in`（raw bytes）。
 6. ✅ 发文本命令 → publish `{P}/control`（JSON `input_text`）。
-7. ✅ 上报显示尺寸 → publish `{P}/control`（JSON `sync`）。
+7. ✅ 上报显示尺寸(+ 省流量开关)→ publish `{P}/control`(JSON `sync`,带 `width`/`height`/`pixels`/`close`)。
 8. ✅ **存活判断**：presence 的 `ts`（超过 ~30s 未更新当离线）+ LWT 空 payload（实例下线，立即移除）。
-9. ✅ **切换目标**：unsubscribe 旧实例的 `screen`，subscribe 新实例的。
+9. ✅ **切换目标**：unsubscribe 旧实例的屏 topic(`screen` 或 `screen_text`),按新实例的 `format` subscribe。
 10. ✅（可选）**agent 状态**：据 presence 的 `state` 决定是否需要把画面推给用户。
+11. ✅(可选,**省流量**)**`close` 开关**:息屏 / 用户没在看时,发带 `close=true` 的 `sync` 暂停服务端自主推送;`close=false` 恢复。
 
 ### 7.2 代码骨架（`esp-idf-svc`，结构参考）
 
@@ -399,6 +437,7 @@ client.subscribe("+/+/+/vibetty", QoS::AtLeastOnce).await?;
 
 ```rust
 let mut current_prefix: Option<String> = None;
+let mut current_format: Option<String> = None;   // 实例的 `format`("text" / "high" / ...)
 
 loop {
     let msg = client.next().await?;
@@ -413,14 +452,19 @@ loop {
                 // LWT：实例下线 → 清空当前目标
                 current_prefix = None;
             } else {
-                // {"prefix","client_id","ts","title","state"}
+                // {"prefix","client_id","ts","title","state","format"}
                 let p: Presence = serde_json::from_slice(payload)?;
                 if current_prefix.as_deref() != Some(&p.prefix) {
-                    if let Some(old) = current_prefix.take() {
-                        client.unsubscribe(&format!("{old}/screen")).await?;
+                    // unsubscribe 旧实例的屏 topic(看之前是哪个)
+                    if let Some((old, fmt)) = current_prefix.take().zip(current_format.take()) {
+                        let topic = if fmt == "text" { "screen_text" } else { "screen" };
+                        client.unsubscribe(&format!("{old}/{topic}")).await?;
                     }
                     current_prefix = Some(p.prefix.clone());
-                    client.subscribe(&format!("{}/screen", p.prefix), QoS::AtLeastOnce).await?;
+                    current_format = Some(p.format.clone());
+                    // 按实例的 `format` 订阅对应的屏 topic
+                    let topic = if p.format == "text" { "screen_text" } else { "screen" };
+                    client.subscribe(&format!("{}/{topic}", p.prefix), QoS::AtLeastOnce).await?;
                     // 上报自己的显示尺寸，让服务端 resize
                     client.publish(
                         &format!("{}/control", p.prefix),
@@ -430,11 +474,17 @@ loop {
                 }
             }
         }
-        // 屏幕截图: [..., "vibetty", "screen"]
+        // JPEG 屏幕图: [..., "vibetty", "screen"]
         [.., "vibetty", "screen"] => {
             // 1) 据 magic bytes 判 JPEG → 解码
             // 2) 读末 4 字节 = scrollback offset（0 = 最新）
             // 3) 显示
+        }
+        // text 屏幕流: [..., "vibetty", "screen_text"]
+        [.., "vibetty", "screen_text"] => {
+            // payload[0] 是 tag:
+            //   0x00 = 全屏基线 → reset 终端 buffer,重放 payload[1..]
+            //   0x01 = pty 增量 → 把 payload[1..] 增量喂进 buffer
         }
         _ => {}
     }
@@ -469,6 +519,7 @@ client.publish(
 8. **TLS**：8883 用 `mqtts://`；ESP32 直连 TCP MQTT，不走 WebSocket。
 9. **`user` 段的确定**：远端连 broker 的 username **就是** vibetty 的 `user` 段（前提：vibetty 在 broker URL 里填了账号且账号一致）。若 vibetty 没填账号（user 段 = `root`），远端用宽通配 `+/+/+/vibetty`。
 10. **ASR 在 ESP32 本地做**：服务端不做语音转写。ESP32 识别完把**文本**经 `control` 的 `input_text` 发回即可，省音频流量。
+11. **text 模式(`format: "text"`)**:订阅 `P/screen_text`(不是 `P/screen`),按首字节 tag 分派(`0x00` 全屏 / `0x01` 增量)——见 §6.5b。增量高频且**不 retained**,retained 的永远是 `0x00` 基线;终端 buffer 失同步就发一条 `sync` 强制重发 `0x00`。内容含 ANSI 转义(要终端解析器,不能直接 `print`)。不看时用 `sync.close=true` 静音实时增量。
 
 ### 7.4 不依赖 ESP32 也能验证（本地）
 

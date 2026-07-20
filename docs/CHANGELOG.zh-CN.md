@@ -1,5 +1,23 @@
 # 变更日志 (CHANGELOG)
 
+## [0.4.0-rc.6] - 2026-07-20
+
+新增 text 输出模式 + MQTT 协议扩展(原始 PTY 流、Sync 字段、format 发现)。(中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md)。)
+
+### 新增
+
+- **text 输出模式(`-q text`)**:除 JPEG 质量档位外,屏幕现在可作为 ANSI 终端流发到新的 `{p}/screen_text` topic,不再出 JPEG 图。每个 payload 首字节是 1 字节 tag:`0x00` = 全屏基线(`vt80` `contents_formatted`,可重放的带颜色 ANSI 流)、`0x01` = 实时原始 PTY 增量。全屏帧 retained、增量帧不 retained(重连总能拿到完整基线)。该模式下 `/screenshot` 返回 `text/plain`。
+- **text 模式实时 PTY 流**:PTY 输出立即作为 `0x01` 增量发到 `{p}/screen_text`(独立的 `{p}/pty_out` topic 取消——增量并进了 `screen_text`)。JPEG 模式不变(去抖后的 `{p}/screen` 帧)。
+- **`Sync.pixels` 字段**:`false` 时客户端直接发字符列/行,服务端跳过像素→字符格换算。默认 `true`(像素),向后兼容。
+- **`Sync.close` 字段**:服务端自主推屏的暂停开关。`close=true` 停止 PTY 输出触发的推送(并丢弃在途去抖帧);`close=false` 恢复。默认 `false`。客户端主动请求(sync 响应、scroll)不受影响。让省电客户端不看时能静音推流。
+- **presence 加 `format` 字段**:实例的 `-q` 设置(`high`/`medium`/`low`/`text`)写进 presence JSON,客户端据此决定订阅 `{p}/screen`(JPEG)还是 `{p}/screen_text`(text)。
+
+### 变更
+
+- **`JpegQuality` → `OutputFormat`**:枚举改名(现已覆盖非 JPEG 的 text 模式),新增 `Text` / `is_text()` / `as_str()`。已有档位的 wire 格式不变(`high`/`medium`/`low`);新增 `text`。
+- **渲染决定移到 MQTT 桥**:`ws` 只广播 `Screen`;MQTT 任务按 `image_format` 渲染成 JPEG 或 ANSI 文本。`ScreenText` 不再是独立协议变体。
+- **text 模式流量纳入统计**:MQTT 出站字节计数(`total_screen_bytes`)现在也累加 text 模式的全屏帧和增量帧(原先只算 JPEG);两者日志都带累计 MB。
+
 ## [0.4.0-rc.5] - 2026-07-15
 
 全屏编辑器(helix / vim / zerostack / …)的键盘输入修复。(中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md)。)
