@@ -94,7 +94,7 @@ Run-mode options:
 | `--config <PATH>` | Override the config file path | `~/.vibetty/config.toml` |
 | `-b, --bind-addr <ADDR>` | HTTP listen address (used as the dialog default) | `0.0.0.0:3000` |
 | `-a, --auto-submit` | Append Enter to `input_text` so a sent command is executed | `true` |
-| `-q, --quality <QUALITY>` | JPEG quality for screen screenshots: `high` (q85 color), `medium` (q70 color), `low` (q50 grayscale) | `high` |
+| `-q, --quality <QUALITY>` | Screen output format: `text` (ANSI text stream on `P/screen_text`) or `high`/`medium`/`low` (JPEG quality) | `text` |
 
 ## HTTP endpoints (started on demand)
 

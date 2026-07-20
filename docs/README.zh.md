@@ -94,7 +94,7 @@ vibetty skill uninstall  --claude [--codex] 移除 run-vibetty skill
 | `--config <PATH>` | 覆盖配置文件路径 | `~/.vibetty/config.toml` |
 | `-b, --bind-addr <ADDR>` | HTTP 监听地址（作为对话框预填默认值） | `0.0.0.0:3000` |
 | `-a, --auto-submit` | 收到 `input_text` 时自动追加回车并执行 | `true` |
-| `-q, --quality <档位>` | 截图 JPEG 质量：`high`（q85 彩色）、`medium`（q70 彩色）、`low`（q50 黑白） | `high` |
+| `-q, --quality <档位>` | 屏幕输出格式:`text`(ANSI 文本流,发 `P/screen_text`)或 `high`/`medium`/`low`(JPEG 质量) | `text` |
 
 ## HTTP 端点（按需启动）
 

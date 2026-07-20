@@ -87,11 +87,11 @@ pub struct Cli {
     #[arg(last = true)]
     pub command_args: Vec<String>,
 
-    /// Screen output format: high/medium/low (JPEG quality tiers) or text (plain-text screen, no image; vibeKEY unsupported)
+    /// Screen output format: text (plain ANSI text stream, no image) or high/medium/low (JPEG quality tiers)
     #[arg(
         short = 'q',
         long = "quality",
-        default_value = "high",
+        default_value = "text",
         value_name = "QUALITY"
     )]
     pub image_format: String,
