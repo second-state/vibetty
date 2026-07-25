@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.4.0-rc.7] - 2026-07-26
+
+Default output mode + retained-message hygiene. (中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md).)
+
+### Changed
+
+- **`-q text` is now the default** (was `high`). Without `-q`, vibetty now sends the screen as an ANSI text stream on `P/screen_text` instead of a JPEG image.
+- **Screen topics are no longer retained.** `{p}/screen` and `{p}/screen_text` (both full-frame `0x00` and delta `0x01`) are published with `retain=false`; only presence stays retained. The topic prefix contains the pid, which changes every restart, so retained screen frames used to pile up on stale `{old-pid}/...` topics that nobody cleared. The remote now gets its first frame by sending a `sync` on connect.
+- **No clean MQTT DISCONNECT on stop.** vibetty no longer calls `client.disconnect()`, so the broker always sees the dropped socket as an abrupt disconnect and fires the LWT to clear the retained presence (a clean DISCONNECT would suppress the LWT and leak the presence on the old pid's topic).
+
 ## [0.4.0-rc.6] - 2026-07-20
 
 Text output mode + MQTT protocol expansion (raw PTY stream, richer Sync, format discovery). (中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md).)

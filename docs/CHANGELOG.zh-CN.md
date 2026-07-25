@@ -1,5 +1,15 @@
 # 变更日志 (CHANGELOG)
 
+## [0.4.0-rc.7] - 2026-07-26
+
+默认输出模式 + retained 消息卫生。(中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md)。)
+
+### 变更
+
+- **`-q text` 改为默认**(原 `high`)。不传 `-q` 时,vibetty 现在把屏幕作为 ANSI 文本流发到 `P/screen_text`,不再出 JPEG 图。
+- **屏 topic 不再 retained**。`{p}/screen` 和 `{p}/screen_text`(全屏 `0x00` + 增量 `0x01`)都 `retain=false`,只有 presence 仍 retained。topic 前缀带 pid、每次重启就变,retained 的屏幕帧以前会堆在没人清的老 `{old-pid}/...` topic 上。远端现在靠连上时发 `sync` 拿首帧。
+- **退出不发干净 MQTT DISCONNECT**。vibetty 不再调 `client.disconnect()`,让 broker 把断开的 socket 当异常掉线 → 必发 LWT 清掉 retained presence(干净 DISCONNECT 会抑制 LWT,presence 会残留在老 pid 的 topic 上)。
+
 ## [0.4.0-rc.6] - 2026-07-20
 
 新增 text 输出模式 + MQTT 协议扩展(原始 PTY 流、Sync 字段、format 发现)。(中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md)。)
