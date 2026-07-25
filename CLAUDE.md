@@ -86,11 +86,11 @@ keep_alive_secs = 30
 
 ### client 可中断/重启(oneshot cancel)
 
-`mqtt::spawn` 返回 `MqttHandle{cancel: oneshot::Sender<()>}`;`run_bridge` 主循环**一个 `select!` 同时跑三路**:cancel、入站 `eventloop.poll()`、出站 `rx.recv()`(收 `Screen` 渲染补齐后 publish)。`MqttHandle::stop()` 发 cancel → break → `client.disconnect()` + `abort()` 心跳任务(出站已并入主 select,随 break 一同停,无需单独 abort;否则心跳会一直往死连接上发、刷 warn)。真正的下线清理靠 **LWT**(空 retained):连接一断 broker 自动清 presence。**停 client 期间的消息不会缓存、重启不补发**(broadcast 只投递给当前订阅者)。
+`mqtt::spawn` 返回 `MqttHandle{cancel: oneshot::Sender<()>}`;`run_bridge` 主循环**一个 `select!` 同时跑三路**:cancel、入站 `eventloop.poll()`、出站 `rx.recv()`(收 `Screen` 渲染补齐后 publish)。`MqttHandle::stop()` 发 cancel → break。**故意不调 `client.disconnect()`**:直接 drop 连接(socket 关),让 broker 把它当异常掉线 → **必发 LWT**(空 retained)清 presence(发干净 MQTT DISCONNECT 的话 broker 不发 LWT,presence 会残留在老 pid 的 topic 上)。rumqttc 0.25.1 client/eventloop 无 Drop impl,drop 时不会自己补发 DISCONNECT。出站已并入主 select,随 break 一同停(无需单独 abort 心跳)。**停 client 期间的消息不会缓存、重启不补发**(broadcast 只投递给当前订阅者)。
 
 ### 协议(用户拍板)
 
-**不用 msgpack**。原始按键走独立 raw topic(`pty_in`);控制类消息(输入文本/同步/滚动)合并到一个 `control` topic,payload 是 `ClientMessage` 的 serde JSON(`{"type":...,"data":...}`)。出站由 `-q`(`OutputFormat`)决定:**JPEG 模式**(high/medium/low)发 `{p}/screen`(整张 JPEG + 末尾 4 字节大端 scrollback offset);**text 模式**(text)发 `{p}/screen_text`(首字节 tag:`0x00`=全屏基线 `contents_formatted`、`0x01`=pty 增量原始字节;全屏帧 retained、增量帧不 retained)。text 模式实时增量靠 `PtyOutput` → mqtt 路由到 `screen_text` tag `0x01`(没有独立 `{p}/pty_out` topic)。`notification`/`title` 不走 MQTT。
+**不用 msgpack**。原始按键走独立 raw topic(`pty_in`);控制类消息(输入文本/同步/滚动)合并到一个 `control` topic,payload 是 `ClientMessage` 的 serde JSON(`{"type":...,"data":...}`)。出站由 `-q`(`OutputFormat`)决定:**JPEG 模式**(high/medium/low)发 `{p}/screen`(整张 JPEG + 末尾 4 字节大端 scrollback offset);**text 模式**(text)发 `{p}/screen_text`(首字节 tag:`0x00`=全屏基线 `contents_formatted`、`0x01`=pty 增量原始字节)。**屏 topic 一律不 retained**(`screen` / `screen_text` 全屏+增量都 `retain=false`)——前缀带 pid,retained 会堆在老 pid 的 topic 上清不掉;只有 presence retained,进程退出时 LWT 清。text 模式实时增量靠 `PtyOutput` → mqtt 路由到 `screen_text` tag `0x01`(没有独立 `{p}/pty_out` topic)。`notification`/`title` 不走 MQTT。
 
 Topic 前缀 `{user}/{device}/{pid}/vibetty`:`device`=SHA256(machine-uid) 前 16 hex、`pid`=进程 pid、`user`=`username`(空则 `root`)。
 - 入站(订阅):`{p}/pty_in`(raw→PtyInput)、`{p}/control`(JSON→`parse_control`,只收 input/sync/scroll_*)。
@@ -100,7 +100,7 @@ Topic 前缀 `{user}/{device}/{pid}/vibetty`:`device`=SHA256(machine-uid) 前 16
 
 ### 改动要点
 
-- `mqtt.rs`:`spawn()->MqttHandle` + `run_bridge(cfg, cli_tx, tx, fmt, cancel)`。出/入站都在主 `select!` 里:出站 `rx.recv()` 分支——`Screen` 按 `image_format.is_text()` 分流:text→`render_screen_to_text`(vt300 `contents_formatted`)前缀 `0x00` 发 `screen_text`(retained);否则→`render_screen_to_image` 补齐到 sync 尺寸 + 末尾 offset trailer 发 `screen`。`PtyOutput`(仅 text 模式,ws 在 `!screen_closed` 时才发)前缀 `0x01` 发 `screen_text`(不 retained)。入站 `eventloop.poll()`→strip 前缀→`pty_in`/`control`→`cli_tx`、外加 cancel 分支。sync 尺寸是普通 `u16` 局部变量(出/入站同任务顺序访问)。`total_screen_bytes` 统计 jpeg+text(全屏+增量)累计字节。退出时 disconnect + abort 心跳。
+- `mqtt.rs`:`spawn()->MqttHandle` + `run_bridge(cfg, cli_tx, tx, fmt, cancel)`。出/入站都在主 `select!` 里:出站 `rx.recv()` 分支——`Screen` 按 `image_format.is_text()` 分流:text→`render_screen_to_text`(vt300 `contents_formatted`)前缀 `0x00` 发 `screen_text`;否则→`render_screen_to_image` 补齐到 sync 尺寸 + 末尾 offset trailer 发 `screen`。`PtyOutput`(仅 text 模式,ws 在 `!screen_closed` 时才发)前缀 `0x01` 发 `screen_text`。**屏 topic 一律 `retain=false`**(全屏+增量);只有 presence retained。入站 `eventloop.poll()`→strip 前缀→`pty_in`/`control`→`cli_tx`、外加 cancel 分支。sync 尺寸是普通 `u16` 局部变量(出/入站同任务顺序访问)。`total_screen_bytes` 统计 jpeg+text(全屏+增量)累计字节。退出时**不发 MQTT DISCONNECT**,直接 drop 连接 → broker 触发 LWT 清 presence。
 - `ws.rs`:`OutputFormat`(`JpegQuality` 已改名)决定渲染;`render_screen_to_text`(`pub(crate)`,用 vt300 `Screen::contents_formatted`)供 mqtt + `/screenshot` 复用。`send_screen` 只广播 `Screen`(渲染决定在 mqtt)。PtyOutput arm 按 `is_text()` 分流:text 实时发 PtyOutput(仅 `!screen_closed`);jpeg 走 100ms 去抖发屏。`/screenshot`(ScreenGetter)也按 `is_text()` 返回 text/plain 或 JPEG。
 - `config.rs`:`MqttConfig` 见上;`for_client()`(URL 解析,唯一一处)。`RunArgs::mqtt_config()` 固定从 `~/.vibetty/config.toml` 读 `[mqtt]`。
 - `main.rs`:**不再 boot 起 transport**;只 `args.mqtt_config()` 拿 `mqtt_cfg` + `cli_tx` 传给 `run_command`。

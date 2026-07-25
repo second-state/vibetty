@@ -276,7 +276,7 @@ vibetty skill uninstall  --claude [--codex] 移除 run-vibetty skill
 
 > **两种输出模式**（`-q`,vibetty 启动时决定,整条会话固定):实例**要么**发 `P/screen`(JPEG,`-q high/medium/low`),**要么**发 `P/screen_text`(text,`-q text`),不会两个都发。远端按 presence 的 `format` 字段决定订哪个(见 6.7)。**没有独立的 `P/pty_out` topic**——text 模式的实时 pty 字节作为增量帧(tag `0x01`)合在 `P/screen_text` 里。
 >
-> `screen` 和 `screen_text` 的全屏帧都是 **retained**:远端一订阅就立即收到最近一帧。`screen_text` 的**增量帧不 retained**(这样 retained 的永远是完整基线)。
+> **屏 topic 一律不 retained**(`P/screen`、`P/screen_text` 全屏+增量都 `retain=false`)。因为 topic 前缀里有 pid,每次重启就变;retained 的屏幕帧会堆在没人清的老 `{old-pid}/...` topic 上。只有 `P`(presence)是 retained,vibetty 进程退出时 broker 的 LWT 会清掉它(进程不发干净 MQTT DISCONNECT,broker 把 socket 关闭当掉线、触发 LWT)。远端的首帧靠连上时发一条 `sync` 拿,不依赖 retained。
 
 ### 6.4 `control` 的 JSON 格式
 
@@ -321,11 +321,11 @@ payload = [ tag: 1 字节 ] [ 内容 ]
 
 | tag | 含义 | 内容 | retained | 何时发 |
 |-----|------|------|----------|--------|
-| `0x00` | **全屏基线** | vt300 `contents_formatted()` 的输出:可重放的 ANSI 流(光标归位 + SGR 颜色 + 文本),喂给空终端解析器即可还原整屏(含颜色) | **是** | 启动首帧,以及每次 `sync` / `scroll_*` 的响应 |
+| `0x00` | **全屏基线** | vt300 `contents_formatted()` 的输出:可重放的 ANSI 流(光标归位 + SGR 颜色 + 文本),喂给空终端解析器即可还原整屏(含颜色) | **否** | 启动首帧,以及每次 `sync` / `scroll_*` 的响应 |
 | `0x01` | **pty 增量**(实时) | 原始 PTY 输出字节(ANSI 转义 + 文本) | **否** | PTY 每次有输出就发(实时) |
 
-- **为什么增量不 retained**:这样 broker 上 retained 的永远是完整的 `0x00` 基线。重连时远端拿到的是可用的全屏帧,而不是一个会在空白 buffer 上产生乱码的陈旧增量。
-- **远端推荐实现**:维护一个终端模拟器 buffer;收到 `0x00` 就 reset 后重放整屏;收到 `0x01` 就把字节增量喂进去(就像真终端接收 shell 输出)。连上后 retained 的 `0x00` 提供基线;不放心就发一条 `sync` 强制再发一个 `0x00`。
+- **两种 tag 都不 retained**(整个 `screen_text` topic 是 `retain=false`)。topic 前缀里有 pid,每次重启就变;retained 的帧会堆在没人清的老 `{old-pid}/screen_text` topic 上。
+- **远端推荐实现**:维护一个终端模拟器 buffer;收到 `0x00` 就 reset 后重放整屏;收到 `0x01` 就把字节增量喂进去(就像真终端接收 shell 输出)。连上后**主动发一条 `sync`** 强制一个 `0x00` 基线(没有 retained 帧等你);之后跟 `0x01` 增量。
 - 内容**含 ANSI 转义**(`\x1b[...`)——不是纯文本。要么用终端解析器渲染,要么自己剥离转义。
 - `close=true` 会停掉 `0x01` 增量(自主推送暂停);`0x00` 全屏帧在 `sync` / `scroll_*` 响应里照发。
 
@@ -519,7 +519,7 @@ client.publish(
 8. **TLS**：8883 用 `mqtts://`；ESP32 直连 TCP MQTT，不走 WebSocket。
 9. **`user` 段的确定**：远端连 broker 的 username **就是** vibetty 的 `user` 段（前提：vibetty 在 broker URL 里填了账号且账号一致）。若 vibetty 没填账号（user 段 = `root`），远端用宽通配 `+/+/+/vibetty`。
 10. **ASR 在 ESP32 本地做**：服务端不做语音转写。ESP32 识别完把**文本**经 `control` 的 `input_text` 发回即可，省音频流量。
-11. **text 模式(`format: "text"`)**:订阅 `P/screen_text`(不是 `P/screen`),按首字节 tag 分派(`0x00` 全屏 / `0x01` 增量)——见 §6.5b。增量高频且**不 retained**,retained 的永远是 `0x00` 基线;终端 buffer 失同步就发一条 `sync` 强制重发 `0x00`。内容含 ANSI 转义(要终端解析器,不能直接 `print`)。不看时用 `sync.close=true` 静音实时增量。
+11. **text 模式(`format: "text"`)**:订阅 `P/screen_text`(不是 `P/screen`),按首字节 tag 分派(`0x00` 全屏 / `0x01` 增量)——见 §6.5b。屏 topic **都不 retained**,所以连上后先发一条 `sync` 拿 `0x00` 基线,再跟 `0x01` 增量;终端 buffer 失同步就再发一条 `sync`。内容含 ANSI 转义(要终端解析器,不能直接 `print`)。不看时用 `sync.close=true` 静音实时增量。
 
 ### 7.4 不依赖 ESP32 也能验证（本地）
 

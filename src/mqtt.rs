@@ -290,8 +290,10 @@ async fn run_bridge(
 
     // 出站:订阅 broadcast,转发 Screen(JPEG 或 text 全屏/增量)+ Presence(上线/心跳/状态)。
     let screen_topic = format!("{prefix}/screen");
-    // text 模式屏幕文本走独立 topic,与 JPEG 的 /screen 分开。首字节 tag:0x00=全屏基线,
-    // 0x01=pty_out 增量。全屏帧 retained、增量帧不 retained(重连拿到的一定是完整基线)。
+    // text 模式屏幕文本走独立 topic,与 JPEG 的 /screen 分开。首字节 tag:0x00=全屏基线、
+    // 0x01=pty_out 增量。**两种屏 topic(screen / screen_text 全屏+增量)都不 retained**:
+    // pid 在前缀里,retained 会在重启后留在老 pid 的 topic 上清不掉(EMQX 累积);ESP32
+    // 重连靠主动发 sync 拿首帧,不依赖 retained。presence 仍 retained(进程退出时 LWT 清)。
     let screen_text_topic = format!("{prefix}/screen_text");
     // 最近一次 sync 的客户端显示尺寸(px);出站渲染时据此把图片精确补齐到该尺寸。
     let mut sync_width: u16 = 0;
@@ -304,7 +306,7 @@ async fn run_bridge(
 
     // 出站(rx 收 Screen → 渲染补齐 → publish;Presence → publish)+ 入站(poll eventloop
     // → ClientMessage → cli_tx)都在这一个 select! 里,同时监听 cancel:`MqttHandle::stop()`
-    // 发信号即 break,随后 disconnect。连接断开后 broker 触发 LWT 清空 presence。
+    // 发信号即 break。**不调用 disconnect()**:直接 drop 连接,broker 视为异常掉线 → 必发 LWT 清 presence。
     let pfx = format!("{prefix}/");
     loop {
         tokio::select! {
@@ -385,8 +387,8 @@ async fn run_bridge(
             msg = rx.recv() => match msg {
                 Ok(ServerMessage::PtyOutput(bytes)) => {
                     // text 模式增量(pty_out):ws 仅在 text 模式发 PtyOutput。前面加 tag=0x01,
-                    // 发到 screen_text(与全屏帧同 topic,靠首字节区分)。增量不 retained
-                    // ——retain 只留给全屏帧,这样重连拿到的 retained 消息一定是完整基线。
+                    // 发到 screen_text(与全屏帧同 topic,靠首字节区分)。不 retained(屏 topic
+                    // 一律不 retained,避免 pid 变更后老 topic 残留清不掉)。
                     let mut payload = Vec::with_capacity(1 + bytes.len());
                     payload.push(0x01);
                     payload.extend_from_slice(&bytes);
@@ -405,10 +407,11 @@ async fn run_bridge(
                 }
                 Ok(ServerMessage::Screen(screen)) => {
                     // 按 image_format 决定渲染成 JPEG(发 {prefix}/screen)还是 ANSI 文本
-                    // (发 {prefix}/screen_text)。两者都 retained,QoS0。
+                    // (发 {prefix}/screen_text)。**都不 retained**(屏 topic 一律不 retain,
+                    // 避免 pid 变更后老 topic 的 retained 残留清不掉),QoS0。ESP32 重连靠 sync 拿首帧。
                     if image_format.is_text() {
                         // text 模式全屏基线:tag=0x00 + contents_formatted(可重放的 ANSI 流)。
-                        // retained=true,重连/新订阅拿到完整一屏作基线,之后靠 delta(pty_out)增量。
+                        // 不 retained,之后靠 delta(pty_out)增量;ESP32 连上发 sync 触发本帧。
                         let text = render_screen_to_text(screen.as_ref());
                         let mut payload = Vec::with_capacity(1 + text.len());
                         payload.push(0x00);
@@ -420,7 +423,7 @@ async fn run_bridge(
                             total_screen_bytes as f64 / (1024.0 * 1024.0)
                         );
                         if let Err(e) = client
-                            .publish(&screen_text_topic, QoS::AtMostOnce, true, payload)
+                            .publish(&screen_text_topic, QoS::AtMostOnce, false, payload)
                             .await
                         {
                             log::warn!("[mqtt] publish screen_text failed: {e}");
@@ -443,7 +446,7 @@ async fn run_bridge(
                                     total_screen_bytes as f64 / (1024.0 * 1024.0)
                                 );
                                 if let Err(e) = client
-                                    .publish(&screen_topic, QoS::AtMostOnce, true, img)
+                                    .publish(&screen_topic, QoS::AtMostOnce, false, img)
                                     .await
                                 {
                                     log::warn!("[mqtt] publish screen failed: {e}");
@@ -477,11 +480,12 @@ async fn run_bridge(
         }
     }
 
-    // 收到取消:best-effort disconnect(可能不 flush——已不再 poll eventloop)。出站(Screen/Presence)
-    // 都在主 select 里,随 cancel 一同 break,无需单独 abort。
-    // 连接断开后 broker 触发 LWT(空 retained)清空 presence —— 正是主动停 client 想要的下线效果。
-    let _ = client.disconnect().await;
-    log::info!("[mqtt] client stopped");
+    // 故意**不发 MQTT DISCONNECT**:直接让连接随函数返回被 drop(socket 关闭),broker
+    // 视为异常掉线 → **必发 LWT**(空 retained)清掉 presence。这样无论进程退出还是面板
+    // Stop client,presence 都会被清,不残留(干净 DISCONNECT 的话 broker 不发 LWT,presence
+    // 会留在老 pid 的 topic 上)。rumqttc 0.25.1 的 client/eventloop 没有 Drop impl,
+    // drop 时不会自己补发 DISCONNECT,正好。
+    log::info!("[mqtt] client stopped (connection dropped; broker fires LWT to clear presence)");
 }
 
 #[cfg(test)]

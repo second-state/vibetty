@@ -276,7 +276,7 @@ Let `P = {user}/{device}/{pid}/vibetty` (the instance prefix):
 
 > **Two output modes** (`-q`, set at vibetty startup, fixed for the whole session): the instance publishes **either** `P/screen` (JPEG, `-q high/medium/low`) **or** `P/screen_text` (text, `-q text`), never both. The remote picks which to subscribe to based on the presence `format` field (see 6.7). There is **no separate `P/pty_out` topic** — in text mode the realtime pty bytes are carried inside `P/screen_text` as delta frames (tag `0x01`).
 >
-> `screen` and the full-frame `screen_text` are **retained**: the remote receives the most recent frame immediately upon subscribing. `screen_text` **delta** frames are not retained (so the retained message is always a complete baseline frame).
+> **Screen topics are NOT retained** (`P/screen`, `P/screen_text` full + delta all `retain=false`). The topic prefix contains the process pid, which changes on every restart; retained screen frames would pile up on stale `{old-pid}/...` topics that nobody clears. Only `P` (presence) is retained, and the broker's LWT clears it when vibetty exits (the process doesn't send a clean MQTT DISCONNECT, so the broker treats the closed socket as a disconnect and fires the LWT). The remote gets its first frame by sending a `sync` on connect (see 7.x), not from a retained screen.
 
 ### 6.4 `control` JSON format
 
@@ -321,11 +321,11 @@ payload = [ tag: 1 byte ] [ content ]
 
 | tag | meaning | content | retained | when |
 |-----|---------|---------|----------|------|
-| `0x00` | **full-frame baseline** | vt300 `contents_formatted()` — a replayable ANSI stream (cursor-home + SGR colors + text); feed it to an empty terminal parser to reproduce the whole screen (with colors) | **yes** | startup first frame, and in response to every `sync` / `scroll_*` |
+| `0x00` | **full-frame baseline** | vt300 `contents_formatted()` — a replayable ANSI stream (cursor-home + SGR colors + text); feed it to an empty terminal parser to reproduce the whole screen (with colors) | **no** | startup first frame, and in response to every `sync` / `scroll_*` |
 | `0x01` | **pty delta** (incremental) | raw PTY output bytes (ANSI escapes + text) | **no** | every time the PTY produces output (realtime) |
 
-- **Why delta is not retained**: so the broker's retained message is always a complete `0x00` baseline. On reconnect the remote gets a usable full frame, not a stale delta that would produce garbage on a blank buffer.
-- **Recommended remote implementation**: keep a terminal-emulator buffer; on `0x00` reset the buffer and replay the full frame; on `0x01` feed the bytes in as incremental output (exactly like a real terminal receiving shell output). On connect, the retained `0x00` gives the baseline; if unsure, send a `sync` to force a fresh `0x00`.
+- **Neither tag is retained** (the whole `screen_text` topic is `retain=false`). The topic prefix contains the pid, which changes each restart; retained frames would accumulate on stale `{old-pid}/screen_text` topics that nobody clears.
+- **Recommended remote implementation**: keep a terminal-emulator buffer; on `0x00` reset the buffer and replay the full frame; on `0x01` feed the bytes in as incremental output (exactly like a real terminal receiving shell output). On connect, **send a `sync`** to force a fresh `0x00` baseline (there is no retained frame waiting for you); then keep up with `0x01` deltas.
 - The content **contains ANSI escape codes** (`\x1b[...`) — it is not plain trimmed text. Either render it through a terminal parser or strip the escapes yourself.
 - `close=true` stops the `0x01` deltas (autonomous push paused); `0x00` full frames still come in response to `sync` / `scroll_*`.
 
@@ -520,7 +520,7 @@ client.publish(
 8. **TLS**: use `mqtts://` for 8883; the ESP32 connects to TCP MQTT directly, not over WebSocket.
 9. **Determining the `user` segment**: the remote's broker username **is** vibetty's `user` segment (provided vibetty set an account in the broker URL and the accounts match). If vibetty has no account (user segment = `root`), the remote uses the broad wildcard `+/+/+/vibetty`.
 10. **ASR is done locally on the ESP32**: the server does no speech transcription. After the ESP32 recognizes speech, it just sends the **text** back via `control`'s `input_text`, saving audio bandwidth.
-11. **Text mode (`format: "text"`)**: subscribe to `P/screen_text` (not `P/screen`) and dispatch on the leading tag byte (`0x00` full / `0x01` delta) — see §6.5b. Deltas are high-frequency and **not retained**, so the retained message is always a `0x00` baseline; if your terminal buffer gets out of sync, publish a `sync` to force a fresh `0x00`. The content contains ANSI escapes (needs a terminal parser, not a plain `print`). Use `sync.close=true` to mute the realtime deltas when not viewing.
+11. **Text mode (`format: "text"`)**: subscribe to `P/screen_text` (not `P/screen`) and dispatch on the leading tag byte (`0x00` full / `0x01` delta) — see §6.5b. Nothing on screen topics is **retained**, so on connect send a `sync` to get a fresh `0x00` baseline, then keep up with `0x01` deltas; if your terminal buffer gets out of sync, send another `sync`. The content contains ANSI escapes (needs a terminal parser, not a plain `print`). Use `sync.close=true` to mute the realtime deltas when not viewing.
 
 ### 7.4 Verify locally (without an ESP32)
 
