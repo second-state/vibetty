@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.4.0-rc.8] - 2026-07-26
+
+Text-mode QoS tuning + resize-burst handling. (中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md).)
+
+### Changed
+
+- **`screen_text` QoS split**: the full-frame baseline (tag `0x00`) is now published at QoS 1 (low-frequency, worth delivering reliably); the realtime pty delta (tag `0x01`) stays at QoS 0 (high-frequency, a missed frame is harmless). JPEG `screen` and `pty_in` remain QoS 0; presence is QoS 1.
+- **Resize no longer floods deltas.** Resizing the PTY (sync / window resize / Fit) triggers a TUI redraw burst. vibetty now absorbs that burst for up to 500ms (resetting on each new chunk) and sends a single full screen frame once output stays quiet, instead of forwarding every intermediate chunk as a pty_out delta. Normal output is unchanged.
+
 ## [0.4.0-rc.7] - 2026-07-26
 
 Default output mode + retained-message hygiene. (中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md).)

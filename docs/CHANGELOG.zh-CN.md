@@ -1,5 +1,14 @@
 # 变更日志 (CHANGELOG)
 
+## [0.4.0-rc.8] - 2026-07-26
+
+text 模式 QoS 调整 + resize burst 处理。(中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md)。)
+
+### 变更
+
+- **`screen_text` QoS 拆分**:全屏基线帧(tag `0x00`)改为 QoS 1(低频、值得可靠送达);实时 pty 增量(tag `0x01`)仍是 QoS 0(高频、丢一帧无所谓)。JPEG `screen` 和 `pty_in` 仍 QoS 0;presence 是 QoS 1。
+- **resize 不再灌增量**。resize PTY(sync / 窗口 resize / Fit)会触发 TUI 全量重绘 burst,vibetty 现在把这 500ms 内的 burst 吸收掉(每来一段重设 500ms 计时器),等输出静默满 500ms 才发一帧全屏,而不是把每个中间帧当 pty_out 增量灌过去。正常输出不受影响。
+
 ## [0.4.0-rc.7] - 2026-07-26
 
 默认输出模式 + retained 消息卫生。(中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md)。)
