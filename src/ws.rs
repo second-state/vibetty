@@ -718,10 +718,17 @@ pub async fn run_command(
     // close 开关(Sync.close):true 时暂停 PTY 输出触发的自主 screen 推送。客户端不看时关掉省流量。
     let mut screen_closed = false;
 
+    // resize 后 PTY 会刷一大段重绘 burst(codex/helix 这类 TUI 收到 SIGWINCH 全量重绘)。
+    // 这段时间不转发 pty_out 增量 / 不发屏帧(吸收掉,vt300 已把输出吃进 screen 状态),
+    // 等停顿满 RESIZE_SETTLE(500ms)再发一帧全屏,免得把重绘 burst 当增量灌给 ESP32。
+    const RESIZE_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
+    let mut resize_settle_until: Option<tokio::time::Instant> = None;
+
     loop {
         // 每轮 copy 最新 send_deadline(Option<Instant> 是 Copy),让下面去抖 async 分支按最新
         // deadline 等待;None 时该分支永不就绪。
         let deadline_copy = send_deadline;
+        let settle_copy = resize_settle_until;
         let event = tokio::select! {
             result = terminal.read_pty_output() => match result {
                 Ok(r) => TerminalEvent::PtyOutput(r),
@@ -767,6 +774,18 @@ pub async fn run_command(
                     send_screen(&tx, screen);
                 }
                 send_deadline = None;
+                continue;
+            },
+            // resize settle 到期:PTY 重绘 burst 已静默满 500ms,发一帧全屏,退出 settle。
+            _ = async {
+                match settle_copy {
+                    Some(d) => tokio::time::sleep_until(d).await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                resize_settle_until = None;
+                let screen = Arc::new(vt_parser.screen().clone());
+                send_screen(&tx, screen);
                 continue;
             },
         };
@@ -847,23 +866,29 @@ pub async fn run_command(
                     &modal,
                     hover,
                 );
-                // text 模式:实时把原始 PTY 字节发给 ESP32(它自己跑终端模拟器渲染),
-                // 仅在未 close 时发(close=true 暂停);不受 scrollback/waiting 门控——这是原始
-                // 流,ESP32 自行维护画面。⚠️ 高频 PtyOutput 每条 clone + 广播,可能撑爆 broadcast
-                // 容量(1024)触发 Lagged;真扛不住再改独立通道。
-                if image_format.is_text() && !screen_closed {
-                    let _ = tx.send(ServerMessage::PtyOutput(output.clone().into_bytes()));
-                }
+                if resize_settle_until.is_some() {
+                    // resize 后的重绘 burst:吸收,不转发 delta / 不入队去抖;vt300 已把输出吃进
+                    // screen 状态,等 settle 到期发全屏即可。每来一段就重设 500ms 计时器。
+                    resize_settle_until = Some(tokio::time::Instant::now() + RESIZE_SETTLE);
+                } else {
+                    // text 模式:实时把原始 PTY 字节发给 ESP32(它自己跑终端模拟器渲染),
+                    // 仅在未 close 时发(close=true 暂停);不受 scrollback/waiting 门控——这是原始
+                    // 流,ESP32 自行维护画面。⚠️ 高频 PtyOutput 每条 clone + 广播,可能撑爆 broadcast
+                    // 容量(1024)触发 Lagged;真扛不住再改独立通道。
+                    if image_format.is_text() && !screen_closed {
+                        let _ = tx.send(ServerMessage::PtyOutput(output.clone().into_bytes()));
+                    }
 
-                // jpeg 模式:走 screen 去抖(每次输出入队 pending + 重设 100ms 计时器,停顿满发
-                // 最新帧)。text 模式不发屏幕帧(靠上面的 pty_out 实时流)。看历史(scrollback!=0)
-                // 且非 waiting、或 close=true 暂停时,都不入队。
-                if !image_format.is_text()
-                    && !screen_closed
-                    && (screen.scrollback() == 0 || agent_type.state().is_waiting())
-                {
-                    pending_screen = Some(screen.clone());
-                    send_deadline = Some(tokio::time::Instant::now() + SCREEN_DEBOUNCE);
+                    // jpeg 模式:走 screen 去抖(每次输出入队 pending + 重设 100ms 计时器,停顿满发
+                    // 最新帧)。text 模式不发屏幕帧(靠上面的 pty_out 实时流)。看历史(scrollback!=0)
+                    // 且非 waiting、或 close=true 暂停时,都不入队。
+                    if !image_format.is_text()
+                        && !screen_closed
+                        && (screen.scrollback() == 0 || agent_type.state().is_waiting())
+                    {
+                        pending_screen = Some(screen.clone());
+                        send_deadline = Some(tokio::time::Instant::now() + SCREEN_DEBOUNCE);
+                    }
                 }
             }
 
@@ -958,7 +983,10 @@ pub async fn run_command(
                                 &modal,
                                 hover,
                             );
-                            send_screen(&tx, screen);
+                            // resize 触发 PTY 重绘 burst:进入 settle 吸收,等 500ms 静默后发全屏。
+                            resize_settle_until = Some(tokio::time::Instant::now() + RESIZE_SETTLE);
+                            pending_screen = None;
+                            send_deadline = None;
                         }
                         ClickOutcome::None => {}
                     }
@@ -1062,7 +1090,10 @@ pub async fn run_command(
                     &modal,
                     hover,
                 );
-                send_screen(&tx, screen);
+                // resize 触发 PTY 重绘 burst:进入 settle 吸收,等 500ms 静默后发全屏。
+                resize_settle_until = Some(tokio::time::Instant::now() + RESIZE_SETTLE);
+                pending_screen = None;
+                send_deadline = None;
             }
             TerminalEvent::Input(ClientMessage::Sync {
                 width,
@@ -1074,8 +1105,7 @@ pub async fn run_command(
                 // close=true → 暂停并清掉在途的去抖帧;close=false → 恢复。sync 响应仍照发。
                 screen_closed = close;
                 if screen_closed {
-                    pending_screen = None;
-                    send_deadline = None;
+                    // 在途的去抖帧由本 arm 末尾的 settle 入口统一清空(pending_screen/send_deadline)。
                     log::debug!(
                         "[{}] sync close=true: autonomous screen push paused",
                         terminal.session_id()
@@ -1119,7 +1149,10 @@ pub async fn run_command(
                     &modal,
                     hover,
                 );
-                send_screen(&tx, screen);
+                // 不立即发屏:resize 会触发 PTY 重绘 burst,进入 settle 吸收,等 500ms 静默后发全屏。
+                resize_settle_until = Some(tokio::time::Instant::now() + RESIZE_SETTLE);
+                pending_screen = None;
+                send_deadline = None;
             }
             TerminalEvent::Input(ClientMessage::PtyInput(input)) => {
                 log::debug!(
