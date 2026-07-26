@@ -423,7 +423,7 @@ async fn run_bridge(
                             total_screen_bytes as f64 / (1024.0 * 1024.0)
                         );
                         if let Err(e) = client
-                            .publish(&screen_text_topic, QoS::AtMostOnce, false, payload)
+                            .publish(&screen_text_topic, QoS::AtLeastOnce, false, payload)
                             .await
                         {
                             log::warn!("[mqtt] publish screen_text failed: {e}");
