@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.0-rc.9] - 2026-07-27
+
+Keep MQTT control responsive under heavy output. (中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md).)
+
+### Fixed
+
+- **Control messages no longer starve during output bursts.** Both `select!` loops (the MQTT bridge and the main event loop) are now `biased` and rank inbound control (`sync` / `pty_in` / `close`) ahead of PTY output. Previously, heavy outbound publishing to a slow broker could starve the inbound poll, so even a `close=true` (the very message meant to mute the flood) couldn't get through.
+- **`sync` with `close=false` sends a screen frame immediately again.** The resize-settle change had made every sync wait 500ms; now the settle only triggers when the sync actually resized the PTY, and a non-closing sync replies at once.
+
+### Changed
+
+- **Less per-output work in text mode.** The redraw closure borrows `&Screen` instead of `&Arc<Screen>`, and the PtyOutput handler no longer clones the whole screen grid up front (text mode broadcasts raw bytes). The full-screen clone now happens only on the JPEG debounce path.
+
 ## [0.4.0-rc.8] - 2026-07-26
 
 Text-mode QoS tuning + resize-burst handling. (中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md).)

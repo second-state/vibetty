@@ -1,5 +1,18 @@
 # 变更日志 (CHANGELOG)
 
+## [0.4.0-rc.9] - 2026-07-27
+
+让 MQTT 控制消息在狂输出时仍保持响应。(中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md)。)
+
+### 修复
+
+- **狂输出时控制消息不再被饿死**。MQTT 桥和主事件循环的两个 `select!` 都改成 `biased`,把入站控制(`sync`/`pty_in`/`close`)排在 PTY 输出前面。此前慢 broker 上出站 publish 太重会挤掉入站 poll,连 `close=true`(本用来停 flood 的救命消息)都进不来。
+- **`close=false` 的 sync 恢复立即回送屏幕**。之前 resize-settle 改动让所有 sync 都等 500ms;现在 settle 只在 sync 真的 resize 了 PTY 时才触发,非关闭的 sync 立刻响应。
+
+### 变更
+
+- **text 模式每条输出更省**。redraw 闭包改借 `&Screen`(不再是 `&Arc<Screen>`),PtyOutput 处理不再前置 clone 整屏(text 模式广播的是原始字节)。整屏 clone 现在只在 JPEG 去抖路径上发生。
+
 ## [0.4.0-rc.8] - 2026-07-26
 
 text 模式 QoS 调整 + resize burst 处理。(中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md)。)
