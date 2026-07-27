@@ -307,9 +307,13 @@ async fn run_bridge(
     // 出站(rx 收 Screen → 渲染补齐 → publish;Presence → publish)+ 入站(poll eventloop
     // → ClientMessage → cli_tx)都在这一个 select! 里,同时监听 cancel:`MqttHandle::stop()`
     // 发信号即 break。**不调用 disconnect()**:直接 drop 连接,broker 视为异常掉线 → 必发 LWT 清 presence。
+    // select! 用 biased(按声明顺序优先),且入站 eventloop.poll() 排在出站 rx.recv() 前面:
+    // 狂输出 + 慢 broker 时,出站 publish 会占住任务,这里保证入站(sync/pty_in/close)先被 poll
+    // 到、随到随处理,免得救命消息(如 close=true)被出站洪峰堵在门外。
     let pfx = format!("{prefix}/");
     loop {
         tokio::select! {
+            biased;
             _ = &mut cancel => {
                 log::info!("[mqtt] cancel signal received, stopping client");
                 break;

@@ -618,7 +618,7 @@ pub async fn run_command(
     let mut hover = HoveredBtn::None;
 
     // 统一重绘:画 screen/title + 按钮状态 + 对话框 + 悬停高亮。`tui` 仅由此闭包借用。
-    let mut redraw = |screen: &Arc<vt100::Screen>,
+    let mut redraw = |screen: &vt100::Screen,
                       title: &str,
                       http: &HttpBtnState,
                       mqtt_broker_on: bool,
@@ -729,14 +729,11 @@ pub async fn run_command(
         // deadline 等待;None 时该分支永不就绪。
         let deadline_copy = send_deadline;
         let settle_copy = resize_settle_until;
+        // biased:按声明顺序优先。把入站控制(MQTT sync/pty_in/close)和本地按键排在 PTY 输出前面——
+        // 狂输出时每条 PTY 都触发 redraw(重),随机 select! 会让 sync/按键被反复推迟;这样保证
+        // 控制消息在下一段 PTY 之前先处理掉。PTY 是流量大头,排在控制之后不会饿死(控制是稀疏的)。
         let event = tokio::select! {
-            result = terminal.read_pty_output() => match result {
-                Ok(r) => TerminalEvent::PtyOutput(r),
-                Err(e) => {
-                    log::error!("[{}] Error reading PTY output: {:?}", terminal.session_id(), e);
-                    TerminalEvent::Error
-                }
-            },
+            biased;
             msg = rx.recv() => match msg {
                 Some(input) => TerminalEvent::Input(input),
                 None => TerminalEvent::InputClosed,
@@ -745,6 +742,13 @@ pub async fn run_command(
                 Some(evt) => TerminalEvent::UIEvent(evt),
                 None => {
                     log::error!("[{}] UI event channel closed", terminal.session_id());
+                    TerminalEvent::Error
+                }
+            },
+            result = terminal.read_pty_output() => match result {
+                Ok(r) => TerminalEvent::PtyOutput(r),
+                Err(e) => {
+                    log::error!("[{}] Error reading PTY output: {:?}", terminal.session_id(), e);
                     TerminalEvent::Error
                 }
             },
@@ -855,10 +859,10 @@ pub async fn run_command(
                     vt_parser.screen_mut().set_scrollback(0);
                 }
 
-                // Render directly to TUI
-                let screen = Arc::new(vt_parser.screen().clone());
+                // 本地 redraw:直接借用 vt_parser 的 screen,不 clone(text 模式广播的是原始字节、
+                // 根本不碰 screen;只有 jpeg 入队 pending 时才需要拥有,见下)。
                 redraw(
-                    &screen,
+                    vt_parser.screen(),
                     ui_title,
                     &http,
                     mqtt_broker_on,
@@ -871,22 +875,21 @@ pub async fn run_command(
                     // screen 状态,等 settle 到期发全屏即可。每来一段就重设 500ms 计时器。
                     resize_settle_until = Some(tokio::time::Instant::now() + RESIZE_SETTLE);
                 } else {
-                    // text 模式:实时把原始 PTY 字节发给 ESP32(它自己跑终端模拟器渲染),
-                    // 仅在未 close 时发(close=true 暂停);不受 scrollback/waiting 门控——这是原始
-                    // 流,ESP32 自行维护画面。⚠️ 高频 PtyOutput 每条 clone + 广播,可能撑爆 broadcast
-                    // 容量(1024)触发 Lagged;真扛不住再改独立通道。
+                    // text 模式:实时把原始 PTY 字节发给 ESP32(它自己跑终端模拟器渲染),仅在未 close
+                    // 时发。⚠️ 高频 PtyOutput 每条 broadcast,可能撑爆 broadcast 容量(1024)触发 Lagged;
+                    // 真扛不住再改独立通道。
                     if image_format.is_text() && !screen_closed {
                         let _ = tx.send(ServerMessage::PtyOutput(output.clone().into_bytes()));
                     }
 
                     // jpeg 模式:走 screen 去抖(每次输出入队 pending + 重设 100ms 计时器,停顿满发
                     // 最新帧)。text 模式不发屏幕帧(靠上面的 pty_out 实时流)。看历史(scrollback!=0)
-                    // 且非 waiting、或 close=true 暂停时,都不入队。
+                    // 且非 waiting、或 close=true 暂停时,都不入队。**只有 jpeg 才 clone 整屏**(text 不需要)。
                     if !image_format.is_text()
                         && !screen_closed
-                        && (screen.scrollback() == 0 || agent_type.state().is_waiting())
+                        && (vt_parser.screen().scrollback() == 0 || agent_type.state().is_waiting())
                     {
-                        pending_screen = Some(screen.clone());
+                        pending_screen = Some(Arc::new(vt_parser.screen().clone()));
                         send_deadline = Some(tokio::time::Instant::now() + SCREEN_DEBOUNCE);
                     }
                 }
@@ -1126,9 +1129,10 @@ pub async fn run_command(
                     (width.max(8), height.max(2))
                 };
                 page_rows = rows.saturating_sub(2).max(1);
-                // 尺寸没变就不 resize(避免抖屏);但 sync 本身也是「请求刷屏」,仍回送屏幕。
+                // 尺寸没变就不 resize(避免抖屏)。
                 let (cur_rows, cur_cols) = vt_parser.screen().size();
-                if cur_cols != cols || cur_rows != rows {
+                let resized = cur_cols != cols || cur_rows != rows;
+                if resized {
                     log::debug!(
                         "Sync: {width}×{height}{} -> resize PTY {cur_cols}×{cur_rows} -> {cols}×{rows}",
                         if pixels { "px" } else { "cells" }
@@ -1149,10 +1153,21 @@ pub async fn run_command(
                     &modal,
                     hover,
                 );
-                // 不立即发屏:resize 会触发 PTY 重绘 burst,进入 settle 吸收,等 500ms 静默后发全屏。
-                resize_settle_until = Some(tokio::time::Instant::now() + RESIZE_SETTLE);
-                pending_screen = None;
-                send_deadline = None;
+                if close {
+                    // close=true:客户端暂停(不看),不发屏;清掉在途去抖/settle。
+                    resize_settle_until = None;
+                    pending_screen = None;
+                    send_deadline = None;
+                } else {
+                    // close=false:立刻回送一帧(sync 响应),客户端在看、要当前画面。
+                    send_screen(&tx, screen);
+                    // 发生了 resize → PTY 会重绘 burst:进入 settle 吸收,500ms 静默后再发一帧最终全屏。
+                    if resized {
+                        resize_settle_until = Some(tokio::time::Instant::now() + RESIZE_SETTLE);
+                        pending_screen = None;
+                        send_deadline = None;
+                    }
+                }
             }
             TerminalEvent::Input(ClientMessage::PtyInput(input)) => {
                 log::debug!(
