@@ -107,6 +107,7 @@
         <span class="opacity-60 w-28">raw 按键 → pty_in</span>
         <input id="ptyin" class="input input-bordered input-sm flex-1 min-w-[120px]" placeholder="如 a(支持 \n \r \t \x1b)">
         <button id="btnPty" class="btn btn-sm">发送</button>
+        <label class="flex items-center gap-1 ml-auto text-xs"><input id="kbdCapture" type="checkbox" class="checkbox checkbox-xs" checked> 键盘直输(页面获焦即发)</label>
       </div>
       <div class="flex flex-wrap items-center gap-2">
         <span class="opacity-60 w-28">命令 → control</span>
@@ -258,12 +259,30 @@ $('btnConnect').onclick = () => {
   setStatus('连接中…', 'warning');
   try { client = mqtt.connect(url, { clientId: cid, clean: true, reconnectPeriod: 0 }); }
   catch (e) { log('err', `连接异常: ${e}`); setStatus('错误', 'error'); return; }
+  let everConnected = false;
   client.on('connect', () => {
+    everConnected = true;
     setStatus('已连接', 'success'); setConnected(true); log('sys', '已连接');
     client.subscribe('+/+/+/vibetty', e => e ? log('err', `订阅 presence 失败: ${e}`) : log('out', '→ 订阅 +/+/+/vibetty'));
   });
-  client.on('error', e => { log('err', `错误: ${e.message || e}`); setStatus('错误', 'error'); });
-  client.on('close', () => { log('sys', '连接关闭'); setStatus('未连接', 'ghost'); setConnected(false); currentPrefix = null; });
+  client.on('error', e => {
+    // MQTT 层错误(auth/协议)。浏览器 WS 连接失败时多半只触发 close,这里尽力打印收到的。
+    const m = e && (e.message || e.code || e);
+    log('err', `错误: ${typeof m === 'object' ? JSON.stringify(m) : m}`);
+    setStatus('错误', 'error');
+  });
+  client.on('offline', () => log('sys', '离线'));
+  client.on('close', () => {
+    if (!everConnected) {
+      log('err', '连接失败 —— 检查:broker 地址/端口是否对、路径是否以 /mqtt 结尾、wss 证书是否有效、以及 https 页面不能连 ws://(mixed content 会被浏览器拦)');
+      setStatus('连接失败', 'error');
+    } else {
+      log('sys', '连接关闭');
+      setStatus('未连接', 'ghost');
+    }
+    setConnected(false);
+    currentPrefix = null;
+  });
   client.on('message', onMessage);
 };
 $('btnDisconnect').onclick = () => {
@@ -317,6 +336,53 @@ $('btnPub').onclick = () => {
 // ── 主题切换 ──
 document.querySelectorAll('[data-set-theme]').forEach(a => a.onclick = () => {
   document.documentElement.setAttribute('data-theme', a.getAttribute('data-set-theme'));
+});
+
+// ── 键盘直输:页面获焦(非输入框)时,按键编码成终端字节 → {prefix}/pty_in ──
+// 编码和服务端 bytes_from_key 同一套 xterm 规范(Ctrl+字母、方向键+修饰、F1–F12 等)。
+function keyToBytes(e) {
+  const k = e.key;
+  if (e.ctrlKey && !e.metaKey && k.length === 1 && /[a-zA-Z]/.test(k)) {
+    return String.fromCharCode(k.toUpperCase().charCodeAt(0) - 64); // ^A..\x1a
+  }
+  if (k.length === 1 && !e.ctrlKey && !e.metaKey) {
+    return (e.altKey ? '\x1b' : '') + k; // 可打印字符;Alt 加 ESC 前缀
+  }
+  const n = 1 + (e.shiftKey?1:0) + (e.altKey?2:0) + (e.ctrlKey?4:0); // xterm modifier code
+  const mod = n > 1;
+  const csi = def => mod ? `\x1b[1;${n}${def}` : `\x1b[${def}`;
+  const tilde = num => mod ? `\x1b[${num};${n}~` : `\x1b[${num}~`;
+  switch (k) {
+    case 'Enter':     return '\r';
+    case 'Backspace': return '\x7f';
+    case 'Tab':       return e.shiftKey ? '\x1b[Z' : '\t';
+    case 'Escape':    return '\x1b';
+    case 'ArrowUp':    return csi('A');
+    case 'ArrowDown':  return csi('B');
+    case 'ArrowRight': return csi('C');
+    case 'ArrowLeft':  return csi('D');
+    case 'Home':       return csi('H');
+    case 'End':        return csi('F');
+    case 'PageUp':     return tilde(5);
+    case 'PageDown':   return tilde(6);
+    case 'Delete':     return tilde(3);
+    case 'Insert':     return tilde(2);
+  }
+  const f1 = /^F([1-4])$/.exec(k);
+  if (f1) return `\x1bO${'PQRS'[+f1[1]-1]}`;
+  const fn = { F5:15, F6:17, F7:18, F8:19, F9:20, F10:21, F11:23, F12:24 }[k];
+  if (fn) return `\x1b[${fn}~`;
+  return null; // 其它(Shift/Ctrl/Alt 等单独 modifier、IME 组合)忽略
+}
+document.addEventListener('keydown', e => {
+  if (!$('kbdCapture').checked || !client || !currentPrefix) return;
+  const tag = (e.target && e.target.tagName) || '';
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return; // 不抢表单输入
+  if (e.metaKey) return; // Cmd 组合放行给浏览器(Cmd+R 刷新等)
+  const bytes = keyToBytes(e);
+  if (bytes == null) return;
+  e.preventDefault();
+  client.publish(`${currentPrefix}/pty_in`, bytes);
 });
 
 setStatus('未连接', 'ghost');
