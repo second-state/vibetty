@@ -14,7 +14,7 @@
 <!-- xterm(text 模式渲染 screen_text 的 ANSI 流) -->
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
 <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.2/lib/xterm-addon-fit.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
 
 <style>
   #log { white-space: pre-wrap; word-break: break-all; }
@@ -57,21 +57,14 @@
           </ul>
         </div>
       </div>
-      <div class="flex flex-wrap items-center gap-2 text-sm">
-        <span class="opacity-60">当前实例</span>
-        <code id="prefix" class="bg-base-300 px-2 py-1 rounded">(等待 presence 自动发现)</code>
-        <span class="opacity-60">format</span>
-        <span id="format" class="badge badge-outline badge-sm">?</span>
-        <button id="btnResync" class="btn btn-outline btn-sm ml-auto">重新发现 / 刷屏</button>
-      </div>
     </div>
   </div>
 
-  <!-- 主区:屏幕 + 日志 -->
-  <div class="grid md:grid-cols-2 gap-3 flex-1">
+  <!-- 主区:屏幕(左/主) + 会话列表(右,竖排) -->
+  <div class="grid md:grid-cols-[1fr_248px] gap-3 flex-1 min-h-0">
     <!-- 屏幕 -->
-    <div class="card bg-base-100 shadow compact">
-      <div class="card-body p-3">
+    <div class="card bg-base-100 shadow compact min-h-0">
+      <div class="card-body p-3 min-h-0">
         <div class="flex items-center justify-between mb-1">
           <span class="text-sm opacity-60">屏幕</span>
           <span id="screenInfo" class="text-xs opacity-50"></span>
@@ -88,14 +81,14 @@
         </div>
       </div>
     </div>
-    <!-- 日志 -->
-    <div class="card bg-base-100 shadow compact">
-      <div class="card-body p-3">
+    <!-- 会话列表(右,竖排) -->
+    <div class="card bg-base-100 shadow compact min-h-0">
+      <div class="card-body p-3 flex flex-col min-h-0">
         <div class="flex items-center justify-between mb-1">
-          <span class="text-sm opacity-60">消息日志</span>
-          <button id="btnClearLog" class="btn btn-ghost btn-xs">清空</button>
+          <span class="text-sm opacity-60">在线会话<span class="text-xs opacity-40 ml-1">(working 绿/waiting 黄)</span></span>
+          <button id="btnDisc" class="btn btn-ghost btn-xs" disabled>断开</button>
         </div>
-        <div id="log" class="bg-black text-xs font-mono p-2 rounded h-[360px] overflow-auto"></div>
+        <div id="sessions" class="flex flex-col gap-2 overflow-auto"></div>
       </div>
     </div>
   </div>
@@ -104,15 +97,22 @@
   <div class="card bg-base-100 shadow compact">
     <div class="card-body p-3 flex flex-col gap-2 text-sm">
       <div class="flex flex-wrap items-center gap-2">
-        <span class="opacity-60 w-28">raw 按键 → pty_in</span>
-        <input id="ptyin" class="input input-bordered input-sm flex-1 min-w-[120px]" placeholder="如 a(支持 \n \r \t \x1b)">
-        <button id="btnPty" class="btn btn-sm">发送</button>
-        <label class="flex items-center gap-1 ml-auto text-xs"><input id="kbdCapture" type="checkbox" class="checkbox checkbox-xs" checked> 键盘直输(页面获焦即发)</label>
+        <span class="opacity-60 w-28">text</span>
+        <input id="cmd" class="input input-bordered input-sm flex-1 min-w-[120px]" placeholder="input_text(自动加换行,回车发送)">
+        <button id="btnCmd" class="btn btn-sm">发送</button>
+        <label class="flex items-center gap-1 ml-auto text-xs"><input id="kbdCapture" type="checkbox" class="checkbox checkbox-xs" checked> 键盘直输</label>
       </div>
       <div class="flex flex-wrap items-center gap-2">
-        <span class="opacity-60 w-28">命令 → control</span>
-        <input id="cmd" class="input input-bordered input-sm flex-1 min-w-[120px]" placeholder="input_text(自动加换行)">
-        <button id="btnCmd" class="btn btn-sm">发送</button>
+        <span class="opacity-60 w-28">按键 / 滚动</span>
+        <button class="btn btn-xs" data-act="up">scroll ↑</button>
+        <button class="btn btn-xs" data-act="down">scroll ↓</button>
+        <span class="opacity-30">·</span>
+        <button class="btn btn-xs" data-key="up" title="方向键上">↑</button>
+        <button class="btn btn-xs" data-key="down" title="方向键下">↓</button>
+        <button class="btn btn-xs" data-key="stab" title="shift+tab">yolo</button>
+        <button class="btn btn-xs" data-key="bs" title="退格">⌫</button>
+        <button class="btn btn-xs btn-primary" data-key="enter" title="回车">⏎</button>
+        <button class="btn btn-xs btn-error" data-key="ctrlc" title="Ctrl+C 中断">^C</button>
       </div>
       <div class="flex flex-wrap items-center gap-2">
         <span class="opacity-60 w-28">sync</span>
@@ -120,11 +120,18 @@
         <label class="flex items-center gap-1"><input id="syncClose" type="checkbox" class="checkbox checkbox-sm"> close</label>
         <button id="btnSync" class="btn btn-sm btn-primary">sync(刷屏)</button>
       </div>
-      <div class="flex flex-wrap items-center gap-2">
-        <span class="opacity-60 w-28">自定义 publish</span>
-        <input id="pubt" class="input input-bordered input-sm flex-1 min-w-[120px]" placeholder="topic">
-        <input id="pubp" class="input input-bordered input-sm flex-1 min-w-[120px]" placeholder="payload">
-        <button id="btnPub" class="btn btn-sm">发布</button>
+    </div>
+  </div>
+
+  <!-- 消息日志(最底,可折叠) -->
+  <div class="card bg-base-100 shadow compact">
+    <div class="card-body p-3">
+      <div class="flex items-center justify-between mb-1">
+        <button id="btnToggleLog" class="text-sm opacity-60 flex items-center gap-1">消息日志 <span id="logArrow">▼</span></button>
+        <button id="btnClearLog" class="btn btn-ghost btn-xs">清空</button>
+      </div>
+      <div id="logWrap">
+        <div id="log" class="bg-black text-xs font-mono p-2 rounded h-[180px] overflow-auto"></div>
       </div>
     </div>
   </div>
@@ -138,22 +145,30 @@ $('cid').value = genId();
 
 // broker WS URL:优先 ?broker=/?:url= 查询参数 → localStorage 记忆 → 默认本地内置 broker。
 // 这样本页可单独部署(拷到任意静态主机),用链接或手动填连任意 broker。
+// localStorage 可能被浏览器防跟踪/隐私模式拦(抛 SecurityError),try/catch 兜底。
+const safeGet = k => { try { return localStorage.getItem(k); } catch { return null; } };
+const safeSet = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
 {
   const q = new URLSearchParams(location.search);
-  $('url').value = q.get('broker') || q.get('url') || localStorage.getItem('mqtt_url') || 'ws://localhost:9001/mqtt';
+  $('url').value = q.get('broker') || q.get('url') || safeGet('mqtt_url') || 'ws://localhost:9001/mqtt';
 }
 
-// ── xterm(text 模式)──
-const term = new Terminal({ theme: { background: '#000000', foreground: '#d4d4d4' }, convertEol: false, disableStdin: true, cursorBlink: false });
-const fit = new FitAddon.FitAddon();
-term.loadAddon(fit);
-term.open($('term'));
-try { fit.fit(); } catch {}
+// ── xterm(text 模式)。CDN 没加载到也不能让整个脚本崩(否则所有按钮都没反应)──
+let term = null, fit = null;
+try {
+  term = new Terminal({ theme: { background: '#000000', foreground: '#d4d4d4' }, convertEol: false, disableStdin: true, cursorBlink: false });
+  fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open($('term'));
+  try { fit.fit(); } catch {}
+} catch (e) {
+  console.error('xterm init failed(文本模式将不可用,连接/JPEG 等不受影响):', e);
+}
 let resizeT = null;
 window.addEventListener('resize', () => {
-  try { fit.fit(); } catch {}
+  if (fit) { try { fit.fit(); } catch {} }
   if (resizeT) clearTimeout(resizeT);
-  resizeT = setTimeout(() => { if (client && currentPrefix) sendSync(); }, 300);
+  resizeT = setTimeout(() => { if (client && currentPrefix) sendSync(false); }, 300);
 });
 
 // ── 日志 ──
@@ -167,6 +182,10 @@ function log(cls, msg) {
   logEl.scrollTop = logEl.scrollHeight;
 }
 $('btnClearLog').onclick = () => logEl.innerHTML = '';
+$('btnToggleLog').onclick = () => {
+  const hidden = $('logWrap').classList.toggle('hidden');
+  $('logArrow').textContent = hidden ? '▶' : '▼';
+};
 
 // ── 状态 ──
 let client = null, currentPrefix = null, currentFormat = null, lastUrl = null;
@@ -177,7 +196,7 @@ function showPane(format) {
   const text = (format === 'text');
   $('paneText').classList.toggle('hidden', !text);
   $('paneImg').classList.toggle('hidden', text);
-  if (text) { try { fit.fit(); } catch {} }
+  if (text && fit) { try { fit.fit(); } catch {} }
 }
 
 // ── 屏幕显示 ──
@@ -192,23 +211,60 @@ function showImg(bytes, topic) {
   $('screenInfo').textContent = `${bytes.length}B · ${new Date().toLocaleTimeString()}`;
 }
 
-// ── 实例切换(按 format 选订阅 screen / screen_text)──
-function setInstance(prefix, format) {
-  if (currentPrefix === prefix) return;
-  if (client && currentPrefix) {
-    const oldT = (currentFormat === 'text') ? `${currentPrefix}/screen_text` : `${currentPrefix}/screen`;
-    client.unsubscribe(oldT);
+// ── 在线会话列表:presence 发现 → 列出来;点选才订阅 + 发 sync close=false;
+//    「断开」发 sync close=true 告诉 tty 别再推。working/waiting 标题颜色不同。──
+const instances = new Map(); // prefix -> {prefix,title,state,format,ts}
+const escapeHtml = s => (s || '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+
+function renderSessions() {
+  const box = $('sessions');
+  if (instances.size === 0) { box.innerHTML = '<span class="text-sm opacity-40">(等待 presence 发现实例…)</span>'; return; }
+  box.innerHTML = '';
+  for (const [, ins] of instances) {
+    const active = ins.prefix === currentPrefix;
+    const stateCls = ins.state === 'waiting' ? 'text-warning'
+                   : ins.state === 'working' ? 'text-success' : '';
+    const chip = document.createElement('div');
+    chip.className = 'w-full px-2 py-1 rounded cursor-pointer text-sm flex items-center gap-2 border'
+      + (active ? ' border-primary bg-primary/10' : ' border-base-300 hover:bg-base-300');
+    chip.title = ins.prefix;
+    chip.innerHTML = `<span class="${stateCls} font-semibold truncate max-w-[260px]">${escapeHtml(ins.title || ins.prefix)}</span>`
+      + `<span class="badge badge-xs badge-outline">${ins.format || '?'}</span>`
+      + `<span class="text-xs opacity-40">${escapeHtml(ins.state || '')}</span>`;
+    chip.onclick = () => selectSession(ins.prefix);
+    box.appendChild(chip);
   }
-  currentPrefix = prefix; currentFormat = format;
-  $('prefix').textContent = prefix;
-  $('format').textContent = format || '?';
-  showPane(format);
-  log('sys', `实例: ${prefix} (format=${format})`);
-  if (client) {
-    const t = (format === 'text') ? `${prefix}/screen_text` : `${prefix}/screen`;
-    client.subscribe(t, e => e ? log('err', `订阅失败 ${t}: ${e}`) : log('out', `→ 订阅 ${t}`));
-    sendSync(); // 拉一帧
+}
+
+function selectSession(prefix) {
+  if (!client) { log('err', '未连接'); return; }
+  if (prefix === currentPrefix) { sendSync(false); return; } // 已选中再点 → 重新刷屏
+  const ins = instances.get(prefix);
+  // 旧的:发 close=true 停推 + 退订
+  if (currentPrefix) {
+    publishSync(currentPrefix, currentFormat, true);
+    client.unsubscribe((currentFormat === 'text') ? `${currentPrefix}/screen_text` : `${currentPrefix}/screen`);
   }
+  currentPrefix = prefix;
+  currentFormat = ins ? (ins.format || currentFormat) : currentFormat;
+  $('btnDisc').disabled = false;
+  showPane(currentFormat);
+  renderSessions();
+  log('sys', `查看会话: ${prefix} (format=${currentFormat})`);
+  // 新的:订阅 + sync close=false(让它发屏)
+  const t = (currentFormat === 'text') ? `${prefix}/screen_text` : `${prefix}/screen`;
+  client.subscribe(t, e => e ? log('err', `订阅失败 ${t}: ${e}`) : log('out', `→ 订阅 ${t}`));
+  sendSync(false);
+}
+
+function disconnectSession() {
+  if (!client || !currentPrefix) return;
+  sendSync(true); // 告诉 tty 不用再发了
+  client.unsubscribe((currentFormat === 'text') ? `${currentPrefix}/screen_text` : `${currentPrefix}/screen`);
+  log('out', `断开会话(已发 close=true): ${currentPrefix}`);
+  currentPrefix = null;
+  $('btnDisc').disabled = true;
+  renderSessions();
 }
 
 function onMessage(topic, payload) {
@@ -216,10 +272,20 @@ function onMessage(topic, payload) {
   const segs = topic.split('/');
   // presence:[user, device, pid, "vibetty"]
   if (segs.length === 4 && segs[3] === 'vibetty') {
-    if (bytes.length === 0) { log('sys', `${topic}: 实例下线(LWT 空 payload)`); return; }
+    if (bytes.length === 0) {
+      instances.delete(topic);
+      if (topic === currentPrefix) { currentPrefix = null; $('btnDisc').disabled = true; }
+      log('sys', `${topic}: 下线(LWT 空 payload)`);
+      renderSessions();
+      return;
+    }
     let p; try { p = JSON.parse(dec.decode(bytes)); } catch { return; }
     log('in', `presence: ${JSON.stringify(p)}`);
-    if (p && p.prefix) setInstance(p.prefix, p.format);
+    if (p && p.prefix) {
+      instances.set(p.prefix, { prefix: p.prefix, title: p.title || '', state: p.state || '', format: p.format || null, ts: p.ts });
+      if (p.prefix === currentPrefix && p.format) currentFormat = p.format; // 跟踪当前会话 format 变化
+      renderSessions();
+    }
     return;
   }
   if (topic.endsWith('/screen')) {
@@ -230,7 +296,7 @@ function onMessage(topic, payload) {
   }
   if (topic.endsWith('/screen_text')) {
     // 首字节 tag:0x00=全屏基线,0x01=增量。xterm 直接吃 ANSI 流。
-    if (bytes.length >= 1) term.write(bytes.subarray(1));
+    if (term && bytes.length >= 1) term.write(bytes.subarray(1));
     return;
   }
   // 其它(pty_in 回显之类)
@@ -254,7 +320,7 @@ $('btnConnect').onclick = () => {
   const cid = $('cid').value.trim() || genId();
   const verr = validateUrl(url);
   if (verr) { log('err', verr); setStatus('URL 有误', 'error'); return; }
-  localStorage.setItem('mqtt_url', url);
+  safeSet('mqtt_url', url);
   log('sys', `连接 ${url} (client_id=${cid}) …`);
   setStatus('连接中…', 'warning');
   try { client = mqtt.connect(url, { clientId: cid, clean: true, reconnectPeriod: 0 }); }
@@ -293,33 +359,32 @@ $('btnDisconnect').onclick = () => {
 
 // ── 发送 ──
 function needClient() { if (!client) { log('err', '未连接'); return false; } return true; }
-function needPrefix() { if (!currentPrefix) { log('err', '还没有 prefix(等 presence)'); return null; } return currentPrefix; }
+function needPrefix() { if (!currentPrefix) { log('err', '先点一个在线会话'); return null; } return currentPrefix; }
 
-// sync 的尺寸按当前屏幕区自动:text 模式用 xterm 的 cols/rows;JPEG 模式用屏幕区像素。
-function paneSize() {
-  if (currentFormat === 'text') return { pixels: false, w: term.cols, h: term.rows };
+// sync 尺寸按当前屏幕区自动:text 用 xterm cols/rows;JPEG 用屏幕区像素。
+function paneSizeFor(format) {
+  if (format === 'text') return { pixels: false, w: term ? term.cols : 80, h: term ? term.rows : 24 };
   const el = $('screenStage');
   return { pixels: true, w: Math.max(el.clientWidth, 64), h: Math.max(el.clientHeight, 64) };
 }
-function sendSync() {
-  if (!client || !currentPrefix) return;
-  const { pixels, w, h } = paneSize();
-  const close = $('syncClose').checked;
-  $('syncSize').textContent = pixels ? `${w}×${h} px` : `${w}×${h} cells`;
+// 向指定 prefix 发 sync(close=false=让它发屏 / true=叫它别发)。
+function publishSync(prefix, format, close) {
+  if (!client) return;
+  const { pixels, w, h } = paneSizeFor(format);
+  if (prefix === currentPrefix) $('syncSize').textContent = pixels ? `${w}×${h} px` : `${w}×${h} cells`;
   const payload = JSON.stringify({ type: 'sync', data: { width: w, height: h, pixels, close } });
-  client.publish(`${currentPrefix}/control`, payload,
-    e => e ? log('err', `发送失败: ${e}`) : log('out', `→ control: ${payload}`));
+  client.publish(`${prefix}/control`, payload,
+    e => e ? log('err', `发送失败: ${e}`) : log('out', `→ ${prefix}/control: ${payload}`));
+}
+// 对当前选中会话发 sync(manual 「sync 刷屏」按钮 / 窗口 resize 用)。close 跟随勾选。
+function sendSync(forceClose) {
+  if (!client || !currentPrefix) return;
+  const close = (forceClose === undefined) ? $('syncClose').checked : forceClose;
+  publishSync(currentPrefix, currentFormat, close);
 }
 $('btnSync').onclick = () => { if (needClient() && needPrefix()) sendSync(); };
-$('btnResync').onclick = () => { if (currentPrefix) { currentPrefix = null; setInstance($('prefix').textContent, currentFormat); } };
+$('btnDisc').onclick = disconnectSession;
 
-$('btnPty').onclick = () => {
-  if (!needClient() || !needPrefix()) return;
-  let s = $('ptyin').value
-    .replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\t/g, '\t').replace(/\\x1b/gi, '\x1b');
-  client.publish(`${currentPrefix}/pty_in`, s,
-    e => e ? log('err', `发送失败: ${e}`) : log('out', `→ pty_in: ${JSON.stringify(s)}`));
-};
 $('btnCmd').onclick = () => {
   if (!needClient() || !needPrefix()) return;
   const text = $('cmd').value + '\n';
@@ -327,11 +392,25 @@ $('btnCmd').onclick = () => {
   client.publish(`${currentPrefix}/control`, payload,
     e => e ? log('err', `发送失败: ${e}`) : log('out', `→ control: ${payload}`));
 };
-$('btnPub').onclick = () => {
-  if (!needClient()) return;
-  const t = $('pubt').value.trim(), v = $('pubp').value;
-  client.publish(t, v, e => e ? log('err', `发布失败: ${e}`) : log('out', `→ ${t}: ${v}`));
-};
+// 焦点在 text 输入框时,回车直接发送。
+$('cmd').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); $('btnCmd').click(); } });
+
+// ── 按键 / 滚动按钮(raw 字节走 pty_in;scroll 走 control)──
+const KEY_BYTES = { up:'\x1b[A', down:'\x1b[B', stab:'\x1b[Z', bs:'\x7f', enter:'\r', ctrlc:'\x03' };
+function sendPty(bytes) {
+  if (!needClient() || !needPrefix()) return;
+  client.publish(`${currentPrefix}/pty_in`, bytes, e => e ? log('err', `发送失败: ${e}`) : null);
+}
+function sendScroll(up) {
+  if (!needClient() || !needPrefix()) return;
+  const payload = JSON.stringify({ type: up ? 'scroll_up' : 'scroll_down', data: { rows: 0 } });
+  client.publish(`${currentPrefix}/control`, payload, e => e ? log('err', `发送失败: ${e}`) : log('out', `→ control: ${payload}`));
+}
+document.querySelectorAll('[data-act],[data-key]').forEach(b => b.onclick = () => {
+  const act = b.dataset.act, key = b.dataset.key;
+  if (act) sendScroll(act === 'up');
+  else if (key && KEY_BYTES[key]) sendPty(KEY_BYTES[key]);
+});
 
 // ── 主题切换 ──
 document.querySelectorAll('[data-set-theme]').forEach(a => a.onclick = () => {
@@ -386,6 +465,7 @@ document.addEventListener('keydown', e => {
 });
 
 setStatus('未连接', 'ghost');
+renderSessions();
 </script>
 </body>
 </html>
