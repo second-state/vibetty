@@ -2,7 +2,7 @@
 <html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>vibetty · MQTT debug</title>
 
 <!-- UI: DaisyUI 5 + Tailwind(browser build) -->
@@ -21,10 +21,41 @@
   #screenImg { image-rendering: pixelated; max-width: 100%; }
   #term { height: 100%; }
   .term-wrap { background:#000; border-radius:.5rem; overflow:hidden; min-height:320px; }
+  /* 移动端:防 iOS 输入框聚焦自动放大(字号≥16px),防横向溢出触发缩放 */
+  html, body { overflow-x: hidden; -webkit-text-size-adjust: 100%; }
+  @media (max-width: 768px) {
+    input, select, textarea { font-size: 16px !important; }
+  }
+  /* 触摸滚动顺滑,避免双指/双击误缩放带来的卡顿 */
+  body { overscroll-behavior: contain; touch-action: manipulation; }
+
+  /* xterm 的 helper textarea 不接焦点:我们用全局 keydown 自己发 pty_in,
+     不让 xterm 内部 textarea 抢键盘(否则点终端文字区英文发不出去)。 */
+  .xterm-helper-textarea { pointer-events: none !important; }
+  /* 隐藏的键盘接收器:点终端区时焦点导到这里(它是 input,能弹 IME;又透明覆盖在屏幕上,
+     不影响显示)。我们读它的值发 pty_in,不让 xterm 参与键盘。 */
+  #kbdSink { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; border: 0; outline: none; background: transparent; color: transparent; caret-color: transparent; z-index: 5; cursor: text; }
+
+  /* 移动端(≤768px):屏幕占 70vh,按键+text 固定底部,日志/会话用 tab 切换 */
+
+  .mobile-only { display: none; }
+  .desktop-only { display: block; }
+  @media (max-width: 768px) {
+    .mobile-only { display: block; }
+    .desktop-only { display: none; }
+    /* 整页变成固定结构:navbar + 屏幕(70vh) + 底部固定区 */
+    .mobile-layout { display: flex; flex-direction: column; height: 100vh; height: 100dvh; overflow: hidden; }
+    .mobile-screen { flex: 0 0 70vh; flex: 0 0 70dvh; min-height: 0; }
+    .mobile-bottom { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+    /* 桌面端那些 card 的多余 padding 在移动端收紧 */
+    .mobile-layout .card-body { padding: .5rem; }
+  }
 </style>
 </head>
 <body class="bg-base-200 min-h-screen">
-<div class="container mx-auto p-3 flex flex-col gap-3">
+
+<!-- ════════ 桌面端布局(≥769px) ════════ -->
+<div class="desktop-only container mx-auto p-3 flex flex-col gap-3">
 
   <!-- Navbar -->
   <div class="navbar bg-base-100 rounded-box shadow flex-wrap gap-2">
@@ -62,26 +93,23 @@
 
   <!-- 主区:屏幕(左/主) + 会话列表(右,竖排) -->
   <div class="grid md:grid-cols-[1fr_248px] gap-3 flex-1 min-h-0">
-    <!-- 屏幕 -->
     <div class="card bg-base-100 shadow compact min-h-0">
       <div class="card-body p-3 min-h-0">
         <div class="flex items-center justify-between mb-1">
           <span class="text-sm opacity-60">屏幕</span>
           <span id="screenInfo" class="text-xs opacity-50"></span>
         </div>
-        <div id="screenStage" style="height:60vh; min-height:300px;">
-          <!-- JPEG 模式 -->
+        <div id="screenStage" class="screen-desktop relative" style="height:60vh; min-height:300px;">
           <div id="paneImg" class="h-full flex items-center justify-center">
             <img id="screenImg" class="hidden rounded">
           </div>
-          <!-- text 模式 -->
           <div id="paneText" class="term-wrap h-full hidden">
             <div id="term"></div>
           </div>
+          <input id="kbdSink" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="键盘输入接收器">
         </div>
       </div>
     </div>
-    <!-- 会话列表(右,竖排) -->
     <div class="card bg-base-100 shadow compact min-h-0">
       <div class="card-body p-3 flex flex-col min-h-0">
         <div class="flex items-center justify-between mb-1">
@@ -102,7 +130,7 @@
         <button id="btnCmd" class="btn btn-sm">发送</button>
         <label class="flex items-center gap-1 ml-auto text-xs"><input id="kbdCapture" type="checkbox" class="checkbox checkbox-xs" checked> 键盘直输</label>
       </div>
-      <div class="flex flex-wrap items-center gap-2">
+      <div class="flex flex-wrap items-center gap-2" id="btnRow">
         <span class="opacity-60 w-28">按键 / 滚动</span>
         <button class="btn btn-xs" data-act="up">scroll ↑</button>
         <button class="btn btn-xs" data-act="down">scroll ↓</button>
@@ -117,8 +145,8 @@
       <div class="flex flex-wrap items-center gap-2">
         <span class="opacity-60 w-28">sync</span>
         <span id="syncSize" class="text-xs opacity-50">(按屏幕区尺寸自动)</span>
-        <label class="flex items-center gap-1"><input id="syncClose" type="checkbox" class="checkbox checkbox-sm"> close</label>
-        <button id="btnSync" class="btn btn-sm btn-primary">sync(刷屏)</button>
+        <button id="btnSync" class="btn btn-sm btn-primary">开始同步(sync close=false)</button>
+        <button id="btnStopPty" class="btn btn-sm btn-error">停止 ptyout(sync close=true)</button>
       </div>
     </div>
   </div>
@@ -132,6 +160,88 @@
       </div>
       <div id="logWrap">
         <div id="log" class="bg-black text-xs font-mono p-2 rounded h-[180px] overflow-auto"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════ 移动端布局(≤768px) ════════ -->
+<div class="mobile-only mobile-layout">
+  <!-- 顶部:navbar + 连接配置 -->
+  <div class="bg-base-100 p-2 flex flex-col gap-2">
+    <div class="flex items-center gap-2">
+      <div class="text-base font-bold flex-1">vibetty</div>
+      <span id="statusM" class="badge badge-ghost badge-sm">未连接</span>
+      <button id="btnConnectM" class="btn btn-primary btn-xs">连</button>
+      <button id="btnDisconnectM" class="btn btn-ghost btn-xs" disabled>断</button>
+    </div>
+    <div class="flex items-center gap-2 text-xs">
+      <input id="urlM" class="input input-bordered input-xs flex-1" value="ws://localhost:9001/mqtt">
+      <input id="cidM" class="input input-bordered input-xs w-28">
+    </div>
+  </div>
+
+  <!-- 屏幕(70vh 固定) -->
+  <div class="mobile-screen bg-black flex items-center justify-center relative">
+    <div id="screenStageM" class="h-full w-full">
+      <div id="paneImgM" class="h-full w-full flex items-center justify-center">
+        <img id="screenImgM" class="hidden max-h-full max-w-full" style="image-rendering: pixelated;">
+      </div>
+      <input id="kbdSinkM" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="键盘输入接收器" style="position:absolute;inset:0;width:100%;height:100%;opacity:0;border:0;outline:none;background:transparent;color:transparent;caret-color:transparent;z-index:5;cursor:text;">
+      <div id="paneTextM" class="term-wrap h-full hidden">
+        <div id="termM"></div>
+      </div>
+    </div>
+    <div class="absolute top-1 right-1 text-xs opacity-50 bg-black/50 px-1 rounded" id="screenInfoM"></div>
+  </div>
+
+  <!-- 底部固定区:tab 栏 + tab 内容(默认显示控制) -->
+  <div class="mobile-bottom bg-base-100 border-t border-base-300">
+    <!-- tab 栏 -->
+    <div role="tablist" class="flex border-b border-base-300 text-sm">
+      <button id="tabCtrl" class="tab tab-active flex-1">控制</button>
+      <button id="tabSessions" class="tab flex-1">会话</button>
+      <button id="tabLog" class="tab flex-1">日志</button>
+    </div>
+    <!-- tab 内容(固定高度,内部滚动) -->
+    <div class="p-2" style="max-height:26vh; overflow:auto;">
+      <!-- 控制 tab -->
+      <div id="paneCtrlM" class="flex flex-col gap-2 text-sm">
+        <div class="flex items-center gap-2">
+          <input id="cmdM" class="input input-bordered input-sm flex-1" placeholder="text(回车发送)">
+          <button id="btnCmdM" class="btn btn-sm">发送</button>
+        </div>
+        <div class="flex flex-wrap gap-1" id="btnRowM">
+          <button class="btn btn-xs" data-act="up">↑滚</button>
+          <button class="btn btn-xs" data-act="down">↓滚</button>
+          <button class="btn btn-xs" data-key="up">↑</button>
+          <button class="btn btn-xs" data-key="down">↓</button>
+          <button class="btn btn-xs" data-key="stab">yolo</button>
+          <button class="btn btn-xs" data-key="bs">⌫</button>
+          <button class="btn btn-xs btn-primary" data-key="enter">⏎</button>
+          <button class="btn btn-xs btn-error" data-key="ctrlc">^C</button>
+          <div class="flex gap-1 w-full sync-row-m">
+            <button id="btnSyncM" class="btn btn-xs btn-primary flex-1">开始同步</button>
+            <button id="btnStopPtyM" class="btn btn-xs btn-error flex-1">停止pty</button>
+          </div>
+        </div>
+        <label class="flex items-center gap-1 text-xs"><input id="kbdCaptureM" type="checkbox" class="checkbox checkbox-xs" checked> 键盘直输</label>
+      </div>
+      <!-- 会话 tab -->
+      <div id="paneSessionsM" class="hidden">
+        <div class="flex items-center justify-between mb-1">
+          <span class="text-xs opacity-60">在线会话(working 绿/waiting 黄)</span>
+          <button id="btnDiscM" class="btn btn-ghost btn-xs" disabled>断开</button>
+        </div>
+        <div id="sessionsM" class="flex flex-col gap-2"></div>
+      </div>
+      <!-- 日志 tab -->
+      <div id="paneLogM" class="hidden">
+        <div class="flex items-center justify-between mb-1">
+          <span class="text-xs opacity-60">消息日志</span>
+          <button id="btnClearLogM" class="btn btn-ghost btn-xs">清空</button>
+        </div>
+        <div id="logM" class="bg-black text-xs font-mono p-2 rounded overflow-auto" style="height:20vh;"></div>
       </div>
     </div>
   </div>
@@ -154,61 +264,133 @@ const safeSet = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
 }
 
 // ── xterm(text 模式)。CDN 没加载到也不能让整个脚本崩(否则所有按钮都没反应)──
-let term = null, fit = null;
+// 桌面 #term + 移动 #termM 各挂一个;一个 Terminal 实例只能 open 一个容器,故建两套。
+let term = null, fit = null, termM = null, fitM = null;
 try {
-  term = new Terminal({ theme: { background: '#000000', foreground: '#d4d4d4' }, convertEol: false, disableStdin: true, cursorBlink: false });
-  fit = new FitAddon.FitAddon();
-  term.loadAddon(fit);
-  term.open($('term'));
+  const opts = { theme: { background: '#000000', foreground: '#d4d4d4' }, convertEol: false, disableStdin: true, cursorBlink: false };
+  term = new Terminal(opts); fit = new FitAddon.FitAddon(); term.loadAddon(fit); term.open($('term'));
   try { fit.fit(); } catch {}
+  if ($('termM')) { termM = new Terminal(opts); fitM = new FitAddon.FitAddon(); termM.loadAddon(fitM); termM.open($('termM')); try { fitM.fit(); } catch {} }
 } catch (e) {
   console.error('xterm init failed(文本模式将不可用,连接/JPEG 等不受影响):', e);
 }
+// 写入两个终端(若都存在)。
+function termWrite(bytes) {
+  if (term) try { term.write(bytes); } catch {}
+  if (termM) try { termM.write(bytes); } catch {}
+}
+function fitAll() {
+  if (fit) try { fit.fit(); } catch {}
+  if (fitM) try { fitM.fit(); } catch {}
+}
 let resizeT = null;
-window.addEventListener('resize', () => {
-  if (fit) { try { fit.fit(); } catch {} }
-  if (resizeT) clearTimeout(resizeT);
-  resizeT = setTimeout(() => { if (client && currentPrefix) sendSync(false); }, 300);
-});
+window.addEventListener('resize', () => { fitAll(); if (resizeT) clearTimeout(resizeT); resizeT = setTimeout(() => { if (client && currentPrefix) sendSync(false); }, 300); });
 
-// ── 日志 ──
-const logEl = $('log');
+// ── 键盘接收器:隐藏 input 覆盖在屏幕区。点屏幕 → 焦点进它 → 能弹 IME(中文)
+//    且不被 xterm 吞(它是普通 input,我们读它的值)。keydown 处理控制键/英文,
+//    compositionend 处理中文整段。每读一次就清空,避免累积。──
+// 控制键映射(从 input 的 keydown 直接编码 xterm 序列,不走 input.value)。
+function keyToBytes(e) {
+  const k = e.key;
+  if (e.ctrlKey && !e.metaKey && k.length === 1 && /[a-zA-Z]/.test(k)) return String.fromCharCode(k.toUpperCase().charCodeAt(0) - 64);
+  const n = 1 + (e.shiftKey?1:0) + (e.altKey?2:0) + (e.ctrlKey?4:0);
+  const mod = n > 1;
+  const csi = d => mod ? `\x1b[1;${n}${d}` : `\x1b[${d}`;
+  const tilde = num => mod ? `\x1b[${num};${n}~` : `\x1b[${num}~`;
+  switch (k) {
+    case 'Enter': return '\r'; case 'Backspace': return '\x7f'; case 'Tab': return e.shiftKey ? '\x1b[Z' : '\t';
+    case 'Escape': return '\x1b';
+    case 'ArrowUp': return csi('A'); case 'ArrowDown': return csi('B'); case 'ArrowRight': return csi('C'); case 'ArrowLeft': return csi('D');
+    case 'Home': return csi('H'); case 'End': return csi('F');
+    case 'PageUp': return tilde(5); case 'PageDown': return tilde(6); case 'Delete': return tilde(3); case 'Insert': return tilde(2);
+  }
+  const f1 = /^F([1-4])$/.exec(k); if (f1) return `\x1bO${'PQRS'[+f1[1]-1]}`;
+  const fn = { F5:15,F6:17,F7:18,F8:19,F9:20,F10:21,F11:23,F12:24 }[k];
+  if (fn) return `\x1b[${fn}~`;
+  return null;
+}
+function publishPty(bytes) {
+  if (!client || !currentPrefix || bytes == null || bytes === '') return;
+  if (!kbdOn()) return;
+  client.publish(`${currentPrefix}/pty_in`, bytes);
+  log('out', `→ pty_in: ${typeof bytes === 'string' ? JSON.stringify(bytes) : '['+bytes.length+'B]'}`);
+}
+function setupKbdSink(sink) {
+  if (!sink) return;
+  // 控制键/方向键:keydown 编码后直接发,清掉 input.value 里可能混入的字符。
+  sink.addEventListener('keydown', e => {
+    if (e.isComposing) return; // 组词中交给 compositionend
+    if (e.metaKey) return;
+    const bytes = keyToBytes(e);
+    if (bytes != null) { e.preventDefault(); publishPty(bytes); sink.value = ''; return; }
+  });
+  // 中文 IME 提交:compositionend 拿整段文本发,然后清空 input。
+  sink.addEventListener('compositionend', e => {
+    if (e.data) { publishPty(e.data); }
+    sink.value = '';
+  });
+  // 英文/可打印字符:input 事件(非 composition)拿 input.value 发,清空。这样英文也走 input,
+  // 不被 keydown 拦(部分浏览器英文 keydown 的 e.key 可能被 IME 改)。
+  sink.addEventListener('input', e => {
+    if (e.isComposing) return; // 组词中不处理,等 compositionend
+    if (sink.value) { publishPty(sink.value); sink.value = ''; }
+  });
+}
+setupKbdSink($('kbdSink'));
+setupKbdSink($('kbdSinkM'));
+// 点屏幕区(桌面 screenStage / 移动 screenStageM)→ 焦点导到对应的 kbdSink。
+for (const [stageId, sinkId] of [['screenStage','kbdSink'], ['screenStageM','kbdSinkM']]) {
+  const stage = $(stageId);
+  if (stage) stage.addEventListener('mousedown', e => {
+    if (e.target === $(sinkId)) return; // 点的就是 input 本身,不重复
+    e.preventDefault();
+    setTimeout(() => $(sinkId) && $(sinkId).focus(), 0);
+  });
+}
+
+// ── 日志(桌面 #log + 移动 #logM)──
 function log(cls, msg) {
   const t = new Date().toLocaleTimeString();
   const line = document.createElement('div');
   line.className = ({ in:'text-success', out:'text-info', sys:'text-warning', err:'text-error' })[cls] || '';
   line.textContent = `[${t}] ${msg}`;
-  logEl.appendChild(line);
-  logEl.scrollTop = logEl.scrollHeight;
+  for (const el of [$('log'), $('logM')]) if (el) { el.appendChild(line.cloneNode(true)); el.scrollTop = el.scrollHeight; }
 }
-$('btnClearLog').onclick = () => logEl.innerHTML = '';
-$('btnToggleLog').onclick = () => {
-  const hidden = $('logWrap').classList.toggle('hidden');
-  $('logArrow').textContent = hidden ? '▶' : '▼';
-};
+const clearLog = () => { for (const el of [$('log'), $('logM')]) if (el) el.innerHTML = ''; };
+$('btnClearLog').onclick = clearLog;
+if ($('btnClearLogM')) $('btnClearLogM').onclick = clearLog;
+$('btnToggleLog').onclick = () => { const hidden = $('logWrap').classList.toggle('hidden'); $('logArrow').textContent = hidden ? '▶' : '▼'; };
 
-// ── 状态 ──
-let client = null, currentPrefix = null, currentFormat = null, lastUrl = null;
-const setStatus = (txt, kind='ghost') => { const s = $('status'); s.textContent = txt; s.className = 'badge badge-sm badge-' + kind; };
-const setConnected = on => { $('btnConnect').disabled = on; $('btnDisconnect').disabled = !on; };
+// ── 状态(桌面 + 移动)──
+let client = null, currentPrefix = null, currentFormat = null;
+const setStatus = (txt, kind='ghost') => {
+  for (const id of ['status', 'statusM']) { const s = $(id); if (s) { s.textContent = txt; s.className = 'badge badge-sm badge-' + kind; } }
+};
+const setConnected = on => {
+  for (const [c, d] of [['btnConnect','btnDisconnect'], ['btnConnectM','btnDisconnectM']]) {
+    if ($(c)) $(c).disabled = on; if ($(d)) $(d).disabled = !on;
+  }
+};
 
 function showPane(format) {
   const text = (format === 'text');
-  $('paneText').classList.toggle('hidden', !text);
-  $('paneImg').classList.toggle('hidden', text);
-  if (text && fit) { try { fit.fit(); } catch {} }
+  for (const ids of [['paneText','paneImg'], ['paneTextM','paneImgM']]) {
+    const [tEl, iEl] = ids.map($);
+    if (tEl) tEl.classList.toggle('hidden', !text);
+    if (iEl) iEl.classList.toggle('hidden', text);
+  }
+  if (text) fitAll();
 }
 
-// ── 屏幕显示 ──
+// ── 屏幕显示(JPEG 桌面 #screenImg + 移动 #screenImgM)──
 let lastBlob = null;
-function showImg(bytes, topic) {
+function showImg(bytes) {
   if (lastBlob) URL.revokeObjectURL(lastBlob);
   const blob = new Blob([bytes], { type: 'image/jpeg' });
   lastBlob = URL.createObjectURL(blob);
-  const img = $('screenImg');
-  img.src = lastBlob;
-  img.classList.remove('hidden');
-  $('screenInfo').textContent = `${bytes.length}B · ${new Date().toLocaleTimeString()}`;
+  for (const id of ['screenImg', 'screenImgM']) { const img = $(id); if (img) { img.src = lastBlob; img.classList.remove('hidden'); } }
+  const info = `${bytes.length}B · ${new Date().toLocaleTimeString()}`;
+  for (const id of ['screenInfo', 'screenInfoM']) if ($(id)) $(id).textContent = info;
 }
 
 // ── 在线会话列表:presence 发现 → 列出来;点选才订阅 + 发 sync close=false;
@@ -217,24 +399,31 @@ const instances = new Map(); // prefix -> {prefix,title,state,format,ts}
 const escapeHtml = s => (s || '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
 
 function renderSessions() {
-  const box = $('sessions');
-  if (instances.size === 0) { box.innerHTML = '<span class="text-sm opacity-40">(等待 presence 发现实例…)</span>'; return; }
-  box.innerHTML = '';
-  for (const [, ins] of instances) {
-    const active = ins.prefix === currentPrefix;
-    const stateCls = ins.state === 'waiting' ? 'text-warning'
-                   : ins.state === 'working' ? 'text-success' : '';
-    const chip = document.createElement('div');
-    chip.className = 'w-full px-2 py-1 rounded cursor-pointer text-sm flex items-center gap-2 border'
-      + (active ? ' border-primary bg-primary/10' : ' border-base-300 hover:bg-base-300');
-    chip.title = ins.prefix;
-    chip.innerHTML = `<span class="${stateCls} font-semibold truncate max-w-[260px]">${escapeHtml(ins.title || ins.prefix)}</span>`
-      + `<span class="badge badge-xs badge-outline">${ins.format || '?'}</span>`
-      + `<span class="text-xs opacity-40">${escapeHtml(ins.state || '')}</span>`;
-    chip.onclick = () => selectSession(ins.prefix);
-    box.appendChild(chip);
+  const boxes = ['sessions', 'sessionsM'].map($).filter(Boolean);
+  if (instances.size === 0) {
+    const ph = '<span class="text-sm opacity-40">(等待 presence 发现实例…)</span>';
+    boxes.forEach(b => b.innerHTML = ph); return;
   }
+  boxes.forEach(box => {
+    box.innerHTML = '';
+    for (const [, ins] of instances) {
+      const active = ins.prefix === currentPrefix;
+      const stateCls = ins.state === 'waiting' ? 'text-warning' : ins.state === 'working' ? 'text-success' : '';
+      const chip = document.createElement('div');
+      chip.className = 'w-full px-2 py-1 rounded cursor-pointer text-sm flex items-center gap-2 border'
+        + (active ? ' border-primary bg-primary/10' : ' border-base-300 hover:bg-base-300');
+      chip.title = ins.prefix;
+      chip.innerHTML = `<span class="${stateCls} font-semibold truncate max-w-[260px]">${escapeHtml(ins.title || ins.prefix)}</span>`
+        + `<span class="badge badge-xs badge-outline">${ins.format || '?'}</span>`
+        + `<span class="text-xs opacity-40">${escapeHtml(ins.state || '')}</span>`;
+      chip.onclick = () => selectSession(ins.prefix);
+      box.appendChild(chip);
+    }
+  });
 }
+
+// btnDisc 桌面+移动同步开关。
+const setDiscDisabled = (on) => { for (const id of ['btnDisc', 'btnDiscM']) if ($(id)) $(id).disabled = on; };
 
 function selectSession(prefix) {
   if (!client) { log('err', '未连接'); return; }
@@ -247,7 +436,7 @@ function selectSession(prefix) {
   }
   currentPrefix = prefix;
   currentFormat = ins ? (ins.format || currentFormat) : currentFormat;
-  $('btnDisc').disabled = false;
+  setDiscDisabled(false);
   showPane(currentFormat);
   renderSessions();
   log('sys', `查看会话: ${prefix} (format=${currentFormat})`);
@@ -255,6 +444,7 @@ function selectSession(prefix) {
   const t = (currentFormat === 'text') ? `${prefix}/screen_text` : `${prefix}/screen`;
   client.subscribe(t, e => e ? log('err', `订阅失败 ${t}: ${e}`) : log('out', `→ 订阅 ${t}`));
   sendSync(false);
+  if ($('tabSessionsM')) switchMobileTab('ctrl'); // 选中后跳回控制 tab
 }
 
 function disconnectSession() {
@@ -263,7 +453,7 @@ function disconnectSession() {
   client.unsubscribe((currentFormat === 'text') ? `${currentPrefix}/screen_text` : `${currentPrefix}/screen`);
   log('out', `断开会话(已发 close=true): ${currentPrefix}`);
   currentPrefix = null;
-  $('btnDisc').disabled = true;
+  setDiscDisabled(true);
   renderSessions();
 }
 
@@ -274,7 +464,7 @@ function onMessage(topic, payload) {
   if (segs.length === 4 && segs[3] === 'vibetty') {
     if (bytes.length === 0) {
       instances.delete(topic);
-      if (topic === currentPrefix) { currentPrefix = null; $('btnDisc').disabled = true; }
+      if (topic === currentPrefix) { currentPrefix = null; setDiscDisabled(true); }
       log('sys', `${topic}: 下线(LWT 空 payload)`);
       renderSessions();
       return;
@@ -295,8 +485,8 @@ function onMessage(topic, payload) {
     return;
   }
   if (topic.endsWith('/screen_text')) {
-    // 首字节 tag:0x00=全屏基线,0x01=增量。xterm 直接吃 ANSI 流。
-    if (term && bytes.length >= 1) term.write(bytes.subarray(1));
+    // 首字节 tag:0x00=全屏基线,0x01=增量。xterm 直接吃 ANSI 流(桌面+移动都写)。
+    if (bytes.length >= 1) termWrite(bytes.subarray(1));
     return;
   }
   // 其它(pty_in 回显之类)
@@ -314,10 +504,20 @@ function validateUrl(url) {
     return null;
   } catch { return 'URL 格式无效'; }
 }
-$('btnConnect').onclick = () => {
+// 从桌面或移动端的 URL/cid 输入框取值(谁可见用谁;移动端可能改了桌面没改)。
+function readUrlCid() {
+  const urlEl = $('url').offsetParent ? $('url') : $('urlM');
+  const cidEl = $('cid').offsetParent ? $('cid') : $('cidM');
+  const url = (urlEl && urlEl.value) ? urlEl.value.trim() : ($('url').value || $('urlM').value).trim();
+  const cid = ((cidEl && cidEl.value) ? cidEl.value.trim() : '') || genId();
+  // 同步两边显示
+  if ($('url')) $('url').value = url; if ($('urlM')) $('urlM').value = url;
+  if ($('cid')) $('cid').value = cid; if ($('cidM')) $('cidM').value = cid;
+  return { url, cid };
+}
+function doConnect() {
   if (client) return;
-  const url = $('url').value.trim();
-  const cid = $('cid').value.trim() || genId();
+  const { url, cid } = readUrlCid();
   const verr = validateUrl(url);
   if (verr) { log('err', verr); setStatus('URL 有误', 'error'); return; }
   safeSet('mqtt_url', url);
@@ -350,50 +550,76 @@ $('btnConnect').onclick = () => {
     currentPrefix = null;
   });
   client.on('message', onMessage);
-};
-$('btnDisconnect').onclick = () => {
+}
+$('btnConnect').onclick = doConnect;
+if ($('btnConnectM')) $('btnConnectM').onclick = doConnect;
+function doDisconnect() {
   if (!client) return;
   client.end(true); client = null; setConnected(false); setStatus('未连接', 'ghost');
   currentPrefix = null; log('sys', '已断开');
-};
+}
+$('btnDisconnect').onclick = doDisconnect;
+if ($('btnDisconnectM')) $('btnDisconnectM').onclick = doDisconnect;
 
 // ── 发送 ──
 function needClient() { if (!client) { log('err', '未连接'); return false; } return true; }
 function needPrefix() { if (!currentPrefix) { log('err', '先点一个在线会话'); return null; } return currentPrefix; }
 
-// sync 尺寸按当前屏幕区自动:text 用 xterm cols/rows;JPEG 用屏幕区像素。
+// sync 尺寸:text 用 xterm fit 后的真实 cols/rows(它才反映终端实际显示的列行);
+// jpeg 按可见屏幕区像素减去两侧 16px padding 后按 8×18 字符格换算。都发 cells(pixels=false)。
 function paneSizeFor(format) {
-  if (format === 'text') return { pixels: false, w: term ? term.cols : 80, h: term ? term.rows : 24 };
-  const el = $('screenStage');
-  return { pixels: true, w: Math.max(el.clientWidth, 64), h: Math.max(el.clientHeight, 64) };
+  fitAll();
+  if (format === 'text') {
+    // text:用 xterm fit 后的真实 cols/rows(可见的那个)。它自带字符尺寸,比前端按像素猜准。
+    const tM = termM && termM.element && termM.element.offsetParent ? termM : null;
+    const tD = term && term.element && term.element.offsetParent ? term : null;
+    const t = tM || tD || term || termM;
+    return { pixels: false, w: t ? t.cols : 80, h: t ? t.rows : 24 };
+  }
+  // jpeg:量可见屏幕区像素,减掉 vibetty 的两侧 16px padding(共 32),按 8×18 字符格算 cols/rows。
+  const el = ($('screenStageM') && $('screenStageM').offsetParent) ? $('screenStageM') : $('screenStage');
+  const availW = Math.max(el.clientWidth - 32, 64);
+  const availH = Math.max(el.clientHeight - 32, 64);
+  return { pixels: false, w: Math.max(8, Math.floor(availW / 8)), h: Math.max(2, Math.floor(availH / 18)) };
 }
 // 向指定 prefix 发 sync(close=false=让它发屏 / true=叫它别发)。
 function publishSync(prefix, format, close) {
   if (!client) return;
   const { pixels, w, h } = paneSizeFor(format);
-  if (prefix === currentPrefix) $('syncSize').textContent = pixels ? `${w}×${h} px` : `${w}×${h} cells`;
+  if (prefix === currentPrefix && $('syncSize')) $('syncSize').textContent = `${w}×${h} cells`;
   const payload = JSON.stringify({ type: 'sync', data: { width: w, height: h, pixels, close } });
   client.publish(`${prefix}/control`, payload,
     e => e ? log('err', `发送失败: ${e}`) : log('out', `→ ${prefix}/control: ${payload}`));
 }
-// 对当前选中会话发 sync(manual 「sync 刷屏」按钮 / 窗口 resize 用)。close 跟随勾选。
+// 对当前选中会话发 sync。forceClose:undefined=默认 false(开始同步),true=停止 ptyout。
 function sendSync(forceClose) {
   if (!client || !currentPrefix) return;
-  const close = (forceClose === undefined) ? $('syncClose').checked : forceClose;
-  publishSync(currentPrefix, currentFormat, close);
+  publishSync(currentPrefix, currentFormat, forceClose === true);
 }
-$('btnSync').onclick = () => { if (needClient() && needPrefix()) sendSync(); };
+// 「开始同步」按钮:发 sync close=false(让服务端推屏)。
+$('btnSync').onclick = () => { if (needClient() && needPrefix()) sendSync(false); };
+if ($('btnSyncM')) $('btnSyncM').onclick = () => { if (needClient() && needPrefix()) sendSync(false); };
+// 「停止 ptyout」按钮:发 sync close=true(叫服务端别再自主推屏)。
+function stopPty() { if (needClient() && needPrefix()) sendSync(true); }
+if ($('btnStopPty')) $('btnStopPty').onclick = stopPty;
+if ($('btnStopPtyM')) $('btnStopPtyM').onclick = stopPty;
 $('btnDisc').onclick = disconnectSession;
+if ($('btnDiscM')) $('btnDiscM').onclick = disconnectSession;
 
-$('btnCmd').onclick = () => {
+// text 命令发送(桌面 #cmd / 移动 #cmdM,取可见的)。
+function sendCmd() {
   if (!needClient() || !needPrefix()) return;
-  const text = $('cmd').value + '\n';
+  const el = $('cmdM').offsetParent ? $('cmdM') : $('cmd');
+  const text = el.value + '\n';
   const payload = JSON.stringify({ type: 'input_text', data: text });
   client.publish(`${currentPrefix}/control`, payload,
     e => e ? log('err', `发送失败: ${e}`) : log('out', `→ control: ${payload}`));
-};
-// 焦点在 text 输入框时,回车直接发送。
-$('cmd').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); $('btnCmd').click(); } });
+  el.value = '';
+}
+$('btnCmd').onclick = sendCmd;
+if ($('btnCmdM')) $('btnCmdM').onclick = sendCmd;
+$('cmd').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); sendCmd(); } });
+if ($('cmdM')) $('cmdM').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); sendCmd(); } });
 
 // ── 按键 / 滚动按钮(raw 字节走 pty_in;scroll 走 control)──
 const KEY_BYTES = { up:'\x1b[A', down:'\x1b[B', stab:'\x1b[Z', bs:'\x7f', enter:'\r', ctrlc:'\x03' };
@@ -417,51 +643,30 @@ document.querySelectorAll('[data-set-theme]').forEach(a => a.onclick = () => {
   document.documentElement.setAttribute('data-theme', a.getAttribute('data-set-theme'));
 });
 
-// ── 键盘直输:页面获焦(非输入框)时,按键编码成终端字节 → {prefix}/pty_in ──
-// 编码和服务端 bytes_from_key 同一套 xterm 规范(Ctrl+字母、方向键+修饰、F1–F12 等)。
-function keyToBytes(e) {
-  const k = e.key;
-  if (e.ctrlKey && !e.metaKey && k.length === 1 && /[a-zA-Z]/.test(k)) {
-    return String.fromCharCode(k.toUpperCase().charCodeAt(0) - 64); // ^A..\x1a
+// 取「可见且勾选」的键盘直输开关(桌面 #kbdCapture / 移动 #kbdCaptureM)。kbdSink 的
+// 事件处理会先查它,关掉就不发(让用户能临时禁用键盘直输)。
+function kbdOn() {
+  for (const id of ['kbdCapture', 'kbdCaptureM']) {
+    const el = $(id);
+    if (el && el.offsetParent !== null && el.checked) return true;
   }
-  if (k.length === 1 && !e.ctrlKey && !e.metaKey) {
-    return (e.altKey ? '\x1b' : '') + k; // 可打印字符;Alt 加 ESC 前缀
-  }
-  const n = 1 + (e.shiftKey?1:0) + (e.altKey?2:0) + (e.ctrlKey?4:0); // xterm modifier code
-  const mod = n > 1;
-  const csi = def => mod ? `\x1b[1;${n}${def}` : `\x1b[${def}`;
-  const tilde = num => mod ? `\x1b[${num};${n}~` : `\x1b[${num}~`;
-  switch (k) {
-    case 'Enter':     return '\r';
-    case 'Backspace': return '\x7f';
-    case 'Tab':       return e.shiftKey ? '\x1b[Z' : '\t';
-    case 'Escape':    return '\x1b';
-    case 'ArrowUp':    return csi('A');
-    case 'ArrowDown':  return csi('B');
-    case 'ArrowRight': return csi('C');
-    case 'ArrowLeft':  return csi('D');
-    case 'Home':       return csi('H');
-    case 'End':        return csi('F');
-    case 'PageUp':     return tilde(5);
-    case 'PageDown':   return tilde(6);
-    case 'Delete':     return tilde(3);
-    case 'Insert':     return tilde(2);
-  }
-  const f1 = /^F([1-4])$/.exec(k);
-  if (f1) return `\x1bO${'PQRS'[+f1[1]-1]}`;
-  const fn = { F5:15, F6:17, F7:18, F8:19, F9:20, F10:21, F11:23, F12:24 }[k];
-  if (fn) return `\x1b[${fn}~`;
-  return null; // 其它(Shift/Ctrl/Alt 等单独 modifier、IME 组合)忽略
+  return false;
 }
-document.addEventListener('keydown', e => {
-  if (!$('kbdCapture').checked || !client || !currentPrefix) return;
-  const tag = (e.target && e.target.tagName) || '';
-  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return; // 不抢表单输入
-  if (e.metaKey) return; // Cmd 组合放行给浏览器(Cmd+R 刷新等)
-  const bytes = keyToBytes(e);
-  if (bytes == null) return;
-  e.preventDefault();
-  client.publish(`${currentPrefix}/pty_in`, bytes);
+// kbdSink 的事件处理(上面 setupKbdSink 已绑)用 kbdOn 做开关;这里再包一道:
+//   上面 setupKbdSink 里 publishPty 已带 client/currentPrefix 判定,加 kbdOn 在 publishPty 里。
+// (publishPty 已在上方定义,这里不动。)
+
+// ── 移动端 tab 切换(控制 / 会话 / 日志)──
+function switchMobileTab(name) {
+  const map = { ctrl: ['paneCtrlM', 'tabCtrl'], sessions: ['paneSessionsM', 'tabSessions'], log: ['paneLogM', 'tabLog'] };
+  for (const [n, [pane, tab]] of Object.entries(map)) {
+    $(pane).classList.toggle('hidden', n !== name);
+    $(tab).classList.toggle('tab-active', n === name);
+  }
+  if (name === 'log' && $('logM')) $('logM').scrollTop = $('logM').scrollHeight;
+}
+['tabCtrl', 'tabSessions', 'tabLog'].forEach(id => {
+  if ($(id)) $(id).onclick = () => switchMobileTab(id.slice(3).replace('Ctrl', 'ctrl').replace('Sessions', 'sessions').replace('Log', 'log'));
 });
 
 setStatus('未连接', 'ghost');
