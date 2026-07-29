@@ -5,6 +5,8 @@ Share an interactive terminal session (`claude`, `codex`) running on your PC wit
 vibetty runs a program in a PTY, renders the terminal screen to an image, and publishes it to MQTT. Remote clients subscribe to display the live screen and send keystrokes back. Both ends are just MQTT clients talking to the same broker, so **no port on your PC needs to be exposed** to the public internet.
 
 > 0.4.0 introduces MQTT as the primary sharing transport, alongside an optional HTTP path. Both share one PTY session. MQTT is opt-in: it turns on only when a `[mqtt]` section exists in the config; otherwise MQTT is never touched. See the [changelog](CHANGELOG.md).
+>
+> **⚠️ Firmware update required:** vibetty `0.4.x` changed the MQTT protocol (new topics, `screen_text` tag bytes, `Sync.pixels`/`close` fields, presence `format`). If you use a **vibekeys** keyboard device, **update its firmware to `v0.4.0+`** — older firmware will not be able to connect or display correctly.
 
 ## Features
 

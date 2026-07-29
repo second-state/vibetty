@@ -5,6 +5,8 @@
 vibetty 在一个 PTY 里跑程序，把终端画面渲染成图片后发布到 MQTT。远端客户端订阅它来显示实时画面，并把按键发回来。两端都只是连同一个 broker 的 MQTT 客户端，**你的 PC 不需要对外暴露任何端口**。
 
 > 0.4.0 引入 MQTT 作为主要的分享通道，另保留一条可选的 HTTP 通道，两者共用同一个 PTY 会话。MQTT 是可选的：只有配置里存在 `[mqtt]` 段时才启用，否则完全不碰 MQTT。详见[更新日志](../CHANGELOG.md)。
+>
+> **⚠️ 需要更新固件：** vibetty `0.4.x` 改了 MQTT 协议（新 topic、`screen_text` tag 字节、`Sync.pixels`/`close` 字段、presence `format`）。如果你使用 **vibekeys** 键盘设备，**请将固件更新到 `v0.4.0+`** —— 旧固件无法正常连接或显示。
 
 ## 功能特性
 
