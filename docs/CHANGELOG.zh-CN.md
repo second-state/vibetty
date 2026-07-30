@@ -1,5 +1,40 @@
 # 变更日志 (CHANGELOG)
 
+## [0.4.0] - 2026-07-29
+
+第一个 MQTT 正式版。汇总 rc.1–rc.9 全部改动。0.4.0 相对 0.3.x 的核心变化:
+
+### 新增
+
+- **MQTT 传输**作为主要的分享通道——通过 MQTT(裸 TCP 或 WebSocket)分享 PTY 会话,无需暴露端口。两端都只是连同一个 broker 的 MQTT 客户端。
+- **文本输出模式(`-q text`,新默认)**——屏幕以 ANSI 终端流发到 `{p}/screen_text`(tag `0x00`=全屏基线、`0x01`=实时 PTY 增量)。带终端模拟器的客户端可直接渲染。JPEG 模式(`-q high/medium/low`)保留。
+- **内置 broker**——进程内 rumqttd broker(TCP + WS)可自动启动,零外部依赖。
+- **多实例发现**——每个实例用 retained presence 公告自己;客户端一条通配订阅即可发现所有实例。
+- **agent 状态检测**——解析终端标题判断 Codex / Claude Code 是 working 还是 waiting,随 presence 广播。
+- **Web 调试页**(`/mqtt_ws`)——功能完整的 MQTT-over-WebSocket 客户端(DaisyUI UI、xterm.js 文本模式渲染、键盘直输、会话列表、移动端布局)。自包含 HTML,可单独部署。
+- **`Sync.pixels` 字段**——客户端可按像素(默认)或字符列/行(`pixels=false`)上报显示尺寸。
+- **`Sync.close` 字段**——客户端可暂停/恢复服务端自主推屏,省流量。
+- **presence `format` 字段**——公告输出模式(high/medium/low/text),客户端据此选订阅哪个屏 topic。
+- **`vibetty skill` 子命令**——把内置 `run-vibetty` SKILL.md 安装进 / 移出 Claude Code / Codex 用户级 skills 目录。
+
+### 变更
+
+- **`-q` 默认改为 `text`**(原 `high`)。`-q` 现在选择输出格式:`text` / `high` / `medium` / `low`。
+- **屏 topic 不 retained**——`{p}/screen` 和 `{p}/screen_text`(全屏+增量)都 `retain=false`;只有 presence retained。防止重启后 retained 消息在 broker 上累积(topic 前缀带 pid)。
+- **退出不发干净 MQTT DISCONNECT**——直接断连接,broker 必发 LWT 清 presence。
+- **两个 select! 都改 biased**——入站控制(sync/pty_in/close)排在 PTY 输出前,狂输出时控制仍保持响应。
+- **resize burst 吸收**——resize PTY(触发 TUI 全量重绘)后,500ms 内的输出被吸收,等静默满 500ms 再发一帧全屏。
+- **更简洁的 screen 去抖**——每次 PTY 输出激活 100ms 尾部计时器,停顿满 100ms 才发最新帧。
+- **滚动翻页留 2 行**重叠(原 1 行)。
+- **`JpegQuality` 改名 `OutputFormat`**——现在覆盖 `text` 模式。
+
+### 修复
+
+- **Backspace 键**发 DEL(`0x7f`),不是 BS(`0x08`=Ctrl+H)。
+- **导航键修饰键**(Shift/Ctrl/Alt + 方向键/Home/End/PgUp/PgDn/Delete/Insert)现在按 xterm「Modified Keys」规范正确编码。
+
+---
+
 ## [0.4.0-rc.9] - 2026-07-27
 
 让 MQTT 控制消息在狂输出时仍保持响应。(中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md)。)
