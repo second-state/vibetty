@@ -2,40 +2,33 @@
 
 ## [0.4.0] - 2026-07-29
 
-The first stable MQTT release. All rc.1–rc.9 changes rolled up. Summary of what 0.4.0 delivers vs 0.3.x:
+First stable MQTT release.
 
 ### Added
 
-- **MQTT transport** as the primary sharing channel — share a PTY session over MQTT (raw TCP or WebSocket), no port exposure needed. Both ends are just MQTT clients to the same broker.
-- **Text output mode (`-q text`, the new default)** — the screen is sent as an ANSI terminal stream on `{p}/screen_text` (tag `0x00` = full-frame baseline, `0x01` = realtime PTY delta). Clients with a terminal emulator render directly. JPEG mode (`-q high/medium/low`) remains available.
-- **Built-in broker** — an in-process rumqttd broker (TCP + WS) can auto-start, zero external infrastructure.
-- **Multi-instance discovery** — each instance announces itself with retained presence; clients discover all instances via a single wildcard subscription.
-- **Agent state detection** — terminal title parsed for Codex / Claude Code working/waiting state, broadcast in presence.
-- **Web debug page** (`/mqtt_ws`) — full-featured MQTT-over-WebSocket client (DaisyUI UI, xterm.js for text mode, keyboard passthrough, session list, mobile layout). Self-contained HTML, deployable standalone.
-- **`Sync.pixels` field** — clients can report display size in pixels (default) or character cols/rows (`pixels=false`).
-- **`Sync.close` field** — clients can pause/resume the server's autonomous screen push to save bandwidth.
-- **Presence `format` field** — advertises the output mode (high/medium/low/text) so clients know which screen topic to subscribe to.
-- **`vibetty skill` subcommand** — install/uninstall the bundled `run-vibetty` SKILL.md into Claude Code / Codex user-level skills directories.
+- **MQTT transport** — share a terminal session over MQTT, no port exposure needed.
+- **Text output mode (`-q text`)** — screen sent as ANSI terminal stream; JPEG modes (`-q high/medium/low`) also available.
+- **Built-in broker** — in-process rumqttd, zero external dependencies.
+- **Multi-instance discovery** via retained presence.
+- **Agent state detection** — Codex / Claude Code working/waiting state broadcast in presence.
+- **Web debug page** (`/mqtt_ws`) — MQTT-over-WebSocket client with mobile layout and keyboard input.
+- **`Sync.pixels` / `Sync.close`** fields — report display size in pixels or cells; pause/resume autonomous push.
+- **Presence `format`** — tells clients which screen topic to subscribe to.
+- **`vibetty skill`** subcommand — install bundled SKILL.md into Claude Code / Codex.
 
 ### Changed
 
-- **`-q` default is now `text`** (was `high`). The `-q` flag now selects output format: `text` / `high` / `medium` / `low`.
-- **Screen topics are not retained** — `{p}/screen` and `{p}/screen_text` (full + delta) are all `retain=false`; only presence is retained. Prevents stale retained messages from accumulating on the broker after restarts (topic prefix includes pid).
-- **No clean MQTT DISCONNECT on stop** — the connection is dropped, so the broker always fires the LWT to clear presence.
-- **biased select!** in both the MQTT bridge and the main event loop — inbound control (sync/pty_in/close) is prioritized over PTY output, so control stays responsive during heavy output bursts.
-- **Resize burst absorption** — after a PTY resize (which triggers a TUI redraw burst), output is absorbed for up to 500ms and a single full frame is sent once output settles.
-- **Simpler screen debounce** — every PTY output activates a 100ms trailing timer; only after 100ms of quiet is the latest frame sent.
-- **Scroll paging keeps 2 rows** of overlap (was 1).
-- **`JpegQuality` renamed to `OutputFormat`** — now covers the `text` mode too.
+- **`-q` default is now `text`** (was `high`).
+- Screen topics are **not retained** (only presence) — prevents stale messages after restart.
+- **biased select!** prioritizes inbound control over PTY output.
+- **Resize burst absorption** — redraw burst held for 500ms, then one full frame sent.
+- Screen **debounce 100ms** trailing; scroll paging keeps **2 rows** overlap.
+- **`JpegQuality` renamed to `OutputFormat`**.
 
 ### Fixed
 
-- **Backspace key** sends DEL (`0x7f`), not BS (`0x08` = Ctrl+H).
-- **Navigation-key modifiers** (Shift/Ctrl/Alt + arrows/Home/End/PgUp/PgDn/Delete/Insert) are now properly encoded per the xterm "Modified Keys" spec.
-
----
-
-## [0.4.0-rc.9] - 2026-07-27
+- Backspace sends DEL (`0x7f`) not Ctrl+H.
+- Navigation-key modifiers (Shift/Ctrl/Alt + arrows/Home/End/PgUp/PgDn/Delete) properly encoded.
 
 Keep MQTT control responsive under heavy output. (中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md).)
 
