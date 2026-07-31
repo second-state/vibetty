@@ -1,11 +1,16 @@
 //! herdr 模式的极简 TUI:只占 herdr 分出的 1 行 pane,显示一行状态。
 //!
 //! 不渲染 PTY 内容(agent 在上方自己的 pane 里看);本地按键不转发进 PTY,
-//! 只用 `Ctrl+C` / `q` 退出 vibetty。ratatui/crossterm 初始化复用 `crate::ui`。
+//! 只用 `Ctrl+C` / `q` 退出 vibetty。**只监听键盘,不开 mouse capture**(不
+//! 复用 `crate::ui::init_terminal`,那个会 EnableMouseCapture)。
 
 use std::io;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::execute;
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -24,6 +29,22 @@ pub enum HerdrUiEvent {
 }
 
 pub type HerdrTerminal = Terminal<CrosstermBackend<io::Stdout>>;
+
+/// 进入 raw mode + 备用屏。**不**开 mouse capture(herdr 状态条只用键盘)。
+pub fn init_terminal() -> io::Result<HerdrTerminal> {
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    Terminal::new(backend)
+}
+
+/// 还原终端:退出备用屏 + 关 raw mode。
+pub fn cleanup_terminal(terminal: &mut HerdrTerminal) -> io::Result<()> {
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()
+}
 
 /// 后台线程:轮询 crossterm 事件,只把 `Ctrl+C` / `q` → Quit、Resize 转发出去。
 pub fn spawn_event_loop(tx: mpsc::Sender<HerdrUiEvent>) {

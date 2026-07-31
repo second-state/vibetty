@@ -340,7 +340,7 @@ pub async fn run_herdr(
     let mut vt_parser = vt100::Parser::new(vt_rows, vt_cols, 1024);
 
     // 本地 1 行 TUI + 事件循环(只 Ctrl+C/q 退出 + Resize)。
-    let mut tui = crate::ui::init_terminal().expect("Failed to initialize terminal");
+    let mut tui = ui::init_terminal().expect("Failed to initialize terminal");
     let (ui_tx, mut ui_rx) = mpsc::channel(64);
     ui::spawn_event_loop(ui_tx);
 
@@ -638,6 +638,6 @@ pub async fn run_herdr(
     // 的 q/Ctrl+C 不转发,必须显式 kill。)子进程已退(EOF 路径)时 kill 是无副作用空操作。
     let _ = terminal.kill().await;
 
-    crate::ui::cleanup_terminal(&mut tui).ok();
+    ui::cleanup_terminal(&mut tui).ok();
     Ok(())
 }
