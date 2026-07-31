@@ -107,20 +107,23 @@ The HTTP server is **off by default**; toggle it with the `HTTP` button in the T
 
 ## Use as a Herdr plugin
 
-vibetty can also run as a **Herdr plugin**: a `share` action opens a 1-row status
-pane below the focused agent pane and bridges that agent's terminal to your MQTT
-clients (ESP32 / browser). The status pane auto-closes when vibetty exits.
+vibetty ships a Herdr plugin manifest. Install it into Herdr with one command —
+this fetches the repo, builds vibetty, and registers the plugin (the `vibetty`
+binary ends up on your PATH, since Herdr resolves pane commands through PATH):
 
-1. **Install vibetty on your PATH** (Herdr resolves pane commands through PATH):
-   ```bash
-   cargo install --path . --force
-   ```
-2. **Link the plugin** (from the repo root):
-   ```bash
-   herdr plugin link .
-   ```
-3. **Trigger it** — run the `share` action from the Herdr command palette, or bind
-   a key (below). MQTT must be configured first (`vibetty setup`).
+```bash
+herdr plugin install second-state/vibetty
+```
+
+For local development, clone the repo and link it instead:
+
+```bash
+git clone https://github.com/second-state/vibetty && cd vibetty
+herdr plugin link .
+```
+
+Then configure MQTT once (`vibetty setup`), and trigger the `share` action from
+the Herdr command palette — or bind a key (below).
 
 ### Bind a hotkey
 
@@ -135,10 +138,10 @@ command = "vibetty.share"
 description = "Share this agent pane over Vibetty"
 ```
 
-Then reload Herdr's config (`herdr server reload-config`, or restart). Pressing the
-key in any agent pane opens the vibetty status bar, which shows
-`<agent> ▸ <pane> · [MQTT] · <title>` (`[MQTT]` turns green once connected). Press
-`q` (or `Ctrl+C`) in that pane to stop sharing.
+Then reload Herdr's config (`herdr server reload-config`, or restart). Pressing
+the key in any agent pane opens the vibetty status bar, which shows
+`<agent> ▸ <pane> · [MQTT · <X.XX MB>] · <title>` (`[MQTT ...]` turns green once
+connected). Press `q` (or `Ctrl+C`) in that pane to stop sharing.
 
 ## Documentation
 
