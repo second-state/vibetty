@@ -140,6 +140,9 @@ description = "Share this agent pane over Vibetty"
 键就开出 vibetty 状态条,显示 `<agent> ▸ <pane> · [MQTT · <X.XX MB>] · <title>`
 (`[MQTT ...]` 连上后变绿)。在那个 pane 里按 `q`(或 `Ctrl+C`)停止分享。
 
+**MQTT 连不上?** `[MQTT ...]` 在连上之前一直是灰的。如果一直不绿,用 `vibetty setup`
+设置 broker 地址(写入 `~/.vibetty/config.toml`),再重新触发 `share`。
+
 ## 文档
 
 - **[详细使用文档](USAGE.zh.md)** —— 配置、TUI、完整 MQTT 协议、ESP32 / MCU 对接指南、调试与常见问题。（[English](USAGE.md)）

@@ -143,6 +143,10 @@ the key in any agent pane opens the vibetty status bar, which shows
 `<agent> ▸ <pane> · [MQTT · <X.XX MB>] · <title>` (`[MQTT ...]` turns green once
 connected). Press `q` (or `Ctrl+C`) in that pane to stop sharing.
 
+**MQTT not connecting?** The `[MQTT ...]` bracket stays gray until vibetty
+connects. If it never turns green, run `vibetty setup` to set the broker address
+(writes `~/.vibetty/config.toml`), then trigger `share` again.
+
 ## Documentation
 
 - **[Detailed usage guide](docs/USAGE.md)** — configuration, the TUI, the full MQTT protocol, and an ESP32 / MCU integration guide. ([中文版](docs/USAGE.zh.md))
