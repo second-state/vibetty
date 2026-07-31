@@ -158,6 +158,7 @@ pub fn render_frame(
     mqtt: Option<&MqttButtonsState>,
     modal: &ModalState,
     hover: HoveredBtn,
+    title_tail: Option<&str>,
 ) {
     let size = f.area();
 
@@ -178,8 +179,12 @@ pub fn render_frame(
         // (更宽时的)旧内容,滚动时尤其明显,看着像重复行。
         f.render_widget(Clear, chunks[1]);
         let area = centered_rect(chunks[1], term_cols, term_rows.saturating_add(1));
-        let pseudo_term =
-            PseudoTerminal::new(screen).block(Block::new().borders(Borders::TOP).title(title));
+        // title 在终端 pane 上边框左上角;title_tail(可选)显示在同一行的最右端,右对齐。
+        let mut block = Block::new().borders(Borders::TOP).title(title);
+        if let Some(tail) = title_tail {
+            block = block.title(Line::from(tail).alignment(Alignment::Right));
+        }
+        let pseudo_term = PseudoTerminal::new(screen).block(block);
         f.render_widget(pseudo_term, area);
     }
 

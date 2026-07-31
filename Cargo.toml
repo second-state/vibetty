@@ -50,6 +50,9 @@ rumqttc = "0.25.1"
 machine-uid = "0.6.0"
 sha2 = "0.11.0"
 rumqttd = { version = "0.20.0", features = ["websocket"] }
+# herdr 插件 SDK:封装 herdr 的 socket API(client/socket/env/config/state/log),
+# 用于下一步把 vibetty 做成真正的 herdr 插件(action/event/pane + daemon)。
+herdr-plugin = "0.1.8"
 # 接管 rumqttd 的 tracing 事件(它用 tracing,不是 log);见 main::logger_init 的 NullSubscriber。
 tracing = "0.1"
 

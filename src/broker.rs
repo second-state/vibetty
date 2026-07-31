@@ -7,6 +7,8 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use rumqttd::{Config, ConnectionSettings, RouterConfig, ServerSettings};
 
@@ -14,16 +16,24 @@ use crate::config::MqttConfig;
 
 /// 启动内置 rumqttd broker(后台 OS 线程)。返回后 broker 已在跑。
 ///
+/// `alive` 由调用方创建(初始 true);broker 线程退出时(正常或异常,例如端口被占
+/// 导致 bind 失败、或运行中 panic)把它置 false,主循环据此把 MQTT 按钮状态从
+/// 「broker 在跑」改回 off,不再假装还活着。
+///
 /// 这里返回的失败仅限构造配置 / 建线程阶段;broker 运行时错误走 tracing(它自己
 /// 内部用 tracing),已由 main::logger_init 装的 NullSubscriber 全局 tracing subscriber 接管屏蔽。
-pub fn spawn_builtin(cfg: &MqttConfig) -> anyhow::Result<()> {
+pub fn spawn_builtin(cfg: &MqttConfig, alive: Arc<AtomicBool>) -> anyhow::Result<()> {
     let rcfg = build_config(cfg)?;
     std::thread::Builder::new()
         .name("rumqttd-broker".to_string())
         .spawn(move || {
             let mut broker = rumqttd::Broker::new(rcfg);
-            if let Err(e) = broker.start() {
-                log::error!("[broker] rumqttd exited: {e:?}");
+            let res = broker.start();
+            // broker 退出了(不管 Ok/Err)→ 标记不再存活。
+            alive.store(false, Ordering::Relaxed);
+            match res {
+                Ok(()) => log::info!("[broker] rumqttd exited cleanly"),
+                Err(e) => log::error!("[broker] rumqttd exited: {e:?}"),
             }
         })?;
     Ok(())

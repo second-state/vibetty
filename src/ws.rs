@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::{Router, extract::State, response::IntoResponse, routing::get};
 use ratatui::layout::Rect;
@@ -174,6 +175,7 @@ enum ClickOutcome {
 struct MqttCtx<'a> {
     cfg: &'a mut Option<MqttConfig>,
     broker_on: &'a mut bool,
+    broker_alive: &'a mut Option<Arc<AtomicBool>>,
     client: &'a mut Option<mqtt::MqttHandle>,
     cli_tx: &'a mpsc::Sender<ClientMessage>,
     tx: &'a ServerTx,
@@ -218,15 +220,18 @@ fn autostart_mqtt(
     cli_tx: &mpsc::Sender<ClientMessage>,
     tx: &ServerTx,
     image_format: crate::protocol::OutputFormat,
-) -> (bool, Option<mqtt::MqttHandle>) {
+) -> (bool, Option<mqtt::MqttHandle>, Option<Arc<AtomicBool>>) {
     let Some(cfg) = mqtt_cfg else {
-        return (false, None);
+        return (false, None, None);
     };
     let mut broker_on = false;
+    let mut broker_alive = None;
     if cfg.builtin_broker {
-        match broker::spawn_builtin(cfg) {
+        let alive = Arc::new(AtomicBool::new(true));
+        match broker::spawn_builtin(cfg, alive.clone()) {
             Ok(()) => {
                 broker_on = true;
+                broker_alive = Some(alive);
                 log::info!("[mqtt] broker auto-started on :{}", cfg.builtin_port);
             }
             Err(e) => log::warn!("[mqtt] broker auto-start failed: {e}"),
@@ -236,7 +241,7 @@ fn autostart_mqtt(
         log::info!("[mqtt] client auto-started");
         mqtt::spawn(cfg.for_client(), cli_tx.clone(), tx.clone(), image_format)
     });
-    (broker_on, client)
+    (broker_on, client, broker_alive)
 }
 
 /// 处理 HTTP 端口输入框的按键:Enter 按地址起 server、Esc 取消、其余编辑输入。
@@ -335,10 +340,12 @@ async fn mqtt_panel_enter(
                                 .clone();
                             cfg.builtin_port = t;
                             cfg.builtin_ws_port = w;
-                            match broker::spawn_builtin(&cfg) {
+                            let alive = Arc::new(AtomicBool::new(true));
+                            match broker::spawn_builtin(&cfg, alive.clone()) {
                                 Ok(()) => {
                                     log::info!("[mqtt] broker started on :{t}");
                                     *mqtt.broker_on = true;
+                                    *mqtt.broker_alive = Some(alive);
                                     ModalState::None
                                 }
                                 Err(e) => ModalState::Error(format!("broker start failed: {e}")),
@@ -609,7 +616,7 @@ pub async fn run_command(
 
     // MQTT:`enable` / `builtin_broker` 当 auto-start 标志。broker 只起不停(rumqttd 无 shutdown);
     // client 可停/重起(oneshot cancel,见 mqtt::MqttHandle)。
-    let (mut mqtt_broker_on, mut mqtt_client) =
+    let (mut mqtt_broker_on, mut mqtt_client, mut broker_alive) =
         autostart_mqtt(&mqtt_cfg, &cli_tx, &tx, image_format);
     // footer MQTT 按钮:只要配了 [mqtt] 就显示(不再绑 builtin_broker)。
     let mqtt_cfg_present = mqtt_cfg.is_some();
@@ -630,8 +637,9 @@ pub async fn run_command(
             client_on: mqtt_client_on,
         };
         let mqtt_opt = mqtt_cfg_present.then_some(&mqtt);
-        let _ =
-            tui.draw(|f| crate::ui::render_frame(f, screen, title, http, mqtt_opt, modal, hover));
+        let _ = tui.draw(|f| {
+            crate::ui::render_frame(f, screen, title, http, mqtt_opt, modal, hover, None)
+        });
     };
 
     // presence 心跳由 ws 主循环驱动:每 PRESENCE_INTERVAL_SECS 发一次 Presence(含 title+state)。
@@ -725,6 +733,26 @@ pub async fn run_command(
     let mut resize_settle_until: Option<tokio::time::Instant> = None;
 
     loop {
+        // 内置 broker 可能在后台悄悄退出(端口被占 bind 失败、panic 等)。broker 线程退出时
+        // 会把 alive AtomicBool 置 false,这里每轮检测:一旦发现挂了就把按钮状态改回 off + 重绘,
+        // 不再假装 broker 在跑。(idle 时最长等下一次事件/presence tick 才察觉。)
+        if let Some(a) = broker_alive.as_ref()
+            && mqtt_broker_on
+            && !a.load(Ordering::Relaxed)
+        {
+            mqtt_broker_on = false;
+            log::warn!("[mqtt] builtin broker exited; marking broker off");
+            let screen = Arc::new(vt_parser.screen().clone());
+            redraw(
+                &screen,
+                ui_title,
+                &http,
+                mqtt_broker_on,
+                mqtt_client.is_some(),
+                &modal,
+                hover,
+            );
+        }
         // 每轮 copy 最新 send_deadline(Option<Instant> 是 Copy),让下面去抖 async 分支按最新
         // deadline 等待;None 时该分支永不就绪。
         let deadline_copy = send_deadline;
@@ -822,9 +850,15 @@ pub async fn run_command(
                 );
                 log::trace!("[{}] PTY output: {output:?}", terminal.session_id());
                 log::debug!(
-                    "[{}] PTY output len: {} bytes",
+                    "[{}] PTY output len: {} bytes (screen={} sb={})",
                     terminal.session_id(),
-                    output.len()
+                    output.len(),
+                    if vt_parser.screen().alternate_screen() {
+                        "alt"
+                    } else {
+                        "main"
+                    },
+                    vt_parser.screen().scrollback(),
                 );
                 vt_parser.process(output.as_bytes());
 
@@ -905,6 +939,7 @@ pub async fn run_command(
                         let mut mqtt = MqttCtx {
                             cfg: &mut mqtt_cfg,
                             broker_on: &mut mqtt_broker_on,
+                            broker_alive: &mut broker_alive,
                             client: &mut mqtt_client,
                             cli_tx: &cli_tx,
                             tx: &tx,

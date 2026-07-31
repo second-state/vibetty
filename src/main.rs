@@ -2,6 +2,7 @@ use clap::Parser;
 
 mod broker;
 mod config;
+mod herdr_runner;
 mod mqtt;
 #[allow(dead_code)] // PNG 编码已不再走 render(只 JPEG);模块保留待后续清理
 mod png_encode;
@@ -104,6 +105,19 @@ async fn main() {
             }
             return;
         }
+        Some(Commands::Herdr {
+            target,
+            quality,
+            auto_submit,
+        }) => {
+            return run_herdr_mode(cli.config.clone(), target, quality, auto_submit).await;
+        }
+        Some(Commands::ShareHerdr) => {
+            if let Err(e) = herdr_runner::run_share_herdr().await {
+                log::error!("herdr share-herdr failed: {e}");
+            }
+            return;
+        }
         None => {}
     }
 
@@ -165,4 +179,33 @@ async fn main() {
     }
 
     ui::cleanup_terminal(&mut tui).ok();
+}
+
+/// `vibetty herdr <target>` 模式:attach 到 herdr agent 终端,经 MQTT 分享。
+/// `run_herdr` 自包含(自己 init TUI + 事件循环 + channel);这里只读配置后转发。
+async fn run_herdr_mode(
+    config: Option<std::path::PathBuf>,
+    target: Option<String>,
+    quality: String,
+    auto_submit: bool,
+) {
+    // target:位置参数优先,否则读 VIBETTY_HERDR_TARGET env(herdr share action 开出的 pane 走 env)。
+    let target = target
+        .or_else(|| std::env::var(herdr_runner::HERDR_TARGET_ENV).ok())
+        .filter(|s| !s.trim().is_empty());
+    let Some(target) = target else {
+        eprintln!(
+            "Error: no target. Pass a target id or set {}.",
+            herdr_runner::HERDR_TARGET_ENV
+        );
+        return;
+    };
+    log::info!("Starting Vibetty (herdr attach): target={target}");
+
+    let image_format = config::parse_output_format(&quality);
+    let mqtt_cfg = config::read_mqtt_config(config.as_deref());
+
+    if let Err(e) = herdr_runner::run_herdr(target, mqtt_cfg, image_format, auto_submit).await {
+        log::error!("Error in herdr attach execution: {}", e);
+    }
 }

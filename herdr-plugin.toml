@@ -1,0 +1,26 @@
+id = "vibetty"
+name = "Vibetty"
+version = "0.4.0"
+min_herdr_version = "0.7.5"
+description = "Share a Herdr agent pane over MQTT. Trigger the `share` action to open a 1-row status bar below the focused pane that bridges it to remote clients."
+platforms = ["linux", "macos"]
+
+[[build]]
+# herdr 通过 PATH 解析 pane 命令,所以把 vibetty 装进 ~/.cargo/bin(走 cargo install --path .)。
+command = ["cargo", "install", "--path", "."]
+
+# 触发:在 agent pane 里按绑定的快捷键 / 命令面板选 share。
+# focused 的 agent pane 通过 env(VIBETTY_HERDR_TARGET)传给开出来的 pane。
+[[actions]]
+id = "share"
+title = "Share this agent pane over Vibetty"
+contexts = ["pane"]
+command = ["vibetty", "share-herdr"]
+
+# 被开出来的 1 行状态条 pane:跑 `vibetty herdr`(target 从 env 读)。
+# 进程退出(q/Ctrl+C)时 herdr 自动关掉这个 pane(插件 pane 生命周期绑定)。
+[[panes]]
+id = "herdr-share"
+title = "Vibetty"
+placement = "split"
+command = ["vibetty", "herdr"]

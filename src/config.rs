@@ -72,22 +72,22 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
 
-    /// Path to config.toml (overrides default ~/.vibetty/config.toml)
+    /// Config file path (default ~/.vibetty/config.toml)
     #[arg(long, value_name = "PATH", global = true)]
     pub config: Option<std::path::PathBuf>,
 
-    /// Listen address (e.g., "0.0.0.0:3000")
+    /// HTTP listen address (e.g. 0.0.0.0:3000)
     #[arg(short, long, default_value = "0.0.0.0:3000")]
     pub bind_addr: String,
 
     #[arg(short, long, default_value = "true")]
     pub auto_submit: bool,
 
-    /// Command to execute on PTY start (e.g., -- bash -l)
+    /// Command to run in the PTY (e.g. -- bash -l)
     #[arg(last = true)]
     pub command_args: Vec<String>,
 
-    /// Screen output format: text (plain ANSI text stream, no image) or high/medium/low (JPEG quality tiers)
+    /// text or high/medium/low
     #[arg(
         short = 'q',
         long = "quality",
@@ -99,27 +99,44 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Configure MQTT transport via TUI (writes ~/.vibetty/config.toml)
+    /// Configure MQTT via TUI
     Setup,
-    /// Install/uninstall the built-in run-vibetty SKILL.md into an agent's user-level skills dir
+    /// Install/uninstall the run-vibetty skill
     Skill {
         #[command(subcommand)]
         action: SkillAction,
     },
+    /// Share a herdr agent terminal over MQTT
+    Herdr {
+        /// herdr agent target id (or VIBETTY_HERDR_TARGET env)
+        target: Option<String>,
+        /// text or high/medium/low
+        #[arg(
+            short = 'q',
+            long = "quality",
+            default_value = "text",
+            value_name = "QUALITY"
+        )]
+        quality: String,
+        #[arg(short = 'a', long = "auto-submit", default_value = "true")]
+        auto_submit: bool,
+    },
+    /// herdr share action entrypoint (not for manual use)
+    ShareHerdr,
 }
 
 #[derive(Subcommand, Debug)]
 pub enum SkillAction {
-    /// Write the bundled SKILL.md into ~/.claude/skills/run-vibetty/ and/or ~/.agents/skills/run-vibetty/
+    /// Install the run-vibetty skill
     Install {
-        /// Target Claude Code (writes ~/.claude/skills/run-vibetty/SKILL.md)
+        /// Target Claude Code
         #[arg(long)]
         claude: bool,
-        /// Target Codex USER scope (writes ~/.agents/skills/run-vibetty/SKILL.md)
+        /// Target Codex
         #[arg(long)]
         codex: bool,
     },
-    /// Remove the SKILL.md (and the dir if it becomes empty) from the agent's skills dir
+    /// Uninstall the run-vibetty skill
     Uninstall {
         /// Target Claude Code
         #[arg(long)]
@@ -153,28 +170,40 @@ pub struct RunArgs {
 
 impl RunArgs {
     pub fn image_format(&self) -> crate::protocol::OutputFormat {
-        match self.image_format.to_lowercase().as_str() {
-            "medium" | "mid" | "m" => crate::protocol::OutputFormat::Medium,
-            "low" | "l" => crate::protocol::OutputFormat::Low,
-            "text" | "txt" | "t" => crate::protocol::OutputFormat::Text,
-            _ => crate::protocol::OutputFormat::High,
-        }
+        parse_output_format(&self.image_format)
     }
 
     /// 读取可选的 `[mqtt]` 配置。
     /// 优先用 `--config` 指定的路径,否则回退 `~/.vibetty/config.toml`。
     /// 无配置文件 / 无 `[mqtt]` 段 → None(不启用 MQTT,现有 WebSocket/HTTP 路径不变)。
     pub fn mqtt_config(&self) -> Option<MqttConfig> {
-        #[derive(serde::Deserialize)]
-        struct MqttSection {
-            #[serde(default)]
-            mqtt: Option<MqttConfig>,
-        }
-        let path = match self.config.as_ref() {
-            Some(p) => p.clone(),
-            None => dirs::home_dir()?.join(".vibetty").join("config.toml"),
-        };
-        let content = std::fs::read_to_string(&path).ok()?;
-        toml::from_str::<MqttSection>(&content).ok()?.mqtt
+        read_mqtt_config(self.config.as_deref())
     }
+}
+
+/// 把 `-q/--quality` 字符串解析成 `OutputFormat`。
+pub fn parse_output_format(s: &str) -> crate::protocol::OutputFormat {
+    match s.to_lowercase().as_str() {
+        "medium" | "mid" | "m" => crate::protocol::OutputFormat::Medium,
+        "low" | "l" => crate::protocol::OutputFormat::Low,
+        "text" | "txt" | "t" => crate::protocol::OutputFormat::Text,
+        _ => crate::protocol::OutputFormat::High,
+    }
+}
+
+/// 读取可选的 `[mqtt]` 配置。
+/// `config_path` 为 None 时回退 `~/.vibetty/config.toml`。
+/// 无配置文件 / 无 `[mqtt]` 段 → None(不启用 MQTT)。
+pub fn read_mqtt_config(config_path: Option<&std::path::Path>) -> Option<MqttConfig> {
+    #[derive(serde::Deserialize)]
+    struct MqttSection {
+        #[serde(default)]
+        mqtt: Option<MqttConfig>,
+    }
+    let path = match config_path {
+        Some(p) => p.to_path_buf(),
+        None => dirs::home_dir()?.join(".vibetty").join("config.toml"),
+    };
+    let content = std::fs::read_to_string(&path).ok()?;
+    toml::from_str::<MqttSection>(&content).ok()?.mqtt
 }
