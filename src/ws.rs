@@ -239,7 +239,7 @@ fn autostart_mqtt(
     }
     let client = cfg.enable.then(|| {
         log::info!("[mqtt] client auto-started");
-        mqtt::spawn(cfg.for_client(), cli_tx.clone(), tx.clone(), image_format)
+        mqtt::spawn(cfg.for_client(), cli_tx.clone(), tx.clone(), image_format).0
     });
     (broker_on, client, broker_alive)
 }
@@ -398,12 +398,9 @@ async fn mqtt_panel_enter(
                     .as_ref()
                     .expect("mqtt_cfg_present implies mqtt_cfg")
                     .for_client();
-                *mqtt.client = Some(mqtt::spawn(
-                    cfg,
-                    mqtt.cli_tx.clone(),
-                    mqtt.tx.clone(),
-                    mqtt.image_format,
-                ));
+                *mqtt.client = Some(
+                    mqtt::spawn(cfg, mqtt.cli_tx.clone(), mqtt.tx.clone(), mqtt.image_format).0,
+                );
                 log::info!("[mqtt] client started via panel");
             }
             ModalState::None

@@ -6,7 +6,7 @@
 //! 进 PTY,只有 `Ctrl+C` / `q` 退出;远端按键仍走 MQTT → PTY。
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use tokio::sync::{broadcast, mpsc};
 
@@ -50,15 +50,21 @@ enum TerminalEvent {
 }
 
 /// boot 时的 MQTT auto-start:`enable` 起 client、`builtin_broker` 起内置 broker。
-/// 返回 (broker 是否在跑, client handle, broker alive 句柄)。
+/// 返回 (broker 是否在跑, client handle, broker alive 句柄, screen 字节累计计数器)。
+/// 没 spawn client 时计数器是空的 Arc(UI 显示 0.00 MB)。
 fn autostart_mqtt(
     mqtt_cfg: &Option<MqttConfig>,
     cli_tx: &mpsc::Sender<ClientMessage>,
     tx: &ServerTx,
     image_format: crate::protocol::OutputFormat,
-) -> (bool, Option<mqtt::MqttHandle>, Option<Arc<AtomicBool>>) {
+) -> (
+    bool,
+    Option<mqtt::MqttHandle>,
+    Option<Arc<AtomicBool>>,
+    Arc<AtomicU64>,
+) {
     let Some(cfg) = mqtt_cfg else {
-        return (false, None, None);
+        return (false, None, None, Arc::new(AtomicU64::new(0)));
     };
     let mut broker_on = false;
     let mut broker_alive = None;
@@ -73,11 +79,14 @@ fn autostart_mqtt(
             Err(e) => log::warn!("[mqtt] broker auto-start failed: {e}"),
         }
     }
-    let client = cfg.enable.then(|| {
+    let (client, screen_bytes) = if cfg.enable {
         log::info!("[mqtt] client auto-started");
-        mqtt::spawn(cfg.for_client(), cli_tx.clone(), tx.clone(), image_format)
-    });
-    (broker_on, client, broker_alive)
+        let (h, stats) = mqtt::spawn(cfg.for_client(), cli_tx.clone(), tx.clone(), image_format);
+        (Some(h), stats)
+    } else {
+        (None, Arc::new(AtomicU64::new(0)))
+    };
+    (broker_on, client, broker_alive, screen_bytes)
 }
 
 /// 解析 herdr 二进制路径:优先 `$HERDR_BIN_PATH`(herdr 调插件时注入),否则 PATH 里的 `herdr`。
@@ -349,7 +358,7 @@ pub async fn run_herdr(
     let (tx, broadcast_rx) = tokio::sync::broadcast::channel(1024);
     drop(broadcast_rx);
 
-    let (mut mqtt_broker_on, mqtt_client, broker_alive) =
+    let (mut mqtt_broker_on, mqtt_client, broker_alive, screen_bytes) =
         autostart_mqtt(&mqtt_cfg, &cli_tx, &tx, image_format);
 
     // 画一次初始状态条(title 此时 ui_title 还没初始化,从 watch 通道取)。
@@ -359,6 +368,7 @@ pub async fn run_herdr(
         &agent_name,
         &target,
         mqtt_client.is_some(),
+        screen_bytes.load(Ordering::Relaxed),
         &init_title,
     );
 
@@ -419,23 +429,22 @@ pub async fn run_herdr(
     let mut resize_settle_until: Option<tokio::time::Instant> = None;
 
     loop {
-        // 内置 broker 可能在后台悄悄退出(端口被占等)。alive 置 false 后,这里每轮检测、
-        // 把状态改回 off 并刷新状态条。
+        // 内置 broker 可能在后台悄悄退出(端口被占等)。alive 置 false 后翻状态 + 重画状态条。
         if let Some(a) = broker_alive.as_ref()
             && mqtt_broker_on
             && !a.load(Ordering::Relaxed)
         {
             mqtt_broker_on = false;
             log::warn!("[mqtt] builtin broker exited; marking broker off");
+            let _ = ui::draw_status(
+                &mut tui,
+                &agent_name,
+                &target,
+                mqtt_client.is_some(),
+                screen_bytes.load(Ordering::Relaxed),
+                &ui_title,
+            );
         }
-        // 每轮重画状态条(1 行 Paragraph 很轻;broker 挂了 mqtt_client 仍在,靠 presence 兜底)。
-        let _ = ui::draw_status(
-            &mut tui,
-            &agent_name,
-            &target,
-            mqtt_client.is_some(),
-            &ui_title,
-        );
 
         let deadline_copy = send_deadline;
         let settle_copy = resize_settle_until;
@@ -462,6 +471,15 @@ pub async fn run_herdr(
                         title,
                         state: current_state,
                     });
+                    // 状态/title 变了 → 重画状态条(顺带刷新 MB 计数)。
+                    let _ = ui::draw_status(
+                        &mut tui,
+                        &agent_name,
+                        &target,
+                        mqtt_client.is_some(),
+                        screen_bytes.load(Ordering::Relaxed),
+                        &ui_title,
+                    );
                 } else {
                     // 轮询任务退出(sender 没了);状态保持最后一次。
                     log::debug!("[herdr] agent_status_rx closed");
@@ -555,7 +573,7 @@ pub async fn run_herdr(
                 break;
             }
             TerminalEvent::Ui(ui::HerdrUiEvent::Resize) => {
-                // 本地 1 行 pane 尺寸变化:不动 PTY(尺寸由远端 sync 驱动),状态条下一轮自会重画。
+                // 本地 1 行 pane 尺寸变化:不动 PTY(尺寸由远端 sync 驱动),状态条不重画。
             }
 
             TerminalEvent::Input(ClientMessage::Sync {

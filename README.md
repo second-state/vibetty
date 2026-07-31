@@ -105,6 +105,41 @@ The HTTP server is **off by default**; toggle it with the `HTTP` button in the T
 - `GET /screenshot` — the current terminal screen as a JPEG image (quality set by `-q, --quality`).
 - `GET /mqtt_ws` — a browser MQTT-over-WebSocket viewer. It connects to the built-in broker's WS port, discovers instances, shows the screen, and can send input. Handy for testing without hardware.
 
+## Use as a Herdr plugin
+
+vibetty can also run as a **Herdr plugin**: a `share` action opens a 1-row status
+pane below the focused agent pane and bridges that agent's terminal to your MQTT
+clients (ESP32 / browser). The status pane auto-closes when vibetty exits.
+
+1. **Install vibetty on your PATH** (Herdr resolves pane commands through PATH):
+   ```bash
+   cargo install --path . --force
+   ```
+2. **Link the plugin** (from the repo root):
+   ```bash
+   herdr plugin link .
+   ```
+3. **Trigger it** — run the `share` action from the Herdr command palette, or bind
+   a key (below). MQTT must be configured first (`vibetty setup`).
+
+### Bind a hotkey
+
+Add this to `~/.config/herdr/config.toml` (`key = ""` leaves it unset — pick your
+own, e.g. `prefix+v`):
+
+```toml
+[[keys.command]]
+key = "prefix+v"
+type = "plugin_action"
+command = "vibetty.share"
+description = "Share this agent pane over Vibetty"
+```
+
+Then reload Herdr's config (`herdr server reload-config`, or restart). Pressing the
+key in any agent pane opens the vibetty status bar, which shows
+`<agent> ▸ <pane> · [MQTT] · <title>` (`[MQTT]` turns green once connected). Press
+`q` (or `Ctrl+C`) in that pane to stop sharing.
+
 ## Documentation
 
 - **[Detailed usage guide](docs/USAGE.md)** — configuration, the TUI, the full MQTT protocol, and an ESP32 / MCU integration guide. ([中文版](docs/USAGE.zh.md))

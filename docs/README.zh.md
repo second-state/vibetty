@@ -105,6 +105,40 @@ HTTP 服务**默认关闭**，在 TUI 里点 `HTTP` 按钮启动。
 - `GET /screenshot` —— 当前终端画面图片（JPEG；质量由 `-q, --quality` 决定）。
 - `GET /mqtt_ws` —— 浏览器 MQTT-over-WebSocket 查看页：连内置 broker 的 WS 端口、发现实例、显示画面、可发输入。没有硬件时用它测很方便。
 
+## 当作 Herdr 插件用
+
+vibetty 还能当 **Herdr 插件**跑:一个 `share` action 会在当前聚焦的 agent pane
+下方开一个 1 行高的状态条 pane,把那个 agent 的终端桥给你的 MQTT 客户端(ESP32 /
+浏览器)。vibetty 退出时这个 pane 自动关闭。
+
+1. **把 vibetty 装到 PATH**(herdr 通过 PATH 解析 pane 命令):
+   ```bash
+   cargo install --path . --force
+   ```
+2. **链上插件**(在仓库根目录):
+   ```bash
+   herdr plugin link .
+   ```
+3. **触发** —— 从 herdr 命令面板跑 `share` action,或绑一个键(见下)。需先配好
+   MQTT(`vibetty setup`)。
+
+### 绑定快捷键
+
+把下面这段加到 `~/.config/herdr/config.toml`(`key = ""` 表示不绑定——自己挑一个,
+比如 `prefix+v`):
+
+```toml
+[[keys.command]]
+key = "prefix+v"
+type = "plugin_action"
+command = "vibetty.share"
+description = "Share this agent pane over Vibetty"
+```
+
+然后重载 herdr 配置(`herdr server reload-config`,或重启)。在任意 agent pane 按那个
+键就开出 vibetty 状态条,显示 `<agent> ▸ <pane> · [MQTT] · <title>`(`[MQTT]` 连上后
+变绿)。在那个 pane 里按 `q`(或 `Ctrl+C`)停止分享。
+
 ## 文档
 
 - **[详细使用文档](USAGE.zh.md)** —— 配置、TUI、完整 MQTT 协议、ESP32 / MCU 对接指南、调试与常见问题。（[English](USAGE.md)）

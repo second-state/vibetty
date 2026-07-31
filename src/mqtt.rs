@@ -34,6 +34,9 @@
 //! LWT 在异常掉线时清空它。ESP32 订阅 `{user}/+/+/vibetty` 即可发现该用户的所有实例
 //! (通配 device 与 pid),再按 prefix 精确订阅数据通道。
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use bytes::Bytes;
 use rumqttc::{AsyncClient, Event, LastWill, MqttOptions, Packet, QoS, Transport};
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -56,7 +59,9 @@ impl MqttHandle {
     }
 }
 
-/// 启动 MQTT 桥接(后台任务),返回停止句柄。调用方按需 `.stop()`,或直接丢弃(运行到进程结束)。
+/// 启动 MQTT 桥接(后台任务),返回 (停止句柄, 出站 screen 字节累计计数器)。
+/// 计数器在每次 publish screen 内容时累加(text 全屏/增量、jpeg 帧都算),调用方可读取
+/// 用于 UI 展示。调用方按需 `.stop()`,或直接丢弃(运行到进程结束)。
 ///
 /// - `cli_tx`: 客户端消息进入 PTY 会话的入口(与 `AppState.cli_tx` 同一个)
 /// - `tx`:     服务端广播源(与 `AppState.tx` 同一个),内部 `.subscribe()` 取副本
@@ -65,10 +70,18 @@ pub fn spawn(
     cli_tx: mpsc::Sender<ClientMessage>,
     tx: broadcast::Sender<ServerMessage>,
     image_format: OutputFormat,
-) -> MqttHandle {
+) -> (MqttHandle, Arc<AtomicU64>) {
     let (cancel_tx, cancel_rx) = oneshot::channel();
-    tokio::spawn(run_bridge(cfg, cli_tx, tx, image_format, cancel_rx));
-    MqttHandle { cancel: cancel_tx }
+    let screen_bytes: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+    tokio::spawn(run_bridge(
+        cfg,
+        cli_tx,
+        tx,
+        image_format,
+        cancel_rx,
+        screen_bytes.clone(),
+    ));
+    (MqttHandle { cancel: cancel_tx }, screen_bytes)
 }
 
 fn qos_from_u8(q: u8) -> QoS {
@@ -240,6 +253,7 @@ async fn run_bridge(
     tx: broadcast::Sender<ServerMessage>,
     image_format: OutputFormat,
     mut cancel: oneshot::Receiver<()>,
+    screen_bytes: Arc<AtomicU64>,
 ) {
     // broker 是完整 URL:mqtt(s)://[user:pass@]host[:port]。scheme 决定 TLS,
     // user/pass 在 URL 里;端口没写则按协议默认(mqtt 1883 / mqtts 8883)。
@@ -396,6 +410,7 @@ async fn run_bridge(
                     let mut payload = Vec::with_capacity(1 + bytes.len());
                     payload.push(0x01);
                     payload.extend_from_slice(&bytes);
+                    screen_bytes.fetch_add(payload.len() as u64, Ordering::Relaxed);
                     total_screen_bytes += payload.len() as u64;
                     log::debug!(
                         "[mqtt] screen_text delta {} bytes (total {:.2} MB) -> {screen_text_topic}",
@@ -420,6 +435,7 @@ async fn run_bridge(
                         let mut payload = Vec::with_capacity(1 + text.len());
                         payload.push(0x00);
                         payload.extend_from_slice(text.as_bytes());
+                        screen_bytes.fetch_add(payload.len() as u64, Ordering::Relaxed);
                         total_screen_bytes += payload.len() as u64;
                         log::debug!(
                             "[mqtt] screen_text full {} bytes (total {:.2} MB) -> {screen_text_topic}",
@@ -443,6 +459,7 @@ async fn run_bridge(
                                 // (0=底部/最新)。offset 直接从 Screen 读——它自带 scrollback_offset 字段。
                                 let offset = screen.as_ref().scrollback() as u32;
                                 img.extend_from_slice(&offset.to_be_bytes());
+                                screen_bytes.fetch_add(img.len() as u64, Ordering::Relaxed);
                                 total_screen_bytes += img.len() as u64;
                                 log::debug!(
                                     "[mqtt] screen image {} bytes (trailer offset={offset}, total {:.2} MB) -> {screen_topic}",
