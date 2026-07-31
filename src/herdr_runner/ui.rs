@@ -10,9 +10,9 @@ use ratatui::{
     Terminal,
     backend::CrosstermBackend,
     layout::Rect,
-    style::Style,
+    style::{Color, Style},
     text::{Line, Span},
-    widgets::{Paragraph, Wrap},
+    widgets::Paragraph,
 };
 use tokio::sync::mpsc;
 
@@ -65,17 +65,32 @@ fn event_loop_thread(tx: mpsc::Sender<HerdrUiEvent>) -> anyhow::Result<()> {
     }
 }
 
-/// 画 1 行状态:`vibetty ▸ <target> · MQTT <state>`。占满整个 pane(1 行高,自动截断)。
-pub fn draw_status(terminal: &mut HerdrTerminal, target: &str, mqtt_state: &str) -> io::Result<()> {
+/// 画 1 行状态:`<agent> ▸ <target> · [MQTT] · <title>`。MQTT 连上时 `[MQTT]` 绿色。
+/// 不换行——超出 pane 宽度的部分直接截断(避免把 1 行高的 pane 撑成多行)。
+pub fn draw_status(
+    terminal: &mut HerdrTerminal,
+    agent: &str,
+    target: &str,
+    mqtt_connected: bool,
+    title: &str,
+) -> io::Result<()> {
     terminal.draw(|f| {
         let area: Rect = f.area();
+        let mqtt_color = if mqtt_connected {
+            Color::Green
+        } else {
+            Color::DarkGray
+        };
         let line = Line::from(vec![
-            Span::raw("vibetty ▸ "),
-            Span::styled(target, Style::default()),
-            Span::raw(" · MQTT "),
-            Span::raw(mqtt_state),
+            Span::raw(agent),
+            Span::raw(" ▸ "),
+            Span::raw(target),
+            Span::raw(" · "),
+            Span::styled("[MQTT]", Style::default().fg(mqtt_color)),
+            Span::raw(" · "),
+            Span::raw(title),
         ]);
-        f.render_widget(Paragraph::new(line).wrap(Wrap { trim: false }), area);
+        f.render_widget(Paragraph::new(line), area);
     })?;
     Ok(())
 }

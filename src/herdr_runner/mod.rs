@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::{broadcast, mpsc};
-use vt100::Callbacks;
 
 use crate::broker;
 use crate::config::MqttConfig;
@@ -35,28 +34,6 @@ pub(crate) const SCREEN_CHAR_HEIGHT: u32 = 18;
 pub(crate) const SCREEN_PADDING: u32 = 16;
 
 type ServerTx = broadcast::Sender<ServerMessage>;
-
-/// vt300 回调:跟踪终端窗口 title(agent 状态检测用)。
-struct WindowCallbacks {
-    title: String,
-    update_title: bool,
-}
-
-impl WindowCallbacks {
-    fn new() -> Self {
-        Self {
-            title: String::new(),
-            update_title: false,
-        }
-    }
-}
-
-impl Callbacks for WindowCallbacks {
-    fn set_window_title(&mut self, _: &mut vt100::Screen, title: &[u8]) {
-        self.title = std::str::from_utf8(title).unwrap().to_string();
-        self.update_title = true;
-    }
-}
 
 fn send_screen(tx: &ServerTx, screen: Arc<vt100::Screen>) {
     // 广播整张屏幕;渲染成 JPEG 还是 ANSI 文本由 MQTT 端按 image_format 决定。
@@ -103,61 +80,89 @@ fn autostart_mqtt(
     (broker_on, client, broker_alive)
 }
 
-/// 状态条用的 MQTT 状态文字:`off` / `brkr` / `conn` / `on`。
-/// `broker_alive` 为 Some 且已置 false(broker 退出)时视作 broker 挂。
-fn mqtt_label(
-    mqtt_cfg_present: bool,
-    broker_on: bool,
-    broker_alive: Option<&Arc<AtomicBool>>,
-    client_on: bool,
-) -> &'static str {
-    if !mqtt_cfg_present {
-        return "off";
-    }
-    let broker_really_on = broker_on
-        && broker_alive
-            .map(|a| a.load(Ordering::Relaxed))
-            .unwrap_or(true);
-    match (broker_really_on, client_on) {
-        (true, true) => "on",
-        (true, false) => "brkr",
-        (false, true) => "conn",
-        (false, false) => "off",
-    }
+/// 解析 herdr 二进制路径:优先 `$HERDR_BIN_PATH`(herdr 调插件时注入),否则 PATH 里的 `herdr`。
+fn herdr_bin() -> String {
+    std::env::var("HERDR_BIN_PATH")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "herdr".to_string())
 }
 
+/// `herdr agent get <target>` 的解析结果(只取关心的字段,其余忽略)。
+#[derive(Debug, Clone, serde::Deserialize)]
+struct HerdrAgentInfo {
+    /// agent 类型名(claude / codex / ...),非 agent pane 时为 None。
+    #[serde(default)]
+    agent: Option<String>,
+    /// idle / working / blocked / done / unknown。
+    agent_status: String,
+    pane_id: String,
+    terminal_id: String,
+    #[serde(default)]
+    terminal_title: Option<String>,
+}
+
+/// 直接 shell 出 `herdr agent get <target>` 并自己解析(不走 herdr-plugin SDK,避开它把
+/// `Pane.agent_status` 当裸字符串之类的反序列化坑)。target 是 pane id(如 `wA:p8`)。
+async fn herdr_agent_get(target: &str) -> anyhow::Result<HerdrAgentInfo> {
+    use anyhow::Context as _;
+    #[derive(serde::Deserialize)]
+    struct Envelope {
+        result: ResultBody,
+    }
+    #[derive(serde::Deserialize)]
+    struct ResultBody {
+        agent: HerdrAgentInfo,
+    }
+
+    let output = tokio::process::Command::new(herdr_bin())
+        .args(["agent", "get", target])
+        .output()
+        .await
+        .with_context(|| format!("failed to spawn `herdr agent get {target}`"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "`herdr agent get {target}` failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let env: Envelope = serde_json::from_slice(&output.stdout).with_context(|| {
+        format!(
+            "parse `herdr agent get {target}` output: {}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    })?;
+    Ok(env.result.agent)
+}
+
+/// 查 target 的 agent 状态 + terminal title + agent 名(经 herdr_agent_get)。
+/// 返回 (status, title, agent),agent 形如 "claude"/"codex",非 agent pane 时为 "?"。
 async fn get_agent_status(
-    client: &herdr_plugin::HerdrClient,
     target: &str,
-) -> anyhow::Result<herdr_plugin::AgentStatus> {
-    let agent_status: herdr_plugin::AgentStatus = match client.agent().get(target).await {
-        Ok(info) => {
-            let p = &info.agent;
-            log::debug!(
-                "[herdr] target {target}: pane={} terminal={} agent={:?} status={}",
-                p.pane_id,
-                p.terminal_id,
-                p.agent,
-                p.agent_status
-            );
-            // p.agent_status 是 "working"/"idle"/... 纯字符串(serde 反序列化 Pane 时已把
-            // JSON 的引号去掉),不能再 serde_json::from_str(会把裸 working 当无效 JSON)。
-            // 按字面映射到枚举。
-            use herdr_plugin::AgentStatus;
-            match p.agent_status.as_str() {
-                "working" => AgentStatus::Working,
-                "idle" => AgentStatus::Idle,
-                "blocked" => AgentStatus::Blocked,
-                "done" => AgentStatus::Done,
-                _ => AgentStatus::Unknown,
-            }
-        }
-        Err(e) => {
-            log::warn!("[herdr] agent get {target} failed: {e}");
-            Err(e)?
-        }
+) -> anyhow::Result<(herdr_plugin::AgentStatus, String, String)> {
+    let info = herdr_agent_get(target).await?;
+    log::debug!(
+        "[herdr] target {target}: pane={} terminal={} title={:?} agent={:?} status={}",
+        info.pane_id,
+        info.terminal_id,
+        info.terminal_title,
+        info.agent,
+        info.agent_status
+    );
+    use herdr_plugin::AgentStatus;
+    let status = match info.agent_status.as_str() {
+        "working" => AgentStatus::Working,
+        "idle" => AgentStatus::Idle,
+        "blocked" => AgentStatus::Blocked,
+        "done" => AgentStatus::Done,
+        _ => AgentStatus::Unknown,
     };
-    Ok(agent_status)
+    Ok((
+        status,
+        info.terminal_title.unwrap_or_default(),
+        info.agent.unwrap_or_else(|| "?".to_string()),
+    ))
 }
 
 /// herdr 的 `AgentStatus` → vibetty 的 `AgentState`:Working 保持 Working,
@@ -283,23 +288,22 @@ pub async fn run_herdr(
     image_format: crate::protocol::OutputFormat,
     auto_submit: bool,
 ) -> anyhow::Result<()> {
-    // 进 herdr 模式第一件事:用 herdr-plugin SDK(CLI 后端,等价 `herdr agent get <target>`)
-    // 查一下 target 的状态,记录到日志。后续可据此选 agent 类型 / 判断是否值得 attach。
-    let client = herdr_plugin::HerdrClient::new();
-    let agent_status = get_agent_status(&client, &target).await?;
+    // 进 herdr 模式第一件事:查一下 target 的 agent 状态 + terminal title + agent 名
+    // (直接 shell 出 `herdr agent get`),记录到日志。
+    let (agent_status, terminal_title, agent_name) = get_agent_status(&target).await?;
 
-    // 后台每 1s 轮询 target 的 agent 状态;变化时经 watch 通道通知主循环(目前 rx 暂未接,
-    // 标 _ 待后续映射到 presence 的 state)。
-    let (tx, mut agent_status_rx) = tokio::sync::watch::channel(agent_status);
+    // 后台每 1s 轮询 target 的 agent 状态;变化时经 watch 通道通知主循环。
+    // (agent 名基本恒定,只在 init 取一次;title 跟着 status 一起走 watch 给 presence 用。)
+    let (tx, mut agent_status_rx) = tokio::sync::watch::channel((agent_status, terminal_title));
     let status_target = target.clone();
     tokio::spawn(async move {
         let mut current = agent_status;
         loop {
-            match get_agent_status(&client, &status_target).await {
-                Ok(s) if s != current => {
+            match get_agent_status(&status_target).await {
+                Ok((s, title, _agent)) if s != current => {
                     current = s;
                     log::info!("[herdr] {status_target} status -> {s:?}");
-                    if tx.send(s).is_err() {
+                    if tx.send((s, title)).is_err() {
                         return; // 主循环退出,receiver 没了。
                     }
                 }
@@ -333,8 +337,7 @@ pub async fn run_herdr(
     )
     .await?;
 
-    let mut vt_parser =
-        vt100::Parser::new_with_callbacks(vt_rows, vt_cols, 8096, WindowCallbacks::new());
+    let mut vt_parser = vt100::Parser::new(vt_rows, vt_cols, 1024);
 
     // 本地 1 行 TUI + 事件循环(只 Ctrl+C/q 退出 + Resize)。
     let mut tui = crate::ui::init_terminal().expect("Failed to initialize terminal");
@@ -346,21 +349,17 @@ pub async fn run_herdr(
     let (tx, broadcast_rx) = tokio::sync::broadcast::channel(1024);
     drop(broadcast_rx);
 
-    let mut ui_title = String::new();
-    let mqtt_cfg_present = mqtt_cfg.is_some();
     let (mut mqtt_broker_on, mqtt_client, broker_alive) =
         autostart_mqtt(&mqtt_cfg, &cli_tx, &tx, image_format);
 
-    // 画一次初始状态条。
+    // 画一次初始状态条(title 此时 ui_title 还没初始化,从 watch 通道取)。
+    let init_title = agent_status_rx.borrow().1.clone();
     let _ = ui::draw_status(
         &mut tui,
+        &agent_name,
         &target,
-        mqtt_label(
-            mqtt_cfg_present,
-            mqtt_broker_on,
-            broker_alive.as_ref(),
-            mqtt_client.is_some(),
-        ),
+        mqtt_client.is_some(),
+        &init_title,
     );
 
     // presence 心跳:interval 首次 tick 立即返回 → 充当上线公告。
@@ -380,11 +379,6 @@ pub async fn run_herdr(
             result = terminal.read_pty_output() => match result {
                 Ok(output) if !output.is_empty() => {
                     vt_parser.process(output.as_bytes());
-                    let cb = vt_parser.callbacks_mut();
-                    if cb.update_title {
-                        cb.update_title = false;
-                        ui_title = cb.title.clone();
-                    }
                     last_pty_at = tokio::time::Instant::now();
                 }
                 Ok(_) => break 'init, // 空 = PTY EOF(子进程秒退),交给主 loop 处理。
@@ -401,9 +395,11 @@ pub async fn run_herdr(
     send_screen(&tx, screen);
     // 当前 agent 状态(由后台轮询 herdr 的 agent_status 驱动,见主循环 select 的 changed 分支)。
     // 先用 watch 通道里的最新值初始化(可能已在 init settle 期间被轮询刷新)。
-    let mut current_state = agent_status_to_state(*agent_status_rx.borrow());
+    let (agent_status, title) = agent_status_rx.borrow().clone();
+    let mut current_state = agent_status_to_state(agent_status);
+    let mut ui_title = title.clone();
     let _ = tx.send(ServerMessage::Presence {
-        title: ui_title.clone(),
+        title,
         state: current_state,
     });
     log::info!(
@@ -432,17 +428,13 @@ pub async fn run_herdr(
             mqtt_broker_on = false;
             log::warn!("[mqtt] builtin broker exited; marking broker off");
         }
-        // 状态条只在 MQTT 状态可能变化时重画:broker 挂(broker_alive 翻 false)这里每轮,
-        // 其余靠 presence tick(下方)。为简单起见每轮都画一次(1 行 Paragraph 很轻)。
+        // 每轮重画状态条(1 行 Paragraph 很轻;broker 挂了 mqtt_client 仍在,靠 presence 兜底)。
         let _ = ui::draw_status(
             &mut tui,
+            &agent_name,
             &target,
-            mqtt_label(
-                mqtt_cfg_present,
-                mqtt_broker_on,
-                broker_alive.as_ref(),
-                mqtt_client.is_some(),
-            ),
+            mqtt_client.is_some(),
+            &ui_title,
         );
 
         let deadline_copy = send_deadline;
@@ -462,11 +454,12 @@ pub async fn run_herdr(
             // (取代旧的 title 翻转检测)。
             res = agent_status_rx.changed() => {
                 if res.is_ok() {
-                    let s = *agent_status_rx.borrow();
+                    let (s, title) = agent_status_rx.borrow().clone();
                     current_state = agent_status_to_state(s);
+                    ui_title = title.clone();
                     log::info!("[herdr] {target} agent status -> {s:?} (state={current_state:?})");
                     let _ = tx.send(ServerMessage::Presence {
-                        title: ui_title.clone(),
+                        title,
                         state: current_state,
                     });
                 } else {
@@ -538,16 +531,6 @@ pub async fn run_herdr(
                     vt_parser.screen().scrollback(),
                 );
                 vt_parser.process(output.as_bytes());
-
-                // 只更新窗口 title(presence 的 title 字段用)。agent 状态不再从 title 推断,
-                // 改由后台轮询 herdr 的 agent_status 驱动(见主循环 select 的 changed 分支)。
-                {
-                    let cb = vt_parser.callbacks_mut();
-                    if cb.update_title {
-                        cb.update_title = false;
-                        ui_title = cb.title.clone();
-                    }
-                }
 
                 if resize_settle_until.is_some() {
                     // resize 后重绘 burst:吸收,重设 500ms 计时器。
