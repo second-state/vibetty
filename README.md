@@ -132,7 +132,7 @@ own, e.g. `prefix+v`):
 
 ```toml
 [[keys.command]]
-key = "prefix+v"
+key = ""
 type = "plugin_action"
 command = "vibetty.share"
 description = "Share this agent pane over Vibetty"
