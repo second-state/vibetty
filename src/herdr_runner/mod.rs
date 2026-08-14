@@ -601,7 +601,11 @@ pub async fn run_herdr(
                         "Sync: {width}×{height}{} -> resize PTY {cur_cols}×{cur_rows} -> {cols}×{rows}",
                         if pixels { "px" } else { "cells" }
                     );
-                    vt_parser.screen_mut().set_size(rows, cols);
+                    // 不用 set_size:变窄时行尾残留的宽字符(中文/emoji/表格线)会让
+                    // vt100 在后续写入时 panic(fork screen.rs:870 的 unwrap)。
+                    // 直接整个重建 Parser:新屏全空,attach 的 app 收到 SIGWINCH 会
+                    // 全量重绘;scrollback 历史清一轮,herdr 场景本地不用 scrollback,无影响。
+                    vt_parser = vt100::Parser::new(rows, cols, 1024);
                     let _ = terminal.resize(rows, cols);
                 }
                 let screen = Arc::new(vt_parser.screen().clone());

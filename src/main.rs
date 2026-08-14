@@ -60,6 +60,22 @@ fn logger_init() -> anyhow::Result<flexi_logger::LoggerHandle> {
     // rumqttd 用 tracing,装个空 subscriber 吞掉它的日志(走 set_global_default,不抢 log logger)。
     let _ = tracing::subscriber::set_global_default(null_subscriber::Null::new());
 
+    // 日志统一收进 ~/.vibetty/logs/,不再散落在进程 CWD(herdr 插件 pane 会把 CWD 设成
+    // 被分享 pane 的项目目录,以前每个项目都会被丢一个 log 文件)。文件名带上 cwd 的
+    // basename(如 vibetty-vibekeys_firmware),区分不同项目;拿不到 cwd 兜底 default。
+    let log_dir = dirs::home_dir()
+        .map(|h| h.join(".vibetty").join("logs"))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    std::fs::create_dir_all(&log_dir).ok();
+    let cwd_tag = std::env::current_dir()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "default".to_string());
+    let file_spec = FileSpec::default()
+        .suppress_timestamp()
+        .directory(&log_dir)
+        .basename(format!("vibetty-{cwd_tag}"));
+
     // 默认 info(RUST_LOG 优先)。rumqttc 用 log crate,强制 off 屏蔽。
     let spec = {
         let parsed = flexi_logger::LogSpecification::env_or_parse("info")?;
@@ -69,7 +85,7 @@ fn logger_init() -> anyhow::Result<flexi_logger::LoggerHandle> {
         builder.finalize()
     };
     let logger = Logger::with(spec)
-        .log_to_file(FileSpec::default().suppress_timestamp())
+        .log_to_file(file_spec)
         .append() // 每次启动接着上次写;达到 rotate 的 10MB 才轮转成新文件
         .write_mode(WriteMode::BufferAndFlush)
         .rotate(
