@@ -22,7 +22,13 @@ vibetty runs a program in a PTY, renders the terminal screen to an image, and pu
 
 ### 1. Install
 
-Download a prebuilt binary for your platform from the [Releases page](https://github.com/second-state/vibetty/releases) and put it on your `PATH` (e.g. `~/.cargo/bin`).
+One-liner (downloads the latest prebuilt binary to `~/.cargo/bin`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/second-state/vibetty/main/install.sh | bash
+```
+
+Or download a prebuilt binary for your platform from the [Releases page](https://github.com/second-state/vibetty/releases) and put it on your `PATH` (e.g. `~/.cargo/bin`).
 
 <details>
 <summary>Build from source</summary>
@@ -33,6 +39,7 @@ cd vibetty
 cargo build --release
 # binary: ./target/release/vibetty
 ```
+
 </details>
 
 ### 2. Configure the broker (once)
@@ -90,13 +97,13 @@ vibetty skill uninstall  --claude [--codex] Remove the run-vibetty skill
 
 Run-mode options:
 
-| Flag | Description | Default |
-|---|---|---|
-| `-- <command>` | Program to run in the PTY (e.g. `-- claude`) | _(required)_ |
-| `--config <PATH>` | Override the config file path | `~/.vibetty/config.toml` |
-| `-b, --bind-addr <ADDR>` | HTTP listen address (used as the dialog default) | `0.0.0.0:3000` |
-| `-a, --auto-submit` | Append Enter to `input_text` so a sent command is executed | `true` |
-| `-q, --quality <QUALITY>` | Screen output format: `text` (ANSI text stream on `P/screen_text`) or `high`/`medium`/`low` (JPEG quality) | `text` |
+| Flag                      | Description                                                                                                | Default                  |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------ |
+| `-- <command>`            | Program to run in the PTY (e.g. `-- claude`)                                                               | _(required)_             |
+| `--config <PATH>`         | Override the config file path                                                                              | `~/.vibetty/config.toml` |
+| `-b, --bind-addr <ADDR>`  | HTTP listen address (used as the dialog default)                                                           | `0.0.0.0:3000`           |
+| `-a, --auto-submit`       | Append Enter to `input_text` so a sent command is executed                                                 | `true`                   |
+| `-q, --quality <QUALITY>` | Screen output format: `text` (ANSI text stream on `P/screen_text`) or `high`/`medium`/`low` (JPEG quality) | `text`                   |
 
 ## HTTP endpoints (started on demand)
 
@@ -128,11 +135,11 @@ the Herdr command palette — or bind a key (below).
 ### Bind a hotkey
 
 Add this to `~/.config/herdr/config.toml` (`key = ""` leaves it unset — pick your
-own, e.g. `prefix+v`):
+own, e.g. `prefix+i`):
 
 ```toml
 [[keys.command]]
-key = ""
+key = "prefix+i"
 type = "plugin_action"
 command = "vibetty.share"
 description = "Share this agent pane over Vibetty"

@@ -22,7 +22,13 @@ vibetty 在一个 PTY 里跑程序，把终端画面渲染成图片后发布到 
 
 ### 1. 安装
 
-从 [Releases 页面](https://github.com/second-state/vibetty/releases) 下载对应平台的预编译二进制，放到 `PATH` 上（推荐 `~/.cargo/bin`）。
+一键安装(下载最新预编译二进制到 `~/.cargo/bin`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/second-state/vibetty/main/install.sh | bash
+```
+
+或从 [Releases 页面](https://github.com/second-state/vibetty/releases) 下载对应平台的预编译二进制，放到 `PATH` 上（推荐 `~/.cargo/bin`）。
 
 <details>
 <summary>从源码编译</summary>
