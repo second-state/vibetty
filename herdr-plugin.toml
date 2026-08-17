@@ -5,13 +5,14 @@ min_herdr_version = "0.7.5"
 description = "Share a Herdr agent pane over MQTT. Trigger the `share` action to open a 1-row status bar below the focused pane that bridges it to remote clients."
 platforms = ["linux", "macos"]
 
-# linux/macOS: prefer the prebuilt binary from Releases (install.sh downloads
-# it into ~/.cargo/bin); fall back to building from the fetched checkout.
+# linux/macOS: install.sh downloads the prebuilt release binary into
+# ~/.cargo/bin; VIBETTY_FALLBACK_BUILD=1 makes it build from the fetched
+# checkout if the download fails. Windows: no prebuilt installer yet,
+# build from source.
 [[build]]
 platforms = ["linux", "macos"]
-command = ["bash", "-c", "./install.sh || cargo install --path ."]
+command = ["bash", "-c", "VIBETTY_FALLBACK_BUILD=1 ./install.sh"]
 
-# Windows: no prebuilt install script yet, build from source.
 [[build]]
 platforms = ["windows"]
 command = ["cargo", "install", "--path", "."]

@@ -6,11 +6,24 @@
 #   ./install.sh v0.4.1-rc.1  # a specific release tag (e.g. a prerelease)
 #
 # Override the install dir with VIBETTY_INSTALL_DIR (default: ~/.cargo/bin).
+# Set VIBETTY_FALLBACK_BUILD=1 to build from the local checkout with
+# `cargo install --path .` when the download fails (used by the Herdr
+# plugin build; off by default for end users).
 set -euo pipefail
 
 REPO="second-state/vibetty"
 VERSION="${1:-latest}"
 INSTALL_DIR="${VIBETTY_INSTALL_DIR:-$HOME/.cargo/bin}"
+FALLBACK_BUILD="${VIBETTY_FALLBACK_BUILD:-0}"
+
+# 下载失败时的兜底:开关打开 && 本地是 vibetty checkout(有 Cargo.toml)→ 就地 cargo install。
+fallback_build() {
+  if [ "$FALLBACK_BUILD" = "1" ] && [ -f Cargo.toml ]; then
+    echo "download failed; falling back to cargo install --path ." >&2
+    exec cargo install --force --path .
+  fi
+  return 1
+}
 
 # --- detect platform -> release asset name (must match .github/workflows/release.yml) ---
 OS="$(uname -s)"
@@ -66,7 +79,9 @@ TMP="$(mktemp)"
 trap 'rm -f "$TMP"' EXIT
 
 echo "Downloading $URL"
-curl -fL --progress-bar -o "$TMP" "$URL"
+if ! curl -fL --progress-bar -o "$TMP" "$URL"; then
+  fallback_build || { echo "error: download failed" >&2; exit 1; }
+fi
 chmod 755 "$TMP"
 
 # 版本号直接问二进制(--version 输出如 "vibetty 0.4.0")。
