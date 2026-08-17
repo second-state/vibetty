@@ -62,14 +62,15 @@ fn logger_init() -> anyhow::Result<flexi_logger::LoggerHandle> {
 
     // 日志统一收进 ~/.vibetty/logs/,不再散落在进程 CWD(herdr 插件 pane 会把 CWD 设成
     // 被分享 pane 的项目目录,以前每个项目都会被丢一个 log 文件)。文件名带上 cwd 的
-    // basename(如 vibetty-vibekeys_firmware),区分不同项目;拿不到 cwd 兜底 default。
+    // 完整路径、斜杠换成横线(如 vibetty--Users-chensiheng-workspace-vibetty),跟
+    // Claude 的 project 目录命名一个思路;拿不到 cwd 兜底 default。
     let log_dir = dirs::home_dir()
         .map(|h| h.join(".vibetty").join("logs"))
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     std::fs::create_dir_all(&log_dir).ok();
     let cwd_tag = std::env::current_dir()
         .ok()
-        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .map(|p| p.to_string_lossy().replace('/', "-").replace('\\', "-"))
         .unwrap_or_else(|| "default".to_string());
     let file_spec = FileSpec::default()
         .suppress_timestamp()
