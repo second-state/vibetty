@@ -30,9 +30,16 @@ The broker can be self-hosted (rumqttd / mosquitto / EMQX, etc.) or a free MQTT 
 
 ## Route 1: inside Herdr — share the focused agent pane
 
-Requires the vibetty Herdr plugin. Install once (fetches the repo, builds vibetty onto PATH, registers the plugin):
+Requires the vibetty binary on PATH and the vibetty Herdr plugin. Install once:
 
 ```bash
+# 1) Binary: prefer the install script (prebuilt, fast). If it fails (unsupported
+#    platform, no network to GitHub releases, ...), fall back to building:
+curl -fsSL https://raw.githubusercontent.com/second-state/vibetty/main/install.sh | bash \
+  || cargo install --git https://github.com/second-state/vibetty
+
+# 2) Plugin: register with Herdr (fetches the repo, builds via manifest if the
+#    binary is not already on PATH, registers the share action):
 herdr plugin install second-state/vibetty
 ```
 
