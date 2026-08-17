@@ -1,5 +1,22 @@
 # 变更日志 (CHANGELOG)
 
+## [0.4.1] - 2026-08-17
+
+Herdr 插件支持 + 安装脚本 + 修复。(English changelog: [`CHANGELOG.md`](../CHANGELOG.md)。)
+
+### 新增
+
+- **Herdr 插件** —— vibetty 现在是一个 Herdr 插件:`herdr plugin install second-state/vibetty` 安装后,`share` action 会在聚焦的 agent pane 下方开一个 1 行状态条 pane,把它经 MQTT 分享出去。状态条显示 `<agent> ▸ <pane> · [MQTT · <X.XX MB>] · <title>`(`[MQTT ...]` 连上后变绿),vibetty 退出时自动关闭。可在 herdr 配置里用 `plugin_action` 键绑定。
+- **`vibetty herdr <target>` / `vibetty share-herdr`** —— pane 里跑 `herdr agent attach <target>`(固定 80×40,sync 驱动尺寸);agent 的 working/waiting 状态来自 herdr 轮询的 agent status,不再解析终端 title。
+- **一行安装脚本** —— `curl -fsSL .../install.sh | bash` 下载预编译二进制到 `~/.cargo/bin`,装成 `vibetty-<版本>` + `vibetty` 软链(升级不会覆盖正在运行的二进制),并询问是否把目录加进 PATH。
+- **run-vibetty skill 覆盖 Herdr** —— 两条路线:经插件 action 分享聚焦 pane;或在 herdr 新 tab 里起一个 agent 再分享(非 Herdr 环境仍走 tmux)。
+
+### 修复
+
+- **Herdr resize panic** —— sync 缩小 PTY 后,行尾残留的宽字符(中文/emoji)会让下一次写入在 vt100 fork 里 panic。resize 改为整个重建 Parser,不再 `set_size`。
+- **日志集中** —— 统一写到 `~/.vibetty/logs/vibetty-<cwd路径>_rCURRENT.log`,不再往工作目录里散落日志文件(herdr pane 以前会污染每个被分享的项目)。
+- 内置 broker 挂掉后 UI 会如实反映(broker 线程清 AtomicBool),不再假装还在跑。
+
 ## [0.4.0] - 2026-07-29
 
 第一个 MQTT 正式版。

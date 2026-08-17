@@ -1,6 +1,6 @@
 id = "vibetty"
 name = "Vibetty"
-version = "0.4.1-rc.1"
+version = "0.4.1"
 min_herdr_version = "0.7.5"
 description = "Share a Herdr agent pane over MQTT. Trigger the `share` action to open a 1-row status bar below the focused pane that bridges it to remote clients."
 platforms = ["linux", "macos"]

@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.4.1] - 2026-08-17
+
+Herdr plugin support + installer + fixes. (中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md).)
+
+### Added
+
+- **Herdr plugin** — vibetty is now a Herdr plugin: install with `herdr plugin install second-state/vibetty`, then the `share` action opens a 1-row status pane below the focused agent pane and bridges it over MQTT. The status pane shows `<agent> ▸ <pane> · [MQTT · <X.XX MB>] · <title>` (`[MQTT ...]` turns green when connected) and auto-closes when vibetty exits. Bindable via a `plugin_action` key in Herdr's config.
+- **`vibetty herdr <target>` / `vibetty share-herdr`** — the pane runs `herdr agent attach <target>` (fixed 80×40, sync-driven size); agent working/waiting state comes from Herdr's polled agent status instead of terminal-title parsing.
+- **One-line installer** — `curl -fsSL .../install.sh | bash` downloads the prebuilt binary into `~/.cargo/bin` as `vibetty-<version>` plus a `vibetty` symlink (upgrades never overwrite a running binary), and offers to add the dir to your PATH.
+- **The run-vibetty skill covers Herdr** — two routes: share the focused pane via the plugin action, or start a fresh agent in a new Herdr tab and share it (tmux route kept for non-Herdr environments).
+
+### Fixed
+
+- **Herdr resize panic** — shrinking the PTY via sync could leave wide chars (CJK/emoji) at the end of shortened rows; the next write panicked in the vt100 fork. The Parser is now rebuilt on resize instead of `set_size`.
+- **Logs centralized** — vibetty writes to `~/.vibetty/logs/vibetty-<cwd-path>_rCURRENT.log` instead of scattering a log file into the working directory (Herdr panes used to pollute every shared project).
+- Built-in broker death is now reflected in the UI (AtomicBool cleared by the broker thread) instead of silently pretending it is running.
+
 ## [0.4.0] - 2026-07-29
 
 First stable MQTT release.
