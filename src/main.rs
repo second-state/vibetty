@@ -70,7 +70,7 @@ fn logger_init() -> anyhow::Result<flexi_logger::LoggerHandle> {
     std::fs::create_dir_all(&log_dir).ok();
     let cwd_tag = std::env::current_dir()
         .ok()
-        .map(|p| p.to_string_lossy().replace('/', "-").replace('\\', "-"))
+        .map(|p| p.to_string_lossy().replace(['/', '\\'], "-"))
         .unwrap_or_else(|| "default".to_string());
     let file_spec = FileSpec::default()
         .suppress_timestamp()
