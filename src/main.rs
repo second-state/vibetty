@@ -122,6 +122,7 @@ async fn main() {
             }
             return;
         }
+
         Some(Commands::Herdr {
             target,
             quality,

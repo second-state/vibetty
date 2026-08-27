@@ -56,18 +56,21 @@ impl Agent {
     }
 }
 
-pub fn run_skill(action: SkillAction) -> anyhow::Result<()> {
+pub fn run_skill(action: Option<SkillAction>) -> anyhow::Result<()> {
     match action {
-        SkillAction::Install { claude, codex } => {
+        Some(SkillAction::Install { claude, codex }) => {
             for a in resolve_targets(claude, codex)? {
                 install_one(a)?;
             }
         }
-        SkillAction::Uninstall { claude, codex } => {
+        Some(SkillAction::Uninstall { claude, codex }) => {
             for a in resolve_targets(claude, codex)? {
                 uninstall_one(a)?;
             }
         }
+        // 无子命令:直接把 SKILL.md 内容打到 stdout(方便管道给别的 agent / 工具,
+        // 类似 `herdr --skill`)。
+        None => print!("{}", SKILL_MD),
     }
     Ok(())
 }

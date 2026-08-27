@@ -101,10 +101,10 @@ pub struct Cli {
 pub enum Commands {
     /// Configure MQTT via TUI
     Setup,
-    /// Install/uninstall the run-vibetty skill
+    /// Install/uninstall the run-vibetty skill; with no subcommand, print the skill to stdout
     Skill {
         #[command(subcommand)]
-        action: SkillAction,
+        action: Option<SkillAction>,
     },
     /// Share a herdr agent terminal over MQTT
     Herdr {
