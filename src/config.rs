@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 
 /// 可选的 MQTT 传输配置。`~/.vibetty/config.toml` 里没有 `[mqtt]` 段时为 None,
 /// 表示完全不启用 MQTT(现有 WebSocket/HTTP 行为不变)。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MqttConfig {
     /// 是否启用 MQTT 传输;设为 false 可保留配置但关闭(默认 true)
     #[serde(default = "default_true")]

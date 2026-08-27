@@ -1,7 +1,8 @@
 //! `vibetty setup` —— TUI 配置 MQTT 传输,写入 `~/.vibetty/config.toml` 的 `[mqtt]` 段。
 //!
-//! 上下选择字段,Enter 进入编辑,字符直接输入(←/→ 移光标),`s` 保存,`q`/Esc 退出。
-//! 保存时把 `[mqtt]` 段写回 config.toml(保留文件里其它段)。
+//! 上下选择字段,Enter 进入编辑,字符直接输入(←/→ 移光标),`s` 手动保存。
+//! `q`/Esc 退出时:若有未保存的改动 → 弹确认框(显示将写入的配置路径),
+//! Y 保存并退出 / N 或 Esc 放弃改动退出;无改动则直接退出。
 
 use crossterm::{
     event::{self, KeyCode, KeyEventKind},
@@ -183,12 +184,16 @@ fn parse_or<T: std::str::FromStr>(fld: &Field, default: T) -> anyhow::Result<T> 
 enum Mode {
     Select,
     Edit,
+    /// 退出前确认:有未保存改动时弹出,Y 保存退出 / N 放弃退出 / Esc 回表单。
+    ConfirmQuit,
 }
 
 pub fn run_setup(config: Option<std::path::PathBuf>) -> anyhow::Result<()> {
     let override_path = config.as_deref();
     let existing = load_mqtt(override_path);
     let mut fields = fields_from(existing.as_ref());
+    // 初始(磁盘上)的 [mqtt] 段;用于判断「是否有未保存改动」。
+    let initial = mqtt_from_fields(&fields).ok().or(existing.clone());
     let mut state = ListState::default();
     state.select(Some(0));
     let mut mode = Mode::Select;
@@ -203,6 +208,7 @@ pub fn run_setup(config: Option<std::path::PathBuf>) -> anyhow::Result<()> {
     let result = setup_loop(
         &mut terminal,
         &mut fields,
+        &initial,
         &mut state,
         &mut mode,
         &mut status,
@@ -216,9 +222,21 @@ pub fn run_setup(config: Option<std::path::PathBuf>) -> anyhow::Result<()> {
     result
 }
 
+/// 当前表单是否和初始(加载时)的值不同。
+fn dirty(fields: &[Field], initial: &Option<MqttConfig>) -> bool {
+    match mqtt_from_fields(fields) {
+        // 磁盘上原本没有 [mqtt](initial=None)而表单是默认值时,Some(default) == None
+        // 不成立,会误报 dirty;把「磁盘无段且表单等于全默认」视作未改动太绕,
+        // 这里只在「能解析出 config 且与初始不同」时报 dirty,解析失败一律视为有改动。
+        Ok(now) => initial.as_ref().is_some_and(|i| now != *i),
+        Err(_) => true, // 表单填出非法值也算有改动
+    }
+}
+
 fn setup_loop(
     terminal: &mut Term,
     fields: &mut [Field],
+    initial: &Option<MqttConfig>,
     state: &mut ListState,
     mode: &mut Mode,
     status: &mut Option<String>,
@@ -237,14 +255,33 @@ fn setup_loop(
             continue;
         }
 
+        // 确认框:y/Y/Enter=保存并退出;n/N=放弃退出;Esc=回到表单;其余忽略。
+        if *mode == Mode::ConfirmQuit {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                    return save_and_finish(fields, override_path, status);
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => return Ok(()),
+                _ => {}
+            }
+        }
+
         // 保存/出错后,任意键退出。
         if status.is_some() {
             return Ok(());
         }
 
         match mode {
+            // ConfirmQuit 在上面的专属分支处理过,这里不会有。
+            Mode::ConfirmQuit => unreachable!("handled above"),
             Mode::Select => match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                KeyCode::Char('q') | KeyCode::Esc => {
+                    if dirty(fields, initial) {
+                        *mode = Mode::ConfirmQuit;
+                    } else {
+                        return Ok(());
+                    }
+                }
                 KeyCode::Char('s') => match mqtt_from_fields(fields) {
                     Ok(cfg) => match save_mqtt(&cfg, override_path) {
                         Ok(()) => {
@@ -314,6 +351,68 @@ fn setup_loop(
     }
 }
 
+/// 保存表单到 config;成功时置 saved 状态(用户随后任意键退出)。
+fn save_and_finish(
+    fields: &[Field],
+    override_path: Option<&std::path::Path>,
+    status: &mut Option<String>,
+) -> anyhow::Result<()> {
+    match mqtt_from_fields(fields) {
+        Ok(cfg) => match save_mqtt(&cfg, override_path) {
+            Ok(()) => {
+                let p = config_path(override_path)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+                *status = Some(format!("Saved to {p}. Press any key to exit."));
+                Ok(())
+            }
+            Err(e) => {
+                *status = Some(format!("Save failed: {e} — press any key to exit."));
+                Ok(())
+            }
+        },
+        Err(e) => {
+            *status = Some(format!("Invalid input: {e} — fix and try again."));
+            Ok(())
+        }
+    }
+}
+
+/// 退出确认弹窗(居中,显示将写入的配置路径)。
+fn draw_confirm_popup(f: &mut Frame) {
+    let path = dirs::home_dir()
+        .map(|h| h.join(".vibetty").join("config.toml"))
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    let area = centered_rect(f.area(), 62, 7);
+    f.render_widget(ratatui::widgets::Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Unsaved changes ")
+        .style(Style::default().fg(Color::Yellow));
+    let text = vec![
+        Line::from("You have unsaved changes."),
+        Line::from(String::new()),
+        Line::from(format!("Save to: {path}?")),
+        Line::from(String::new()),
+        Line::from("Y save & exit   N discard & exit   Esc back"),
+    ];
+    f.render_widget(Paragraph::new(text).block(block), area);
+}
+
+/// 以 (cols, rows) 为中心取一块矩形(越界自动收紧)。
+fn centered_rect(area: ratatui::layout::Rect, cols: u16, rows: u16) -> ratatui::layout::Rect {
+    use ratatui::layout::Rect;
+    let w = cols.min(area.width);
+    let h = rows.min(area.height);
+    Rect {
+        x: area.x + (area.width.saturating_sub(w)) / 2,
+        y: area.y + (area.height.saturating_sub(h)) / 2,
+        width: w,
+        height: h,
+    }
+}
+
 fn draw(f: &mut Frame, fields: &[Field], state: &mut ListState, mode: Mode, status: Option<&str>) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -367,15 +466,21 @@ fn draw(f: &mut Frame, fields: &[Field], state: &mut ListState, mode: Mode, stat
     let footer = match status {
         Some(s) => s.to_string(),
         None => match mode {
-            Mode::Select => " ↑/↓ select  ·  Enter edit  ·  s save  ·  q/Esc quit".to_string(),
+            Mode::Select => " ↑/↓ select  ·  Enter edit  ·  q/Esc quit".to_string(),
             Mode::Edit => {
                 " type to edit  ·  ←/→ Home/End move  ·  Del  ·  [Space] bool  ·  Enter/Esc done"
                     .to_string()
             }
+            Mode::ConfirmQuit => String::new(),
         },
     };
     f.render_widget(
         Paragraph::new(footer).alignment(Alignment::Center),
         chunks[2],
     );
+
+    // 退出确认弹窗:最后画,盖在表单上面。
+    if mode == Mode::ConfirmQuit {
+        draw_confirm_popup(f);
+    }
 }
