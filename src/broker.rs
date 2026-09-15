@@ -39,7 +39,8 @@ pub fn spawn_builtin(cfg: &MqttConfig, alive: Arc<AtomicBool>) -> anyhow::Result
     Ok(())
 }
 
-/// 构造 `rumqttd::Config`:一个 TCP(v4)listener + 一个 WS listener,均匿名。
+/// 构造 `rumqttd::Config`:一个 TCP(v4)listener(必需)+ 可选 WS listener
+/// (`builtin_ws_port` 为 0 时不建,这是默认——WS 只有浏览器调试页用)。
 fn build_config(cfg: &MqttConfig) -> anyhow::Result<Config> {
     let connections = ConnectionSettings {
         connection_timeout_ms: 60000,
@@ -52,25 +53,37 @@ fn build_config(cfg: &MqttConfig) -> anyhow::Result<Config> {
         dynamic_filters: false,
     };
 
+    let tcp_port = cfg.builtin_port();
+    // 预检 TCP 端口:bind 失败直接报错返回,而不是起一个只有 WS 没有 TCP 的半死 broker
+    // (rumqttd 内部 bind 失败只会走被屏蔽的 tracing,外面完全看不到)。
+    std::net::TcpListener::bind(("0.0.0.0", tcp_port))
+        .map_err(|e| anyhow::anyhow!("builtin broker TCP port {tcp_port} unavailable: {e}"))?;
+
     let tcp = ServerSettings {
         name: "tcp".to_string(),
-        listen: format!("0.0.0.0:{}", cfg.builtin_port).parse::<SocketAddr>()?,
+        listen: format!("0.0.0.0:{tcp_port}").parse::<SocketAddr>()?,
         tls: None,
         next_connection_delay_ms: 1,
         connections: connections.clone(),
     };
-    let ws = ServerSettings {
-        name: "ws".to_string(),
-        listen: format!("0.0.0.0:{}", cfg.builtin_ws_port).parse::<SocketAddr>()?,
-        tls: None,
-        next_connection_delay_ms: 1,
-        connections,
-    };
 
     let mut v4 = HashMap::new();
     v4.insert("tcp".to_string(), tcp);
-    let mut ws_map = HashMap::new();
-    ws_map.insert("ws".to_string(), ws);
+    // WS listener 可选:builtin_ws_port=0(默认)时不建。
+    let ws_map = if cfg.builtin_ws_port == 0 {
+        HashMap::new()
+    } else {
+        let ws = ServerSettings {
+            name: "ws".to_string(),
+            listen: format!("0.0.0.0:{}", cfg.builtin_ws_port).parse::<SocketAddr>()?,
+            tls: None,
+            next_connection_delay_ms: 1,
+            connections,
+        };
+        let mut m = HashMap::new();
+        m.insert("ws".to_string(), ws);
+        m
+    };
 
     Ok(Config {
         id: 0,

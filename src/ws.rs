@@ -226,15 +226,17 @@ fn autostart_mqtt(
     };
     let mut broker_on = false;
     let mut broker_alive = None;
-    if cfg.builtin_broker {
+    if cfg.wants_builtin_broker() {
         let alive = Arc::new(AtomicBool::new(true));
         match broker::spawn_builtin(cfg, alive.clone()) {
             Ok(()) => {
                 broker_on = true;
                 broker_alive = Some(alive);
-                log::info!("[mqtt] broker auto-started on :{}", cfg.builtin_port);
+                log::info!("[mqtt] broker auto-started on :{}", cfg.builtin_port());
             }
-            Err(e) => log::warn!("[mqtt] broker auto-start failed: {e}"),
+            Err(e) => log::info!(
+                "[mqtt] builtin broker not started: {e} (another instance may be serving it)"
+            ),
         }
     }
     let client = cfg.enable.then(|| {
