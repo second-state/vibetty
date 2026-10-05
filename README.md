@@ -28,6 +28,8 @@ One-liner (downloads the latest prebuilt binary to `~/.cargo/bin`):
 curl -fsSL https://raw.githubusercontent.com/second-state/vibetty/main/install.sh | bash
 ```
 
+**Upgrading**: just re-run the same command after a new release — the script installs the new version as `vibetty-<version>` and re-points the `vibetty` symlink, so running instances are never disturbed. If the latest version is already installed it says so and exits. To install a specific (pre)release instead, pass the tag: `... | bash -s -- v0.4.2-rc.1`. Old versions accumulate in `~/.cargo/bin`; the script offers to delete them after an upgrade.
+
 Or download a prebuilt binary for your platform from the [Releases page](https://github.com/second-state/vibetty/releases) and put it on your `PATH` (e.g. `~/.cargo/bin`).
 
 <details>

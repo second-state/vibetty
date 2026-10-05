@@ -28,6 +28,8 @@ vibetty 在一个 PTY 里跑程序，把终端画面渲染成图片后发布到 
 curl -fsSL https://raw.githubusercontent.com/second-state/vibetty/main/install.sh | bash
 ```
 
+**升级**:发布新版本后重跑同一条命令即可——脚本会把新版装成 `vibetty-<版本>` 并把 `vibetty` 软链切过去,正在运行的实例不受影响;已是最新版本时会提示并直接退出。要装指定的(预)发布版本,把 tag 作为参数传进去:`... | bash -s -- v0.4.2-rc.1`。旧版本会在 `~/.cargo/bin` 里累积,升级后脚本会询问是否删除。
+
 或从 [Releases 页面](https://github.com/second-state/vibetty/releases) 下载对应平台的预编译二进制，放到 `PATH` 上（推荐 `~/.cargo/bin`）。
 
 <details>
