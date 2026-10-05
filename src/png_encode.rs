@@ -22,7 +22,9 @@ pub fn encode_paletted_png(image: &DynamicImage) -> Result<Vec<u8>> {
     let nq = NeuQuant::new(10, 256, rgba_raw);
     let palette = nq.color_map_rgb(); // 256 × 3 字节调色板
     let indices: Vec<u8> = rgba_raw
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|p| nq.index_of(p) as u8)
         .collect();
 
