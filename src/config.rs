@@ -4,57 +4,40 @@ use clap::{Parser, Subcommand};
 /// 表示完全不启用 MQTT(现有 WebSocket/HTTP 行为不变)。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MqttConfig {
-    /// 是否启用 MQTT 传输;设为 false 可保留配置但关闭(默认 true)
-    #[serde(default = "default_true")]
-    pub enable: bool,
     /// Broker URL:`mqtt://[user:pass@]host[:port]`(明文)或 `mqtts://...`(TLS)。
     /// user/pass/TLS/端口 都从这个 URL 解析(scheme 决定 TLS)。
-    /// `port` 字段只在内置 broker 模式下单独用。
+    /// host 指向回环地址时,vibetty 隐式启动内置 broker,监听 URL 里的端口。
     #[serde(default)]
     pub broker: String,
-    /// QoS: 0 / 1 / 2,默认 1(AtLeastOnce,适合弱网)
-    #[serde(default = "default_mqtt_qos")]
-    pub qos: u8,
     /// keep-alive 秒数,默认 30
     #[serde(default = "default_keep_alive")]
     pub keep_alive_secs: u64,
-    /// 是否在进程内启动内置 rumqttd broker(默认 false)。
-    /// 为 true 时:vibetty 自带 broker,监听 port(TCP)+ builtin_ws_port(WS),
-    /// 自身的 client 改连 127.0.0.1;ESP32 直接连本机 port。broker(user/pass/TLS)被忽略。
-    /// 注意:匿名认证 + 监听 0.0.0.0,仅内网使用,勿暴露公网。
-    #[serde(default)]
-    pub builtin_broker: bool,
     /// 内置 broker 的 WebSocket 端口。**0 = 不开 WS listener**(只 TCP);未配置时默认 0。
     /// 之前默认 9001:非零端口固定尝试 bind,撞上被占就整个 broker 起不来。
     #[serde(default)]
     pub builtin_ws_port: u16,
-    /// 内置 broker 的 TCP 监听端口。0/未配置时按协议默认(mqtt 1883 / mqtts 8883);
-    /// broker 指向回环地址的隐式内置模式下,取 URL 里写的端口。
-    #[serde(default = "default_mqtt_port")]
-    pub builtin_port: u16,
 }
 
 impl MqttConfig {
     /// 返回一份用于**启动传输 client**(`mqtt::spawn`)的配置副本。
     ///
     /// broker URL 一律以 config 里的 `broker` 为准;**只有** 内置 broker 模式
-    /// (`builtin_broker=true`,或 `broker` 指向回环地址时的隐式内置,见 [`Self::wants_builtin_broker`])
-    /// 且 `broker` 为空时,才默认填上本地内置 broker 地址(`mqtt://127.0.0.1:{builtin_port}`)。
+    /// (broker 指向回环地址,见 [`Self::wants_builtin_broker`])且 `broker` 为空时,
+    /// 才默认填上本地内置 broker 地址(`mqtt://127.0.0.1:1883`)。
     /// boot 自动起 + 运行期(重)spawn + 面板预填/比对 都复用这个,保证 URL 解析逻辑只有一处。
     pub fn for_client(&self) -> MqttConfig {
         let mut c = self.clone();
         if self.wants_builtin_broker() && c.broker.trim().is_empty() {
-            c.broker = format!("mqtt://127.0.0.1:{}", c.builtin_port());
+            c.broker = "mqtt://127.0.0.1:1883".to_string();
         }
         c
     }
 
-    /// 是否要启动内置 broker:
-    /// 1) 显式开关 `builtin_broker=true`;或
-    /// 2) `broker` 指向回环地址(localhost / 127.x / ::1 / [::1])——隐式内置,
-    ///    监听端口取该 URL 的端口(没写则按协议默认),即 [`Self::builtin_port`]。
+    /// 是否要启动内置 broker:`broker` 指向回环地址
+    /// (localhost / 127.x / ::1 / [::1])。监听端口取该 URL 的端口
+    /// (没写则按协议默认),见 [`Self::builtin_port`]。
     pub fn wants_builtin_broker(&self) -> bool {
-        self.builtin_broker || self.broker_is_loopback()
+        self.broker_is_loopback()
     }
 
     /// `broker` 是否指向回环地址。解析不了(空串/格式错)按 false 处理。
@@ -70,12 +53,9 @@ impl MqttConfig {
             .is_ok_and(|ip| ip.is_loopback())
     }
 
-    /// 内置 broker 的 TCP 监听端口:显式配置优先;否则取 broker URL 里写的端口;
-    /// 都没有按协议默认(mqtt 1883 / mqtts 8883)。
+    /// 内置 broker 的 TCP 监听端口:取 broker URL 里写的端口;
+    /// 没写则按协议默认(mqtt 1883 / mqtts 8883)。
     pub fn builtin_port(&self) -> u16 {
-        if self.builtin_port != 1883 {
-            return self.builtin_port; // 显式配置过(非默认值)
-        }
         split_broker_host_port(&self.broker)
             .map(|(port, _)| port)
             .unwrap_or(1883)
@@ -100,15 +80,6 @@ fn split_broker_host_port(url: &str) -> Option<(u16, &str)> {
     Some((port, host))
 }
 
-fn default_true() -> bool {
-    true
-}
-fn default_mqtt_port() -> u16 {
-    1883
-}
-fn default_mqtt_qos() -> u8 {
-    1
-}
 fn default_keep_alive() -> u64 {
     30
 }

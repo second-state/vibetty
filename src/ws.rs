@@ -109,7 +109,8 @@ async fn start_http(bind: &str, state: AppState) -> anyhow::Result<String> {
     Ok(bound)
 }
 
-/// 解析两个端口(须 > 0);任一与 config 不同则把整段 `[mqtt]` 写回 `~/.vibetty/config.toml`,
+/// 解析两个端口(须 > 0)。TCP 端口写回 broker URL(端口现在是 URL 的一部分),
+/// WS 端口留在 `builtin_ws_port`;有变化则把整段 `[mqtt]` 写回 `~/.vibetty/config.toml`,
 /// 并同步更新内存里的 `mqtt_cfg`(后续 client (重)spawn 的 `for_client()` 用得到——
 /// 避免「面板改端口后重启 client 仍连旧端口」的不一致)。
 fn parse_and_save(
@@ -130,13 +131,23 @@ fn parse_and_save(
     if t == 0 || w == 0 {
         return Err("port must be > 0".to_string());
     }
-    if let Some(cfg) = mqtt_cfg
-        && (cfg.builtin_port != t || cfg.builtin_ws_port != w)
-    {
-        cfg.builtin_port = t;
-        cfg.builtin_ws_port = w;
-        crate::setup::save_mqtt(cfg, None).map_err(|e| format!("save config failed: {e}"))?;
-        log::info!("[mqtt] saved builtin_port={t}, builtin_ws_port={w}");
+    if let Some(cfg) = mqtt_cfg {
+        // TCP 端口 → 替换 broker URL 里最后一个 `:` 之后的端口段
+        // (`scheme://[user:pass@]host:port` 的 host 部分保持不变;rsplit 从右找,
+        // 不会误伤 user:pass 里的冒号)。
+        let new_broker = match cfg.broker.rsplit_once(':') {
+            Some((head, tail)) if tail.chars().all(|c| c.is_ascii_digit()) && !tail.is_empty() => {
+                format!("{head}:{t}")
+            }
+            _ => format!("{}/:{}", cfg.broker.trim_end_matches('/'), t), // 裸地址兜底
+        };
+        let changed = cfg.broker != new_broker || cfg.builtin_ws_port != w;
+        if changed {
+            cfg.broker = new_broker;
+            cfg.builtin_ws_port = w;
+            crate::setup::save_mqtt(cfg, None).map_err(|e| format!("save config failed: {e}"))?;
+            log::info!("[mqtt] saved broker={}, builtin_ws_port={w}", cfg.broker);
+        }
     }
     Ok((t, w))
 }
@@ -239,10 +250,8 @@ fn autostart_mqtt(
             ),
         }
     }
-    let client = cfg.enable.then(|| {
-        log::info!("[mqtt] client auto-started");
-        mqtt::spawn(cfg.for_client(), cli_tx.clone(), tx.clone(), image_format).0
-    });
+    log::info!("[mqtt] client auto-started");
+    let client = Some(mqtt::spawn(cfg.for_client(), cli_tx.clone(), tx.clone(), image_format).0);
     (broker_on, client, broker_alive)
 }
 
@@ -340,7 +349,7 @@ async fn mqtt_panel_enter(
                                 .as_ref()
                                 .expect("mqtt_cfg_present implies mqtt_cfg")
                                 .clone();
-                            cfg.builtin_port = t;
+                            // parse_and_save 已把 TCP 端口写进 broker URL;这里只同步 WS 端口。
                             cfg.builtin_ws_port = w;
                             let alive = Arc::new(AtomicBool::new(true));
                             match broker::spawn_builtin(&cfg, alive.clone()) {
@@ -534,7 +543,8 @@ fn handle_click(
         let mbtn = mqtt_button_rect(area, &hl, &mlabel);
         if hit_test(col, row, mbtn) {
             return ClickOutcome::Modal(Box::new(ModalState::MqttPanel {
-                tcp: tui_input::Input::new(cfg.builtin_port.to_string()),
+                // TCP 输入框预填 broker URL 的端口(端口是 URL 的一部分)。
+                tcp: tui_input::Input::new(cfg.builtin_port().to_string()),
                 ws: tui_input::Input::new(cfg.builtin_ws_port.to_string()),
                 // 预填生效 URL(见 MqttConfig::for_client):填了 broker 就用配置值,
                 // 没填 + 内置 broker 才默认本地。

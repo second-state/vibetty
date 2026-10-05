@@ -81,12 +81,10 @@ fn autostart_mqtt(
             ),
         }
     }
-    let (client, screen_bytes) = if cfg.enable {
+    let (client, screen_bytes) = {
         log::info!("[mqtt] client auto-started");
         let (h, stats) = mqtt::spawn(cfg.for_client(), cli_tx.clone(), tx.clone(), image_format);
         (Some(h), stats)
-    } else {
-        (None, Arc::new(AtomicU64::new(0)))
     };
     (broker_on, client, broker_alive, screen_bytes)
 }
