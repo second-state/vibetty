@@ -11,7 +11,7 @@ vibetty 在一个 PTY 里跑程序，把终端画面渲染成图片后发布到 
 ## 功能特性
 
 - **MQTT 实时分享终端** —— 把屏幕作为 JPEG 截图发布，远端设备订阅显示、回传按键。
-- **内置 broker** —— 进程内 rumqttd broker（TCP + WebSocket）可开机自启，零外部依赖。
+- **内置 broker** —— broker URL 指向 localhost 即自动启动进程内 rumqttd broker（TCP；WS 可选，供调试页用），零外部依赖。
 - **多实例发现** —— 每个实例以 retained presence 自我公告；客户端用一条通配订阅即可发现你的全部实例。
 - **Agent 状态识别** —— 解析终端标题判断 Codex / Claude Code 处于 `working` 还是 `waiting`，并随 presence 一并广播。
 - **TUI 控制** —— ratatui 界面顶部有 `HTTP` / `MQTT` / `Fit` / `Quit` 按钮；`MQTT` 按钮文字反映组合状态（`off` / `brkr` / `conn` / `on`）。
@@ -47,21 +47,17 @@ cargo build --release
 vibetty setup
 ```
 
-打开 TUI 填写 `[mqtt]` 各字段，写入 `~/.vibetty/config.toml`。最简单的是用内置 broker——无需任何外部服务：
+打开 TUI 填写 `[mqtt]` 各字段，写入 `~/.vibetty/config.toml`。最简单的是用内置 broker——broker 指向 localhost 即可,vibetty 会自动在 URL 的端口上启动内置 broker,无需任何外部服务：
 
 ```toml
 [mqtt]
-enable = true
-builtin_broker = true
-builtin_port = 1883      # 内置 broker TCP 端口
-builtin_ws_port = 9001   # 内置 broker WebSocket 端口
+broker = "mqtt://127.0.0.1:1883"
 ```
 
 或指向你自己的 broker / 免费 MQTT 云服务：
 
 ```toml
 [mqtt]
-enable = true
 broker = "mqtt://user:pass@broker.example.com:1883"   # mqtts:// 走 TLS
 ```
 
@@ -109,7 +105,7 @@ vibetty skill uninstall  --claude [--codex] 移除 run-vibetty skill
 HTTP 服务**默认关闭**，在 TUI 里点 `HTTP` 按钮启动。
 
 - `GET /screenshot` —— 当前终端画面图片（JPEG；质量由 `-q, --quality` 决定）。
-- `GET /mqtt_ws` —— 浏览器 MQTT-over-WebSocket 查看页：连内置 broker 的 WS 端口、发现实例、显示画面、可发输入。没有硬件时用它测很方便。
+- `GET /mqtt_ws` —— 浏览器 MQTT-over-WebSocket 查看页：连内置 broker 的 WS 端口（config 里的 `builtin_ws_port`，`0` 表示关闭）、发现实例、显示画面、可发输入。没有硬件时用它测很方便。
 
 ## 当作 Herdr 插件用
 

@@ -16,13 +16,13 @@ Herdr control commands return JSON. Prefer `jq` to extract IDs when it is instal
 
 ## Prerequisite: configure MQTT (both routes)
 
-Before first use, configure the MQTT broker. Run the following to open the config UI (a ratatui TUI) and fill in the `[mqtt]` fields (broker address, port, whether to auto-start the built-in broker, etc.):
+Before first use, configure the MQTT broker. Run the following to open the config UI (a ratatui TUI) and fill in the `[mqtt]` fields (broker URL, keep-alive; a `localhost` broker URL makes vibetty auto-start its built-in broker):
 
 ```bash
 vibetty setup
 ```
 
-Or manually add a `[mqtt]` section to `~/.vibetty/config.toml`.
+Or manually add a `[mqtt]` section to `~/.vibetty/config.toml`. If the file does not exist, `vibetty setup` generates one with a working built-in-broker default.
 
 > vibetty enables the MQTT transport only when a `[mqtt]` section is present in the config; otherwise it publishes no MQTT messages and never reaches the broker.
 

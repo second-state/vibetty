@@ -11,7 +11,7 @@ vibetty runs a program in a PTY, renders the terminal screen to an image, and pu
 ## Features
 
 - **Live terminal sharing over MQTT** — the screen is published as JPEG screenshots; remote devices subscribe and send keystrokes back.
-- **Built-in broker** — an in-process rumqttd broker (TCP + WebSocket) can auto-start, so you need zero external infrastructure.
+- **Built-in broker** — pointing the broker URL at localhost makes vibetty auto-start an in-process rumqttd broker (TCP; optional WS for the debug page), so you need zero external infrastructure.
 - **Multi-instance discovery** — each instance announces itself with a retained presence; a client discovers every one of your instances with a single wildcard subscription.
 - **Agent state detection** — the terminal title is parsed to tell whether Codex / Claude Code is `working` or `waiting`, and that state is broadcast alongside presence.
 - **TUI controls** — a ratatui interface with `HTTP` / `MQTT` / `Fit` / `Quit` buttons; the `MQTT` button reflects the combined state (`off` / `brkr` / `conn` / `on`).
@@ -48,21 +48,17 @@ cargo build --release
 vibetty setup
 ```
 
-This opens a TUI to fill in the `[mqtt]` fields and writes `~/.vibetty/config.toml`. The simplest setup is the built-in broker — no external service needed:
+This opens a TUI to fill in the `[mqtt]` fields and writes `~/.vibetty/config.toml`. The simplest setup is the built-in broker — just point the broker at localhost; vibetty starts its built-in broker on that port automatically, no external service needed:
 
 ```toml
 [mqtt]
-enable = true
-builtin_broker = true
-builtin_port = 1883      # built-in broker TCP port
-builtin_ws_port = 9001   # built-in broker WebSocket port
+broker = "mqtt://127.0.0.1:1883"
 ```
 
 Or point at your own broker / a free MQTT cloud:
 
 ```toml
 [mqtt]
-enable = true
 broker = "mqtt://user:pass@broker.example.com:1883"   # mqtts:// for TLS
 ```
 
@@ -110,7 +106,7 @@ Run-mode options:
 The HTTP server is **off by default**; toggle it with the `HTTP` button in the TUI.
 
 - `GET /screenshot` — the current terminal screen as a JPEG image (quality set by `-q, --quality`).
-- `GET /mqtt_ws` — a browser MQTT-over-WebSocket viewer. It connects to the built-in broker's WS port, discovers instances, shows the screen, and can send input. Handy for testing without hardware.
+- `GET /mqtt_ws` — a browser MQTT-over-WebSocket viewer. It connects to the built-in broker's WS port (`builtin_ws_port` in the config; `0` disables it), discovers instances, shows the screen, and can send input. Handy for testing without hardware.
 
 ## Use as a Herdr plugin
 
