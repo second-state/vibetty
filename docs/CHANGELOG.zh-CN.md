@@ -1,5 +1,26 @@
 # 变更日志 (CHANGELOG)
 
+## [0.4.2] - 2026-10-06
+
+内置 broker 零配置化、setup 体验、安装脚本升级路径。(English changelog: [`CHANGELOG.md`](../CHANGELOG.md)。)
+
+### 新增
+
+- **内置 broker 零配置** —— broker URL 指向 localhost(含 127.x / ::1)即自动启动进程内 broker,监听 URL 里写的端口,无需任何开关。`vibetty setup` 在 config 不存在时自动生成一份开箱即用的 localhost broker 配置,首次分享零改动。
+- **安装脚本升级路径** —— 重跑安装一行命令即原地升级:新版装成 `vibetty-<版本>`、`vibetty` 软链重指(运行中的实例不受影响);同版本直接短路退出;升级后可按提示(y/N)清理旧版本。装指定版本用 `... | bash -s -- <tag>`。
+- **`vibetty skill`(无子命令)** —— 直接把内置 SKILL.md 打到 stdout,可管道。
+
+### 变更
+
+- **setup 体验** —— 有未保存改动时退出会弹确认框(显示 config 路径,Y 保存 / N 放弃 / Esc 返回);表单精简为 broker + keep_alive_secs。
+- **配置瘦身** —— 移除 `enable`、`qos`、`builtin_broker`、`builtin_port`(死字段或已并入 broker URL)。老 config 照常加载,移除的字段行下次保存自然消失。`builtin_ws_port` 默认 0(不开 WS listener)——要启用 `/mqtt_ws` 调试页需显式设置。
+
+### 修复
+
+- **Herdr resize panic** —— sync 缩小 PTY 后行尾残留宽字符(中文/emoji),下一次写入在 vt100 fork 里 panic。resize 改为重建 Parser,不再 `set_size`。
+- **内置 broker 静默半死** —— WS 端口被占时 rumqttd 把错误吞进 tracing,broker 只剩 WS 没 TCP、客户端全部连不上。现在 TCP 端口 spawn 前预检,明确报「another instance may be serving it」且程序继续运行。
+- **日志集中** —— 统一写到 `~/.vibetty/logs/vibetty-<cwd路径>_rCURRENT.log`,不再往每个被分享的项目目录丢日志文件。
+
 ## [0.4.1] - 2026-08-17
 
 Herdr 插件支持 + 安装脚本 + 修复。(English changelog: [`CHANGELOG.md`](../CHANGELOG.md)。)

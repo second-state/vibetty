@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.4.2] - 2026-10-06
+
+Zero-config built-in broker, setup UX, installer upgrade path. (中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md).)
+
+### Added
+
+- **Zero-config built-in broker** — pointing the broker URL at localhost (127.x / ::1 too) auto-starts the in-process broker on the port written in the URL; no flags needed. `vibetty setup` generates a ready-to-use config with a localhost broker when none exists, so first-run sharing works out of the box.
+- **Installer upgrade path** — re-running the install one-liner upgrades in place: new version installed as `vibetty-<version>`, the `vibetty` symlink is re-pointed (running instances untouched), same-version runs short-circuit, and old versions can be cleaned up with a y/N prompt. Tag-pinned installs via `... | bash -s -- <tag>`.
+- **`vibetty skill` (bare)** — prints the bundled SKILL.md to stdout, pipeable.
+
+### Changed
+
+- **Setup UX** — quitting with unsaved changes pops a confirm dialog showing the config path (Y save / N discard / Esc back); the form is trimmed to broker + keep_alive_secs.
+- **Config slimmed** — `enable`, `qos`, `builtin_broker`, and `builtin_port` removed (dead or folded into the broker URL). Old configs load fine; removed lines vanish on the next save. `builtin_ws_port` now defaults to 0 (no WS listener) — set it to enable the `/mqtt_ws` debug page.
+
+### Fixed
+
+- **Herdr resize panic** — shrinking the PTY left wide chars (CJK/emoji) at row ends; the next write panicked in the vt100 fork. The parser is rebuilt on resize instead of `set_size`.
+- **Built-in broker silent half-start** — a WS-port bind conflict used to kill the broker invisibly (tracing swallowed). The TCP port is now pre-checked with a clear error, logged as "another instance may be serving it", and vibetty keeps running.
+- **Logs centralized** — `~/.vibetty/logs/vibetty-<cwd-path>_rCURRENT.log` instead of a log file dropped into every shared project directory.
+
 ## [0.4.1] - 2026-08-17
 
 Herdr plugin support + installer + fixes. (中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md).)
