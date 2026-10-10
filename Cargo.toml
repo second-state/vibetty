@@ -3,11 +3,6 @@ name = "vibetty"
 version = "0.4.2"
 edition = "2024"
 
-
-[features]
-default = ["swash"]
-swash = ["vibetty-screenshot/swash"]
-
 [dependencies]
 flexi_logger = "0.31"
 env_logger = "0.11.6"
@@ -41,11 +36,6 @@ tui-term = "0.3"
 tui-input = "0.15"
 vt100 = "0.16"
 
-# Screenshot / Image rendering
-vibetty-screenshot = { git = "https://github.com/second-state/vibetty-screenshot", tag = "v0.2.2" }
-image = "0.25"
-color_quant = "1.1"
-png = "0.17"
 rumqttc = "0.25.1"
 machine-uid = "0.6.0"
 sha2 = "0.11.0"

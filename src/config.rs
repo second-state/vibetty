@@ -106,15 +106,6 @@ pub struct Cli {
     /// Command to run in the PTY (e.g. -- bash -l)
     #[arg(last = true)]
     pub command_args: Vec<String>,
-
-    /// text or high/medium/low
-    #[arg(
-        short = 'q',
-        long = "quality",
-        default_value = "text",
-        value_name = "QUALITY"
-    )]
-    pub image_format: String,
 }
 
 #[derive(Subcommand, Debug)]
@@ -130,14 +121,6 @@ pub enum Commands {
     Herdr {
         /// herdr agent target id (or VIBETTY_HERDR_TARGET env)
         target: Option<String>,
-        /// text or high/medium/low
-        #[arg(
-            short = 'q',
-            long = "quality",
-            default_value = "text",
-            value_name = "QUALITY"
-        )]
-        quality: String,
         #[arg(short = 'a', long = "auto-submit", default_value = "true")]
         auto_submit: bool,
     },
@@ -173,7 +156,6 @@ impl Cli {
             bind_addr: self.bind_addr.clone(),
             auto_submit: self.auto_submit,
             command: self.command_args.clone(),
-            image_format: self.image_format.clone(),
             config: self.config.clone(),
         }
     }
@@ -184,30 +166,15 @@ pub struct RunArgs {
     pub bind_addr: String,
     pub auto_submit: bool,
     pub command: Vec<String>,
-    pub image_format: String,
     pub config: Option<std::path::PathBuf>,
 }
 
 impl RunArgs {
-    pub fn image_format(&self) -> crate::protocol::OutputFormat {
-        parse_output_format(&self.image_format)
-    }
-
     /// 读取可选的 `[mqtt]` 配置。
     /// 优先用 `--config` 指定的路径,否则回退 `~/.vibetty/config.toml`。
     /// 无配置文件 / 无 `[mqtt]` 段 → None(不启用 MQTT,现有 WebSocket/HTTP 路径不变)。
     pub fn mqtt_config(&self) -> Option<MqttConfig> {
         read_mqtt_config(self.config.as_deref())
-    }
-}
-
-/// 把 `-q/--quality` 字符串解析成 `OutputFormat`。
-pub fn parse_output_format(s: &str) -> crate::protocol::OutputFormat {
-    match s.to_lowercase().as_str() {
-        "medium" | "mid" | "m" => crate::protocol::OutputFormat::Medium,
-        "low" | "l" => crate::protocol::OutputFormat::Low,
-        "text" | "txt" | "t" => crate::protocol::OutputFormat::Text,
-        _ => crate::protocol::OutputFormat::High,
     }
 }
 

@@ -4,16 +4,12 @@ mod broker;
 mod config;
 mod herdr_runner;
 mod mqtt;
-#[allow(dead_code)] // PNG 编码已不再走 render(只 JPEG);模块保留待后续清理
-mod png_encode;
 mod protocol;
 mod ws;
 
 mod terminal;
 
 mod ui;
-
-pub use vibetty_screenshot as screenshot;
 
 use config::{Cli, Commands};
 
@@ -125,10 +121,9 @@ async fn main() {
 
         Some(Commands::Herdr {
             target,
-            quality,
             auto_submit,
         }) => {
-            return run_herdr_mode(cli.config.clone(), target, quality, auto_submit).await;
+            return run_herdr_mode(cli.config.clone(), target, auto_submit).await;
         }
         Some(Commands::ShareHerdr) => {
             if let Err(e) = herdr_runner::run_share_herdr().await {
@@ -155,10 +150,6 @@ async fn main() {
 
     let (ui_tx, ui_rx) = tokio::sync::mpsc::channel(1024);
 
-    let (screenshot_tx, screenshot_rx) = tokio::sync::mpsc::channel(4);
-
-    let image_format = args.image_format();
-
     // 可选 MQTT:有 [mqtt] 段就把整段配置交给 run_command。
     // boot 自动起(enable→client、builtin_broker→broker)+ footer 按钮起停都在 run_command 里;
     // enable / builtin_broker 现在纯粹当 auto-start 标志(不再用来藏按钮或必起 transport)。
@@ -182,13 +173,10 @@ async fn main() {
         &mut ui_rx,
         tx.clone(),
         cli_tx,
-        screenshot_tx,
         default_bind,
         mqtt_cfg,
-        screenshot_rx,
         &mut tui,
         &mut ui_title,
-        image_format,
         args.auto_submit,
     )
     .await
@@ -204,7 +192,6 @@ async fn main() {
 async fn run_herdr_mode(
     config: Option<std::path::PathBuf>,
     target: Option<String>,
-    quality: String,
     auto_submit: bool,
 ) {
     // target:位置参数优先,否则读 VIBETTY_HERDR_TARGET env(herdr share action 开出的 pane 走 env)。
@@ -220,10 +207,9 @@ async fn run_herdr_mode(
     };
     log::info!("Starting Vibetty (herdr attach): target={target}");
 
-    let image_format = config::parse_output_format(&quality);
     let mqtt_cfg = config::read_mqtt_config(config.as_deref());
 
-    if let Err(e) = herdr_runner::run_herdr(target, mqtt_cfg, image_format, auto_submit).await {
+    if let Err(e) = herdr_runner::run_herdr(target, mqtt_cfg, auto_submit).await {
         log::error!("Error in herdr attach execution: {}", e);
     }
 }

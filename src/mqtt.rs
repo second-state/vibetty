@@ -42,9 +42,9 @@ use rumqttc::{AsyncClient, Event, LastWill, MqttOptions, Packet, QoS, Transport}
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::config::MqttConfig;
-use crate::protocol::{ClientMessage, OutputFormat, ServerMessage};
+use crate::protocol::{ClientMessage, ServerMessage};
 use crate::terminal::agent::AgentState;
-use crate::ws::{render_screen_to_image, render_screen_to_text};
+use crate::ws::render_screen_to_text;
 
 /// 传输 client 的停止句柄:持有 oneshot 发送端。`stop()` 发信号让 `run_bridge`
 /// 优雅退出(出站随 cancel 一同 break);连接断开后 broker 触发 LWT 清空 presence(实例下线)。
@@ -69,18 +69,10 @@ pub fn spawn(
     cfg: MqttConfig,
     cli_tx: mpsc::Sender<ClientMessage>,
     tx: broadcast::Sender<ServerMessage>,
-    image_format: OutputFormat,
 ) -> (MqttHandle, Arc<AtomicU64>) {
     let (cancel_tx, cancel_rx) = oneshot::channel();
     let screen_bytes: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
-    tokio::spawn(run_bridge(
-        cfg,
-        cli_tx,
-        tx,
-        image_format,
-        cancel_rx,
-        screen_bytes.clone(),
-    ));
+    tokio::spawn(run_bridge(cfg, cli_tx, tx, cancel_rx, screen_bytes.clone()));
     (MqttHandle { cancel: cancel_tx }, screen_bytes)
 }
 
@@ -101,21 +93,15 @@ fn now_secs() -> u64 {
 }
 
 /// presence 公告 JSON:`prefix`/`client_id`/`ts` 由 MQTT 端填,`title`/`state` 由 ws 随事件带来,
-/// `format` 取自本实例的 `-q` 设置(ESP32 据此决定订阅 `{p}/screen` 还是 `{p}/screen_text`)。
-fn presence_payload(
-    prefix: &str,
-    client_id: &str,
-    title: &str,
-    state: AgentState,
-    format: OutputFormat,
-) -> String {
+/// `format` 恒为 "text"(图像传输已移除;ESP32 据此订阅 `{p}/screen_text`)。
+fn presence_payload(prefix: &str, client_id: &str, title: &str, state: AgentState) -> String {
     serde_json::json!({
         "prefix": prefix,
         "client_id": client_id,
         "ts": now_secs(),
         "title": title,
         "state": state,
-        "format": format.as_str(),
+        "format": crate::protocol::PRESENCE_FORMAT,
     })
     .to_string()
 }
@@ -251,7 +237,6 @@ async fn run_bridge(
     cfg: MqttConfig,
     cli_tx: mpsc::Sender<ClientMessage>,
     tx: broadcast::Sender<ServerMessage>,
-    image_format: OutputFormat,
     mut cancel: oneshot::Receiver<()>,
     screen_bytes: Arc<AtomicU64>,
 ) {
@@ -302,16 +287,11 @@ async fn run_bridge(
         broker.use_tls
     );
 
-    // 出站:订阅 broadcast,转发 Screen(JPEG 或 text 全屏/增量)+ Presence(上线/心跳/状态)。
-    let screen_topic = format!("{prefix}/screen");
-    // text 模式屏幕文本走独立 topic,与 JPEG 的 /screen 分开。首字节 tag:0x00=全屏基线、
-    // 0x01=pty_out 增量。**两种屏 topic(screen / screen_text 全屏+增量)都不 retained**:
+    // 出站:订阅 broadcast,转发 Screen(text 全屏/增量)+ Presence(上线/心跳/状态)。
+    // 屏幕文本 topic 首字节 tag:0x00=全屏基线、0x01=pty_out 增量。**都不 retained**:
     // pid 在前缀里,retained 会在重启后留在老 pid 的 topic 上清不掉(EMQX 累积);ESP32
     // 重连靠主动发 sync 拿首帧,不依赖 retained。presence 仍 retained(进程退出时 LWT 清)。
     let screen_text_topic = format!("{prefix}/screen_text");
-    // 最近一次 sync 的客户端显示尺寸(px);出站渲染时据此把图片精确补齐到该尺寸。
-    let mut sync_width: u16 = 0;
-    let mut sync_height: u16 = 0;
     // 最近一次 presence 的 title/state;重连后用它补发上线公告(见 ConnAck 分支)。
     let mut last_presence: Option<(String, AgentState)> = None;
     // 累计发送的 screen image 字节数;每次 publish 时 log debug(单位 MB, f64)。
@@ -341,32 +321,11 @@ async fn run_bridge(
                         "control" => parse_control(&payload),
                         _ => None,
                     };
-                    if let Some(cm) = msg {
-                        // 记下 sync 带的客户端尺寸,供出站渲染补齐图片到该【像素】尺寸用。
-                        // pixels=false(cells 模式)时 width/height 是列/行,要换算成像素目标。
-                        if let ClientMessage::Sync {
-                            width,
-                            height,
-                            pixels,
-                            ..
-                        } = &cm
-                        {
-                            if *pixels {
-                                sync_width = *width;
-                                sync_height = *height;
-                            } else {
-                                sync_width = (*width as u32
-                                    * crate::ws::SCREEN_CHAR_WIDTH
-                                    + 2 * crate::ws::SCREEN_PADDING) as u16;
-                                sync_height = (*height as u32
-                                    * crate::ws::SCREEN_CHAR_HEIGHT
-                                    + 2 * crate::ws::SCREEN_PADDING) as u16;
-                            }
-                        }
-                        if let Err(e) = cli_tx.send(cm).await {
-                            log::error!("[mqtt] cli_tx send failed: {e}");
-                            break;
-                        }
+                    if let Some(cm) = msg
+                        && let Err(e) = cli_tx.send(cm).await
+                    {
+                        log::error!("[mqtt] cli_tx send failed: {e}");
+                        break;
                     }
                 }
                 Ok(Event::Incoming(Packet::ConnAck(_))) => {
@@ -385,7 +344,7 @@ async fn run_bridge(
                     // 复用旧 payload,旧 ts 会被 ESP32 当心跳超时)。首次连接时还没有 presence,
                     // 跳过(等 ws 触发首次公告)。
                     if let Some((title, state)) = last_presence.clone() {
-                        let payload = presence_payload(&prefix, &client_id, &title, state, image_format);
+                        let payload = presence_payload(&prefix, &client_id, &title, state);
                         if let Err(e) = client
                             .publish(prefix.clone(), QoS::AtLeastOnce, true, payload)
                             .await
@@ -425,64 +384,32 @@ async fn run_bridge(
                     }
                 }
                 Ok(ServerMessage::Screen(screen)) => {
-                    // 按 image_format 决定渲染成 JPEG(发 {prefix}/screen)还是 ANSI 文本
-                    // (发 {prefix}/screen_text)。**都不 retained**(屏 topic 一律不 retain,
-                    // 避免 pid 变更后老 topic 的 retained 残留清不掉),QoS0。ESP32 重连靠 sync 拿首帧。
-                    if image_format.is_text() {
-                        // text 模式全屏基线:tag=0x00 + contents_formatted(可重放的 ANSI 流)。
-                        // 不 retained,之后靠 delta(pty_out)增量;ESP32 连上发 sync 触发本帧。
-                        let text = render_screen_to_text(screen.as_ref());
-                        let mut payload = Vec::with_capacity(1 + text.len());
-                        payload.push(0x00);
-                        payload.extend_from_slice(text.as_bytes());
-                        screen_bytes.fetch_add(payload.len() as u64, Ordering::Relaxed);
-                        total_screen_bytes += payload.len() as u64;
-                        log::debug!(
-                            "[mqtt] screen_text full {} bytes (total {:.2} MB) -> {screen_text_topic}",
-                            payload.len(),
-                            total_screen_bytes as f64 / (1024.0 * 1024.0)
-                        );
-                        if let Err(e) = client
-                            .publish(&screen_text_topic, QoS::AtLeastOnce, false, payload)
-                            .await
-                        {
-                            log::warn!("[mqtt] publish screen_text failed: {e}");
-                        }
-                    } else {
-                        let sync_w = sync_width;
-                        let sync_h = sync_height;
-                        let target = (sync_w != 0 && sync_h != 0).then_some((sync_w, sync_h));
-                        match render_screen_to_image(screen.as_ref(), image_format, target) {
-                            Ok(mut img) if !img.is_empty() => {
-                                // 图片末尾追加当前 scrollback offset(u32 大端=网络序,4 字节):IEND/EOI
-                                // 之后解码器忽略,接收端读末 4 字节即知「这张图截自滚到第 N 行」
-                                // (0=底部/最新)。offset 直接从 Screen 读——它自带 scrollback_offset 字段。
-                                let offset = screen.as_ref().scrollback() as u32;
-                                img.extend_from_slice(&offset.to_be_bytes());
-                                screen_bytes.fetch_add(img.len() as u64, Ordering::Relaxed);
-                                total_screen_bytes += img.len() as u64;
-                                log::debug!(
-                                    "[mqtt] screen image {} bytes (trailer offset={offset}, total {:.2} MB) -> {screen_topic}",
-                                    img.len(),
-                                    total_screen_bytes as f64 / (1024.0 * 1024.0)
-                                );
-                                if let Err(e) = client
-                                    .publish(&screen_topic, QoS::AtMostOnce, false, img)
-                                    .await
-                                {
-                                    log::warn!("[mqtt] publish screen failed: {e}");
-                                }
-                            }
-                            Ok(_) => {}
-                            Err(e) => log::warn!("[mqtt] render screen failed: {e}"),
-                        }
+                    // 全屏基线帧:tag=0x00 + contents_formatted(可重放的 ANSI 流)。
+                    // **不 retained**(屏 topic 一律不 retain,避免 pid 变更后老 topic 的
+                    // retained 残留清不掉),QoS1。ESP32 连上发 sync 触发本帧。
+                    let text = render_screen_to_text(screen.as_ref());
+                    let mut payload = Vec::with_capacity(1 + text.len());
+                    payload.push(0x00);
+                    payload.extend_from_slice(text.as_bytes());
+                    screen_bytes.fetch_add(payload.len() as u64, Ordering::Relaxed);
+                    total_screen_bytes += payload.len() as u64;
+                    log::debug!(
+                        "[mqtt] screen_text full {} bytes (total {:.2} MB) -> {screen_text_topic}",
+                        payload.len(),
+                        total_screen_bytes as f64 / (1024.0 * 1024.0)
+                    );
+                    if let Err(e) = client
+                        .publish(&screen_text_topic, QoS::AtLeastOnce, false, payload)
+                        .await
+                    {
+                        log::warn!("[mqtt] publish screen_text failed: {e}");
                     }
                 }
                 Ok(ServerMessage::Presence { title, state }) => {
                     // ws 主循环定期(心跳)+ 状态翻转时发来 → publish presence(retained)。
                     // 缓存 title/state,供重连后补发(见 ConnAck 分支)。
                     last_presence = Some((title.clone(), state));
-                    let payload = presence_payload(&prefix, &client_id, &title, state, image_format);
+                    let payload = presence_payload(&prefix, &client_id, &title, state);
                     if let Err(e) = client
                         .publish(prefix.clone(), QoS::AtLeastOnce, true, payload)
                         .await

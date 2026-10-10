@@ -92,7 +92,7 @@ pub enum ServerMessage {
     #[serde(rename = "pty_out")]
     PtyOutput(Vec<u8>),
 
-    /// 整张终端屏幕(MQTT 出站据此渲染:JPEG 或 ANSI 文本,由 image_format 决定;不走 serde 序列化)
+    /// 整张终端屏幕(内部消息:runner → MQTT 桥,用于编码全屏 ANSI 基线帧;不走 serde 序列化)
     #[serde(skip)]
     Screen(std::sync::Arc<vt100::Screen>),
 
@@ -105,40 +105,8 @@ pub enum ServerMessage {
 
 // ========== 辅助类型 ==========
 
-/// screen 出站格式档位。High/Medium 彩色 JPEG,Low 黑白(灰度)JPEG,Text 纯文本(不发图)。
-#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum OutputFormat {
-    High,
-    Medium,
-    Low,
-    Text,
-}
-
-impl OutputFormat {
-    /// 是否为文本模式(非图片)。
-    pub fn is_text(&self) -> bool {
-        matches!(self, OutputFormat::Text)
-    }
-
-    /// 字符串名(与 serde 序列化一致):`high`/`medium`/`low`/`text`。用于 presence 公告等。
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            OutputFormat::High => "high",
-            OutputFormat::Medium => "medium",
-            OutputFormat::Low => "low",
-            OutputFormat::Text => "text",
-        }
-    }
-
-    /// 对应的 HTTP MIME 类型:High/Medium/Low 为 JPEG,Text 为纯文本。
-    pub fn mime_type(&self) -> &'static str {
-        match self {
-            OutputFormat::Text => "text/plain; charset=utf-8",
-            _ => "image/jpeg",
-        }
-    }
-}
+/// presence 公告里的 `format` 字段值。图像传输已移除,永远为 `text`(ANSI 流)。
+pub const PRESENCE_FORMAT: &str = "text";
 
 // ========== 客户端消息构造 / JSON ==========
 

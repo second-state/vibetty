@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use axum::{Router, extract::State, response::IntoResponse, routing::get};
+use axum::{Router, routing::get};
 use ratatui::layout::Rect;
 use tokio::sync::{broadcast, mpsc};
 use tui_input::InputRequest;
@@ -18,17 +18,13 @@ use crate::ui::{
     quit_button_rect,
 };
 
-/// 终端截图里单个字符单元格的像素宽。`vibetty-screenshot` 在 font_size=14.0 +
-/// 内嵌字体 Sarasa Mono SC Light(swash 后端)下由 `get_char_metrics(14.0)` 实测得到。
-/// 客户端 Sync 在 `pixels=true` 时发的是【像素】,要除以它换算成 PTY 列数。
-/// ⚠️ 改 `render_screen_to_image` 的 font_size 或换字体时必须同步更新。
+/// 客户端 Sync 在 `pixels=true` 时发的是【设备像素】,按此 cell 尺寸换算成 PTY 列数
+/// (8×18 = 经典终端 cell 比例,历史约定)。
 pub(crate) const SCREEN_CHAR_WIDTH: u32 = 8;
 /// 单个字符单元格的像素高,同上(`get_char_metrics(14.0)` 返回 `(8, 18)`)。
 /// 用于由 sync 的像素高度换算「一页」的行数。
 pub(crate) const SCREEN_CHAR_HEIGHT: u32 = 18;
-/// 截图四周的留白(每边像素数),来自 `ScreenshotConfig::default().padding`。
-/// 整张图 = cols×`SCREEN_CHAR_WIDTH` + 2×`SCREEN_PADDING` 宽、
-///         rows×`SCREEN_CHAR_HEIGHT` + 2×`SCREEN_PADDING` 高。
+/// 像素尺寸换算时的四周留白(每边像素数),历史约定,与 cell 尺寸配套。
 pub(crate) const SCREEN_PADDING: u32 = 16;
 /// Columns reserved for TUI decorations: the terminal pane has no left/right borders
 /// (only top + bottom), so nothing is reserved horizontally.
@@ -62,17 +58,8 @@ impl Callbacks for WindowCallbacks {
     }
 }
 
-/// Screenshot request: send a oneshot sender to get the rendered JPEG bytes
-type ScreenshotTx = mpsc::Sender<tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>>;
-
-#[derive(Clone)]
-pub struct AppState {
-    pub screenshot_tx: ScreenshotTx,
-    pub image_format: crate::protocol::OutputFormat,
-}
-
 fn send_screen(tx: &ServerTx, screen: Arc<vt100::Screen>) {
-    // 广播整张屏幕;渲染成 JPEG 还是 ANSI 文本由 MQTT 端按 image_format 决定。
+    // 广播整张屏幕;MQTT 桥编码为全屏 ANSI 基线帧发到 screen_text。
     let _ = tx.send(ServerMessage::Screen(screen));
 }
 
@@ -83,20 +70,17 @@ pub(crate) fn render_screen_to_text(screen: &vt100::Screen) -> String {
     String::from_utf8_lossy(&screen.contents_formatted()).into_owned()
 }
 
-/// 构造 HTTP 路由:/mqtt_ws 调试页 + /screenshot(与原启动期一致)。
-fn build_router(state: AppState) -> Router {
-    Router::new()
-        .route("/mqtt_ws", get(crate::static_page::mqtt_ws_handler))
-        .route("/screenshot", get(screenshot_handler))
-        .with_state(state)
+/// 构造 HTTP 路由:/mqtt_ws 调试页。
+fn build_router() -> Router {
+    Router::new().route("/mqtt_ws", get(crate::static_page::mqtt_ws_handler))
 }
 
 /// 按指定绑定地址(如 `0.0.0.0:3000`、`127.0.0.1:8080`)后台启动 HTTP server,
 /// 返回实际绑定的 `host:port`。失败(地址占用/无权限/格式非法等)返回 Err。
-async fn start_http(bind: &str, state: AppState) -> anyhow::Result<String> {
+async fn start_http(bind: &str) -> anyhow::Result<String> {
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let bound = listener.local_addr()?.to_string();
-    let app = build_router(state);
+    let app = build_router();
     tokio::spawn(async move {
         let serve = axum::serve(
             listener,
@@ -167,7 +151,6 @@ enum TerminalEvent {
     InputClosed,
     UIEvent(crate::ui::UIEvent),
     PtyOutput(String),
-    ScreenGetter(tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>),
     Error,
 }
 
@@ -190,7 +173,6 @@ struct MqttCtx<'a> {
     client: &'a mut Option<mqtt::MqttHandle>,
     cli_tx: &'a mpsc::Sender<ClientMessage>,
     tx: &'a ServerTx,
-    image_format: crate::protocol::OutputFormat,
 }
 
 /// 把原始按键解析成对 tui_input 的编辑请求:方向键/Home/End 导航、Backspace 删除、
@@ -230,7 +212,6 @@ fn autostart_mqtt(
     mqtt_cfg: &Option<MqttConfig>,
     cli_tx: &mpsc::Sender<ClientMessage>,
     tx: &ServerTx,
-    image_format: crate::protocol::OutputFormat,
 ) -> (bool, Option<mqtt::MqttHandle>, Option<Arc<AtomicBool>>) {
     let Some(cfg) = mqtt_cfg else {
         return (false, None, None);
@@ -251,7 +232,7 @@ fn autostart_mqtt(
         }
     }
     log::info!("[mqtt] client auto-started");
-    let client = Some(mqtt::spawn(cfg.for_client(), cli_tx.clone(), tx.clone(), image_format).0);
+    let client = Some(mqtt::spawn(cfg.for_client(), cli_tx.clone(), tx.clone()).0);
     (broker_on, client, broker_alive)
 }
 
@@ -260,8 +241,6 @@ async fn handle_port_input(
     mut input: tui_input::Input,
     bytes: &[u8],
     http: &mut HttpBtnState,
-    screenshot_tx: &ScreenshotTx,
-    image_format: crate::protocol::OutputFormat,
 ) -> ModalState {
     // Enter:尝试按输入地址起 HTTP server。
     if bytes == b"\r" || bytes == b"\n" {
@@ -269,11 +248,7 @@ async fn handle_port_input(
         if bind.is_empty() {
             return ModalState::Error("invalid address".to_string());
         }
-        let state = AppState {
-            screenshot_tx: screenshot_tx.clone(),
-            image_format,
-        };
-        return match start_http(&bind, state).await {
+        return match start_http(&bind).await {
             Ok(addr) => {
                 log::info!("[http] started on {addr}");
                 *http = HttpBtnState::On(addr);
@@ -409,9 +384,7 @@ async fn mqtt_panel_enter(
                     .as_ref()
                     .expect("mqtt_cfg_present implies mqtt_cfg")
                     .for_client();
-                *mqtt.client = Some(
-                    mqtt::spawn(cfg, mqtt.cli_tx.clone(), mqtt.tx.clone(), mqtt.image_format).0,
-                );
+                *mqtt.client = Some(mqtt::spawn(cfg, mqtt.cli_tx.clone(), mqtt.tx.clone()).0);
                 log::info!("[mqtt] client started via panel");
             }
             ModalState::None
@@ -492,13 +465,9 @@ async fn handle_modal_input(
     bytes: &[u8],
     http: &mut HttpBtnState,
     mqtt: &mut MqttCtx<'_>,
-    screenshot_tx: &ScreenshotTx,
-    image_format: crate::protocol::OutputFormat,
 ) -> ModalState {
     match modal {
-        ModalState::PortInput { input } => {
-            handle_port_input(input, bytes, http, screenshot_tx, image_format).await
-        }
+        ModalState::PortInput { input } => handle_port_input(input, bytes, http).await,
         ModalState::MqttPanel {
             tcp,
             ws,
@@ -573,13 +542,10 @@ pub async fn run_command(
     ui_rx: &mut mpsc::Receiver<crate::ui::UIEvent>,
     tx: ServerTx,
     cli_tx: mpsc::Sender<ClientMessage>,
-    screenshot_tx: ScreenshotTx,
     default_bind: String,
     mut mqtt_cfg: Option<MqttConfig>,
-    mut screenshot_rx: mpsc::Receiver<tokio::sync::oneshot::Sender<Result<Vec<u8>, String>>>,
     tui: &mut crate::ui::TuiTerminal,
     ui_title: &mut String,
-    image_format: crate::protocol::OutputFormat,
     auto_submit: bool,
 ) -> anyhow::Result<()> {
     // headless(无 TTY,例如纯 MQTT、无 WS 客户端)时 crossterm 返回 0×0 而非 Err,
@@ -626,7 +592,7 @@ pub async fn run_command(
     // MQTT:`enable` / `builtin_broker` 当 auto-start 标志。broker 只起不停(rumqttd 无 shutdown);
     // client 可停/重起(oneshot cancel,见 mqtt::MqttHandle)。
     let (mut mqtt_broker_on, mut mqtt_client, mut broker_alive) =
-        autostart_mqtt(&mqtt_cfg, &cli_tx, &tx, image_format);
+        autostart_mqtt(&mqtt_cfg, &cli_tx, &tx);
     // footer MQTT 按钮:只要配了 [mqtt] 就显示(不再绑 builtin_broker)。
     let mqtt_cfg_present = mqtt_cfg.is_some();
 
@@ -663,7 +629,7 @@ pub async fn run_command(
     // INIT_SETTLE(500ms),稳定后只发一帧 screen + 一次 presence(上线);之后再进主
     // loop,实时性不变(waiting 仍即时发、working 5s 一帧)。静默迟迟达不到时最多等
     // INIT_MAX_WAIT,避免 agent 一启动就长跑导致 ESP32 长时间黑屏。期间键盘/鼠标、
-    // MQTT control/sync、HTTP screenshot 等事件都在各自 channel 里排队,进主 loop 后处理。
+    // MQTT control/sync 等事件都在各自 channel 里排队,进主 loop 后处理。
     const INIT_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
     const INIT_MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
     let init_started = tokio::time::Instant::now();
@@ -726,10 +692,8 @@ pub async fn run_command(
         init_started.elapsed().as_millis()
     );
 
-    // screen 发送去抖(无条件尾部去抖):每次 PTY 输出都激活 SCREEN_DEBOUNCE(100ms)计时器,
     // 期间有新输出就刷新(重设)计时器,停顿满 100ms 才发最新帧。把一次 burst 合并成一张图,
     // 省流量。ESP32 保留最后一帧不会黑屏,持续输出期间静默(等停顿)即可。
-    const SCREEN_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(100);
     let mut pending_screen: Option<Arc<vt100::Screen>> = None;
     let mut send_deadline: Option<tokio::time::Instant> = None;
     // close 开关(Sync.close):true 时暂停 PTY 输出触发的自主 screen 推送。客户端不看时关掉省流量。
@@ -789,13 +753,6 @@ pub async fn run_command(
                     TerminalEvent::Error
                 }
             },
-            req = screenshot_rx.recv() => match req {
-                Some(resp_tx) => TerminalEvent::ScreenGetter(resp_tx),
-                None => {
-                    log::error!("[{}] Screenshot request channel closed", terminal.session_id());
-                    TerminalEvent::Error
-                }
-            },
             _ = presence_interval.tick() => {
                 // presence 心跳(上线/状态):定期由 ws 触发,含当前 title + agent 状态。
                 let _ = tx.send(ServerMessage::Presence {
@@ -832,16 +789,6 @@ pub async fn run_command(
         };
 
         match event {
-            TerminalEvent::ScreenGetter(getter) => {
-                let screen = vt_parser.screen().clone();
-                // text 模式返回纯文本字节,否则返回 JPEG(/screenshot 的 MIME 由 mime_type() 定)。
-                let result: Result<Vec<u8>, String> = if image_format.is_text() {
-                    Ok(render_screen_to_text(&screen).into_bytes())
-                } else {
-                    render_screen_to_image(&screen, image_format, None).map_err(|e| e.to_string())
-                };
-                let _ = getter.send(result);
-            }
             TerminalEvent::PtyOutput(output) => {
                 // 空 PTY 输出 = EOF / 子进程已退出(reader 线程读到 Ok(0) 后停掉、
                 // read_rx 关闭)。此时优雅退出循环,由 main.rs 走 TUI cleanup;否则会空读 busy-loop。
@@ -917,24 +864,11 @@ pub async fn run_command(
                     // resize 后的重绘 burst:吸收,不转发 delta / 不入队去抖;vt300 已把输出吃进
                     // screen 状态,等 settle 到期发全屏即可。每来一段就重设 500ms 计时器。
                     resize_settle_until = Some(tokio::time::Instant::now() + RESIZE_SETTLE);
-                } else {
-                    // text 模式:实时把原始 PTY 字节发给 ESP32(它自己跑终端模拟器渲染),仅在未 close
-                    // 时发。⚠️ 高频 PtyOutput 每条 broadcast,可能撑爆 broadcast 容量(1024)触发 Lagged;
+                } else if !screen_closed {
+                    // 实时把原始 PTY 字节发给 ESP32(它自己跑终端模拟器渲染)。
+                    // ⚠️ 高频 PtyOutput 每条 broadcast,可能撑爆 broadcast 容量(1024)触发 Lagged;
                     // 真扛不住再改独立通道。
-                    if image_format.is_text() && !screen_closed {
-                        let _ = tx.send(ServerMessage::PtyOutput(output.clone().into_bytes()));
-                    }
-
-                    // jpeg 模式:走 screen 去抖(每次输出入队 pending + 重设 100ms 计时器,停顿满发
-                    // 最新帧)。text 模式不发屏幕帧(靠上面的 pty_out 实时流)。看历史(scrollback!=0)
-                    // 且非 waiting、或 close=true 暂停时,都不入队。**只有 jpeg 才 clone 整屏**(text 不需要)。
-                    if !image_format.is_text()
-                        && !screen_closed
-                        && (vt_parser.screen().scrollback() == 0 || agent_type.state().is_waiting())
-                    {
-                        pending_screen = Some(Arc::new(vt_parser.screen().clone()));
-                        send_deadline = Some(tokio::time::Instant::now() + SCREEN_DEBOUNCE);
-                    }
+                    let _ = tx.send(ServerMessage::PtyOutput(output.clone().into_bytes()));
                 }
             }
 
@@ -952,17 +886,9 @@ pub async fn run_command(
                             client: &mut mqtt_client,
                             cli_tx: &cli_tx,
                             tx: &tx,
-                            image_format,
                         };
-                        handle_modal_input(
-                            std::mem::take(&mut modal),
-                            &bytes,
-                            &mut http,
-                            &mut mqtt,
-                            &screenshot_tx,
-                            image_format,
-                        )
-                        .await
+                        handle_modal_input(std::mem::take(&mut modal), &bytes, &mut http, &mut mqtt)
+                            .await
                     };
                     let screen = Arc::new(vt_parser.screen().clone());
                     redraw(
@@ -1239,116 +1165,4 @@ pub async fn run_command(
     }
 
     Ok(())
-}
-
-/// Render a vt100 screen to JPEG bytes(质量档位由 `format` 决定:High/Medium 彩色,Low 黑白)
-pub(crate) fn render_screen_to_image(
-    screen: &vt100::Screen,
-    format: crate::protocol::OutputFormat,
-    target_size: Option<(u16, u16)>, // 把图片精确补/裁到该 (width,height),不足补背景色(主要用于 MQTT 出站)
-) -> anyhow::Result<Vec<u8>> {
-    let config = crate::screenshot::ScreenshotConfig {
-        show_decorations: false,
-        ..Default::default()
-    };
-
-    let image = crate::screenshot::capture_screen(screen, &config)
-        .map_err(|e| anyhow::anyhow!("Failed to capture screen: {}", e))?;
-
-    let mut dyn_image = image::DynamicImage::ImageRgba8(image);
-
-    // 精确补齐到目标尺寸(主要用于 MQTT 出站):画布做到 (tw,th) 并填满背景色,再把当前图
-    // overlay 到 (0,0)——原图比目标小则四周补背景色,比目标大则等价裁切。PTY 已按 sync
-    // resize 成 cols×rows,故原图通常 ≤ 目标,只差字符网格 8×18 的 floor 余量,走「补背景色」。
-    if let Some((tw, th)) = target_size {
-        let (tw, th) = (tw as u32, th as u32);
-        if dyn_image.width() != tw || dyn_image.height() != th {
-            let mut canvas = image::RgbaImage::from_pixel(tw, th, image::Rgba([30, 30, 30, 255]));
-            image::imageops::overlay(&mut canvas, &dyn_image.to_rgba8(), 0, 0);
-            dyn_image = image::DynamicImage::ImageRgba8(canvas);
-        }
-    }
-
-    // 按质量档位编码 JPEG:High=q85 彩色(默认),Medium=q70 彩色,Low=q50 黑白(灰度)。
-    // Text 模式不该走到这里(调用方先 is_text() 分流到 render_screen_to_text)。
-    let mut buf = std::io::Cursor::new(Vec::new());
-    let (quality, grayscale) = match format {
-        crate::protocol::OutputFormat::High => (85u8, false),
-        crate::protocol::OutputFormat::Medium => (70, false),
-        crate::protocol::OutputFormat::Low => (50, true),
-        crate::protocol::OutputFormat::Text => {
-            return Err(anyhow::anyhow!(
-                "text format cannot render to image; use render_screen_to_text"
-            ));
-        }
-    };
-    {
-        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, quality);
-        if grayscale {
-            let luma = dyn_image.to_luma8();
-            encoder
-                .encode(
-                    luma.as_raw(),
-                    luma.width(),
-                    luma.height(),
-                    image::ExtendedColorType::L8,
-                )
-                .map_err(|e| anyhow::anyhow!("Failed to encode JPEG: {}", e))?;
-        } else {
-            let rgb = dyn_image.to_rgb8();
-            encoder
-                .encode(
-                    rgb.as_raw(),
-                    rgb.width(),
-                    rgb.height(),
-                    image::ExtendedColorType::Rgb8,
-                )
-                .map_err(|e| anyhow::anyhow!("Failed to encode JPEG: {}", e))?;
-        }
-    }
-
-    Ok(buf.into_inner())
-}
-
-/// HTTP handler for GET /screenshot — returns the current terminal screen
-/// rendered as an image whose format/MIME is determined by `image_format`.
-pub async fn screenshot_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let image_format = state.image_format;
-    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-
-    if state.screenshot_tx.send(resp_tx).await.is_err() {
-        return (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            axum::http::HeaderMap::new(),
-            "Screenshot service unavailable".to_string(),
-        )
-            .into_response();
-    }
-
-    match resp_rx.await {
-        Ok(Ok(image_data)) => {
-            let mut headers = axum::http::HeaderMap::new();
-            headers.insert(
-                axum::http::header::CONTENT_TYPE,
-                image_format.mime_type().parse().unwrap(),
-            );
-            headers.insert(
-                axum::http::header::CACHE_CONTROL,
-                "no-cache".parse().unwrap(),
-            );
-            (axum::http::StatusCode::OK, headers, image_data).into_response()
-        }
-        Ok(Err(e)) => (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            axum::http::HeaderMap::new(),
-            format!("Failed to render screenshot: {}", e),
-        )
-            .into_response(),
-        Err(_) => (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            axum::http::HeaderMap::new(),
-            "Screenshot request timed out".to_string(),
-        )
-            .into_response(),
-    }
 }

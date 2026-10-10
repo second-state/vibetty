@@ -56,7 +56,6 @@ fn autostart_mqtt(
     mqtt_cfg: &Option<MqttConfig>,
     cli_tx: &mpsc::Sender<ClientMessage>,
     tx: &ServerTx,
-    image_format: crate::protocol::OutputFormat,
 ) -> (
     bool,
     Option<mqtt::MqttHandle>,
@@ -83,7 +82,7 @@ fn autostart_mqtt(
     }
     let (client, screen_bytes) = {
         log::info!("[mqtt] client auto-started");
-        let (h, stats) = mqtt::spawn(cfg.for_client(), cli_tx.clone(), tx.clone(), image_format);
+        let (h, stats) = mqtt::spawn(cfg.for_client(), cli_tx.clone(), tx.clone());
         (Some(h), stats)
     };
     (broker_on, client, broker_alive, screen_bytes)
@@ -294,7 +293,6 @@ pub async fn run_share_herdr() -> anyhow::Result<()> {
 pub async fn run_herdr(
     target: String,
     mqtt_cfg: Option<MqttConfig>,
-    image_format: crate::protocol::OutputFormat,
     auto_submit: bool,
 ) -> anyhow::Result<()> {
     // 进 herdr 模式第一件事:查一下 target 的 agent 状态 + terminal title + agent 名
@@ -359,7 +357,7 @@ pub async fn run_herdr(
     drop(broadcast_rx);
 
     let (mut mqtt_broker_on, mqtt_client, broker_alive, screen_bytes) =
-        autostart_mqtt(&mqtt_cfg, &cli_tx, &tx, image_format);
+        autostart_mqtt(&mqtt_cfg, &cli_tx, &tx);
 
     // 画一次初始状态条(title 此时 ui_title 还没初始化,从 watch 通道取)。
     let init_title = agent_status_rx.borrow().1.clone();
@@ -419,7 +417,6 @@ pub async fn run_herdr(
     );
 
     // screen 去抖(无条件尾部去抖 100ms)。close=true 时暂停自主推屏。
-    const SCREEN_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(100);
     let mut pending_screen: Option<Arc<vt100::Screen>> = None;
     let mut send_deadline: Option<tokio::time::Instant> = None;
     let mut screen_closed = false;
@@ -554,17 +551,8 @@ pub async fn run_herdr(
                     // resize 后重绘 burst:吸收,重设 500ms 计时器。
                     resize_settle_until = Some(tokio::time::Instant::now() + RESIZE_SETTLE);
                 } else if !screen_closed {
-                    // text 模式:实时广播原始 PTY 字节。
-                    if image_format.is_text() {
-                        let _ = tx.send(ServerMessage::PtyOutput(output.clone().into_bytes()));
-                    }
-                    // jpeg 模式:入队 pending + 100ms 去抖。
-                    if !image_format.is_text()
-                        && (vt_parser.screen().scrollback() == 0 || current_state.is_waiting())
-                    {
-                        pending_screen = Some(Arc::new(vt_parser.screen().clone()));
-                        send_deadline = Some(tokio::time::Instant::now() + SCREEN_DEBOUNCE);
-                    }
+                    // 实时广播原始 PTY 字节。
+                    let _ = tx.send(ServerMessage::PtyOutput(output.clone().into_bytes()));
                 }
             }
 
