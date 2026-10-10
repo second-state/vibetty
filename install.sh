@@ -162,24 +162,24 @@ case ":$PATH:" in
 
     if [ "${VIBETTY_NONINTERACTIVE:-0}" = "1" ]; then
       echo "note: $INSTALL_DIR is not on your PATH — add it manually" # 非交互:不问
-      return 0
-    fi
-    prompt="$INSTALL_DIR is not on your PATH. Add it to your shell rc file? [Y/n] "
-    ans=""
-    if [ -t 0 ]; then
-      read -r -p "$prompt" ans
-    elif [ -t 1 ] && [ -r /dev/tty ]; then
-      # curl | bash: stdin is the script itself, ask on the terminal instead
-      printf '%s' "$prompt" > /dev/tty
-      read -r ans < /dev/tty
     else
-      ans="__noask__" # non-interactive (no tty): don't touch rc files
-    fi
+      prompt="$INSTALL_DIR is not on your PATH. Add it to your shell rc file? [Y/n] "
+      ans=""
+      if [ -t 0 ]; then
+        read -r -p "$prompt" ans
+      elif [ -t 1 ] && [ -r /dev/tty ]; then
+        # curl | bash: stdin is the script itself, ask on the terminal instead
+        printf '%s' "$prompt" > /dev/tty
+        read -r ans < /dev/tty
+      else
+        ans="__noask__" # non-interactive (no tty): don't touch rc files
+      fi
 
-    case "$ans" in
-      __noask__) echo "note: $INSTALL_DIR is not on your PATH — add it manually" ;;
-      [nN]*) echo "skipped — add $INSTALL_DIR to your PATH manually if needed" ;;
-      *) add_to_rc ;;
-    esac
+      case "$ans" in
+        __noask__) echo "note: $INSTALL_DIR is not on your PATH — add it manually" ;;
+        [nN]*) echo "skipped — add $INSTALL_DIR to your PATH manually if needed" ;;
+        *) add_to_rc ;;
+      esac
+    fi
     ;;
 esac
