@@ -126,6 +126,11 @@ pub enum Commands {
     },
     /// herdr share action entrypoint (not for manual use)
     ShareHerdr,
+    /// Update vibetty to the latest release (or a specific tag)
+    Update {
+        /// Release tag to install (default: latest stable, prereleases excluded)
+        tag: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]

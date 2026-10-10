@@ -5,6 +5,7 @@ mod config;
 mod herdr_runner;
 mod mqtt;
 mod protocol;
+mod update;
 mod ws;
 
 mod terminal;
@@ -128,6 +129,13 @@ async fn main() {
         Some(Commands::ShareHerdr) => {
             if let Err(e) = herdr_runner::run_share_herdr().await {
                 log::error!("herdr share-herdr failed: {e}");
+            }
+            return;
+        }
+        Some(Commands::Update { tag }) => {
+            if let Err(e) = update::run(tag).await {
+                eprintln!("Update error: {e}");
+                std::process::exit(1);
             }
             return;
         }
