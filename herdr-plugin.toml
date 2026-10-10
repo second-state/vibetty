@@ -7,11 +7,13 @@ platforms = ["linux", "macos"]
 
 # linux/macOS: install.sh downloads the prebuilt release binary into
 # ~/.cargo/bin; VIBETTY_FALLBACK_BUILD=1 makes it build from the fetched
-# checkout if the download fails. Windows: no prebuilt installer yet,
+# checkout if the download fails, and VIBETTY_NONINTERACTIVE=1 suppresses
+# the interactive prompts (old-version cleanup / PATH rc) — herdr runs
+# this build non-interactively. Windows: no prebuilt installer yet,
 # build from source.
 [[build]]
 platforms = ["linux", "macos"]
-command = ["bash", "-c", "VIBETTY_FALLBACK_BUILD=1 ./install.sh"]
+command = ["bash", "-c", "VIBETTY_NONINTERACTIVE=1 VIBETTY_FALLBACK_BUILD=1 ./install.sh"]
 
 [[build]]
 platforms = ["windows"]

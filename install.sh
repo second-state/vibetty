@@ -116,7 +116,7 @@ for old in "$INSTALL_DIR/${NAME%-*}"-[0-9]*; do
   [ "$old" = "$INSTALL_DIR/$VERSIONED" ] && continue
   OLD_FOUND+=("$old")
 done
-if [ ${#OLD_FOUND[@]} -gt 0 ]; then
+if [ ${#OLD_FOUND[@]} -gt 0 ] && [ "${VIBETTY_NONINTERACTIVE:-0}" != "1" ]; then
   echo "Found old version(s):"
   for old in "${OLD_FOUND[@]}"; do echo "  $old"; done
   ans=""
@@ -160,6 +160,10 @@ case ":$PATH:" in
       echo "Added to $rc — run 'source $rc' or open a new shell to pick it up"
     }
 
+    if [ "${VIBETTY_NONINTERACTIVE:-0}" = "1" ]; then
+      echo "note: $INSTALL_DIR is not on your PATH — add it manually" # 非交互:不问
+      return 0
+    fi
     prompt="$INSTALL_DIR is not on your PATH. Add it to your shell rc file? [Y/n] "
     ans=""
     if [ -t 0 ]; then
