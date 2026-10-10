@@ -19,7 +19,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
+          - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             artifact: vibetty-linux-x64
           - target: aarch64-apple-darwin
@@ -35,6 +35,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      # Linux 用 musl 静态链接:不依赖构建机 glibc,任何 x86_64 Linux 都能跑。
+      # ring(rustls 加密后端)含 C 代码,musl 下需要 musl-gcc。
+      - name: Install musl tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
