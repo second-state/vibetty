@@ -3982,6 +3982,7 @@ dependencies = [
  "axum 0.8.8",
  "bytes",
  "clap",
+ "console",
  "crossterm 0.28.1",
  "dialoguer",
  "dirs",

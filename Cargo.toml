@@ -47,6 +47,7 @@ herdr-plugin = "0.1.8"
 tracing = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 dialoguer = "0.12.0"
+console = "0.16.6"
 
 [patch.crates-io]
 # 本地补丁:vt100 0.16.2 的 scroll_up 在「滚动区顶==屏顶」时不把滚出的行存进 scrollback,
