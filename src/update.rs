@@ -151,6 +151,9 @@ pub async fn run(tag: Option<String>) -> Result<(), String> {
             return Ok(());
         }
         std::fs::rename(&staging, &versioned).map_err(|e| e.to_string())?;
+        // 建链前先移除旧文件/旧软链:cargo install 装出的是普通文件(不是软链),
+        // 直接 symlink 会报 EEXIST「File exists」。rm 对运行中的进程是安全的。
+        let _ = std::fs::remove_file(&link);
         std::os::unix::fs::symlink(&versioned, &link).map_err(|e| e.to_string())?;
         println!(
             "Installed: {} -> {} ({binver})",
