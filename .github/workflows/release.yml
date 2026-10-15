@@ -24,6 +24,11 @@ jobs:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             artifact: vibetty-linux-x64
+          # arm64 Linux 用原生 arm runner(公共仓库免费),免交叉编译 ring 的 C 代码;
+          # 同样走 musl 静态链接。
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+            artifact: vibetty-linux-arm64
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact: vibetty-macos-arm64
@@ -38,10 +43,10 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # Linux 用 musl 静态链接:不依赖构建机 glibc,任何 x86_64 Linux 都能跑。
+      # Linux 用 musl 静态链接:不依赖构建机 glibc,任何 Linux 都能跑。
       # ring(rustls 加密后端)含 C 代码,musl 下需要 musl-gcc。
       - name: Install musl tools
-        if: matrix.target == 'x86_64-unknown-linux-musl'
+        if: endsWith(matrix.target, '-musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Build
