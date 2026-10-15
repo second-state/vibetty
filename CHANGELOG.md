@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.4.3] - 2026-10-16
+
+ANSI-only transport, self-update, aarch64 Linux builds, dialoguer setup. (中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md).)
+
+### Added
+
+- **`vibetty update [TAG]`** — self-update subcommand: downloads the matching prebuilt binary from GitHub Releases, installs it as `vibetty-<version>` and re-points the `vibetty` symlink (same mechanics as install.sh). Tag-pinned updates via `vibetty update v0.4.3-rc.1`; default installs the latest stable.
+- **aarch64 Linux builds** — new `vibetty-linux-arm64` musl artifact, built on the native `ubuntu-24.04-arm` runner. install.sh and `vibetty update` resolve it automatically.
+
+### Changed
+
+- **ANSI text is the only transport format (breaking)** — image transport (JPEG / PNG / screenshot endpoints) is removed entirely. MQTT clients receive `screen_text` frames (tag `0x00` full-screen baseline, tag `0x01` raw PTY increments); presence advertises `format = "text"`.
+- **Linux x64 builds are musl-static** — the release binary no longer depends on the build machine's glibc, fixing `GLIBC_2.38 not found` on older distros.
+- **`vibetty setup` rewritten** — the full-screen ratatui TUI is now a simple dialoguer Q&A: broker URL (prefilled), keep-alive seconds, save confirmation. A starter config skeleton is generated on first run.
+
+### Fixed
+
+- **install.sh died silently under `set -e`** — a top-level `return 0` (outside any function) in the non-interactive PATH-prompt branch aborted the script with exit 1 after a successful install, making callers (herdr build, CI) report failure.
+- **`vibetty update` symlink EEXIST** — when the existing install was a regular file (cargo install), `symlink()` failed; the old file/link is now removed first.
+
 ## [0.4.2] - 2026-10-06
 
 Zero-config built-in broker, setup UX, installer upgrade path. (中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md).)

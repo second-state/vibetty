@@ -1,5 +1,25 @@
 # 变更日志 (CHANGELOG)
 
+## [0.4.3] - 2026-10-16
+
+纯 ANSI 传输、自更新子命令、aarch64 Linux 包、dialoguer 版 setup。(English changelog: [`CHANGELOG.md`](../CHANGELOG.md)。)
+
+### 新增
+
+- **`vibetty update [TAG]`** —— 自更新子命令:从 GitHub Releases 下载对应平台的预编译二进制,装成 `vibetty-<版本>` 并把 `vibetty` 软链切过去(与 install.sh 同一套机制)。`vibetty update v0.4.3-rc.1` 可装指定版本;默认装最新稳定版。
+- **aarch64 Linux 包** —— 新增 musl 静态链接的 `vibetty-linux-arm64`,跑在原生 `ubuntu-24.04-arm` runner 上。install.sh 和 `vibetty update` 会自动识别。
+
+### 变更
+
+- **ANSI 文本是唯一传输格式(破坏性)** —— 图像传输(JPEG / PNG / 截图端点)整体移除。MQTT 客户端只收 `screen_text` 帧(首字节 `0x00` 全屏基线、`0x01` PTY 原始增量);presence 的 `format` 固定为 `"text"`。
+- **Linux x64 包改 musl 静态链接** —— 不再依赖构建机的 glibc,修掉老发行版上 `GLIBC_2.38 not found` 装不上的问题。
+- **`vibetty setup` 重写** —— 全屏 ratatui TUI 换成 dialoguer 问答流:broker URL(预填)、keep-alive 秒数、确认保存。首次运行自动生成 config 骨架。
+
+### 修复
+
+- **install.sh 在 `set -e` 下静默死亡** —— 非交互 PATH 提示分支里有个函数外的顶层 `return 0`,安装明明成功却以退出码 1 中止,调用方(herdr build、CI)会判定失败。已改为 if/else。
+- **`vibetty update` 软链 EEXIST** —— 已装的是普通文件(cargo install 装的)时 `symlink()` 会报错;建链前先移除旧文件/旧软链。
+
 ## [0.4.2] - 2026-10-06
 
 内置 broker 零配置化、setup 体验、安装脚本升级路径。(English changelog: [`CHANGELOG.md`](../CHANGELOG.md)。)
