@@ -111,6 +111,7 @@ Run-mode options:
 | `-- <command>`            | Program to run in the PTY (e.g. `-- claude`)                                                               | `$SHELL`                 |
 | `--config <PATH>`         | Override the config file path                                                                              | `~/.vibetty/config.toml` |
 | `-a, --auto-submit`       | Append Enter to `input_text` so a sent command is executed                                                 | `true`                   |
+| `--scrollback-lines <N>`  | Local scrollback for device `scroll_up`/`scroll_down` on the main screen (full-screen apps such as Claude Code get PageUp/PageDown instead) | `8096` |
 
 ## Browser debug page (served by you)
 

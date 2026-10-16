@@ -222,7 +222,8 @@ vibetty skill uninstall  --claude [--codex] Remove the run-vibetty skill
 |---|---|---|
 | `-- <command>` | Program to run in the PTY (e.g. `-- claude`, `-- codex`). | `$SHELL` |
 | `--config <PATH>` | Override the config file path. | `~/.vibetty/config.toml` |
-| `-a, --auto-submit` | Append Enter to `input_text` and execute it (also sets scrollback to 3, exposing a bit of history); turn off to only type the text with scrollback=0 (latest). | `true` |
+| `-a, --auto-submit` | Append Enter to `input_text` and execute it (also sets the scrollback *view offset* to 3 lines, exposing a bit of history; this is not the buffer size); turn off to only type the text with offset 0 (latest). | `true` |
+| `--scrollback-lines <N>` | Lines of local scrollback kept for `scroll_up`/`scroll_down` while the app is on the main screen. On the alternate screen (full-screen TUIs such as Claude Code) vt100 keeps no scrollback, so scroll requests are forwarded to the app as PageUp/PageDown instead. | `8096` |
 
 ### Screenshot rendering parameters (fixed)
 
