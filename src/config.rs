@@ -103,6 +103,11 @@ pub struct Cli {
     #[arg(short, long, default_value = "true")]
     pub auto_submit: bool,
 
+    /// Lines of local scrollback kept for the main screen (device scroll_up/scroll_down).
+    /// Full-screen apps (alternate screen, e.g. Claude Code) scroll themselves instead.
+    #[arg(long, default_value_t = 8096)]
+    pub scrollback_lines: usize,
+
     /// Command to run in the PTY (e.g. -- bash -l)
     #[arg(last = true)]
     pub command_args: Vec<String>,
@@ -160,6 +165,7 @@ impl Cli {
         RunArgs {
             bind_addr: self.bind_addr.clone(),
             auto_submit: self.auto_submit,
+            scrollback_lines: self.scrollback_lines,
             command: self.command_args.clone(),
             config: self.config.clone(),
         }
@@ -170,6 +176,7 @@ impl Cli {
 pub struct RunArgs {
     pub bind_addr: String,
     pub auto_submit: bool,
+    pub scrollback_lines: usize,
     pub command: Vec<String>,
     pub config: Option<std::path::PathBuf>,
 }

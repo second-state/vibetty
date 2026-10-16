@@ -220,7 +220,8 @@ vibetty skill uninstall  --claude [--codex] Remove the run-vibetty skill
 | `-- <command>` | Program to run in the PTY (e.g. `-- claude`, `-- codex`). **Required.** | _(required)_ |
 | `--config <PATH>` | Override the config file path. | `~/.vibetty/config.toml` |
 | `-b, --bind-addr <ADDR>` | HTTP listen address (used as the dialog default when starting HTTP). | `0.0.0.0:3000` |
-| `-a, --auto-submit` | Append Enter to `input_text` and execute it (also sets scrollback to 3, exposing a bit of history); turn off to only type the text with scrollback=0 (latest). | `true` |
+| `-a, --auto-submit` | Append Enter to `input_text` and execute it (also sets the scrollback *view offset* to 3 lines, exposing a bit of history; this is not the buffer size); turn off to only type the text with offset 0 (latest). | `true` |
+| `--scrollback-lines <N>` | Lines of local scrollback kept for `scroll_up`/`scroll_down` while the app is on the main screen. On the alternate screen (full-screen TUIs such as Claude Code) vt100 keeps no scrollback, so scroll requests are forwarded to the app as PageUp/PageDown instead. | `8096` |
 | `-q, --quality <QUALITY>` | Screen output format: `text` (default; plain ANSI text stream on `P/screen_text`, no image — see §6.5b), or `high` (JPEG q85 color), `medium` (JPEG q70 color), `low` (JPEG q50 grayscale). | `text` |
 
 ### Screenshot rendering parameters (fixed)

@@ -220,7 +220,7 @@ vibetty skill uninstall  --claude [--codex] 移除 run-vibetty skill
 | `-- <命令>` | 在 PTY 里跑的程序（如 `-- claude`、`-- codex`）。**必填**。 | _(必填)_ |
 | `--config <PATH>` | 覆盖配置文件路径。 | `~/.vibetty/config.toml` |
 | `-b, --bind-addr <ADDR>` | HTTP 监听地址（启动 HTTP 时作为对话框预填默认值）。 | `0.0.0.0:3000` |
-| `-a, --auto-submit` | 收到 `input_text` 时自动追加回车并执行（同时把 scrollback 设为 3，露出一点历史）；关掉则只输入文本、scrollback=0（最新）。 | `true` |
+| `-a, --auto-submit` | 收到 `input_text` 时自动追加回车并执行（同时把 scrollback **视图偏移**设为 3，露出一点历史；不是缓冲区大小）；关掉则只输入文本、scrollback=0（最新）。 | `true` |
 | `-q, --quality <档位>` | 屏幕输出格式:`text`(默认;在 `P/screen_text` 发纯 ANSI 文本流,不出图——见 §6.5b),或 `high`(JPEG q85 彩色)、`medium`(JPEG q70 彩色)、`low`(JPEG q50 黑白)。 | `text` |
 
 ### 截图渲染参数（固定）

@@ -145,6 +145,16 @@ fn scroll_delta(rows: u16, page_rows: u16) -> usize {
     }
 }
 
+/// 全屏 TUI(alt screen,例如 Claude Code)下的滚动按键:vt100 的 alternate grid 没有
+/// scrollback(恒为 0,本地 set_scrollback 无效),历史只在 app 自己手里。此时把滚动转成
+/// PageUp/PageDown 发给 PTY,由 app 重绘(同 herdr_runner)。主屏返回 None,走本地 scrollback。
+fn alt_screen_scroll_key(screen: &vt100::Screen, up: bool) -> Option<&'static [u8]> {
+    if !screen.alternate_screen() {
+        return None;
+    }
+    Some(if up { b"\x1b[5~" } else { b"\x1b[6~" })
+}
+
 /// 主事件循环统一的事件来源(PTY 输出 / 客户端消息 / TUI UI 事件 / 截图请求)。
 enum TerminalEvent {
     Input(crate::protocol::ClientMessage),
@@ -547,6 +557,7 @@ pub async fn run_command(
     tui: &mut crate::ui::TuiTerminal,
     ui_title: &mut String,
     auto_submit: bool,
+    scrollback_lines: usize,
 ) -> anyhow::Result<()> {
     // headless(无 TTY,例如纯 MQTT、无 WS 客户端)时 crossterm 返回 0×0 而非 Err,
     // unwrap_or 兜不住;尺寸为 0 会让 vt80 渲染时 overflow panic。拿不到有效尺寸时默认 80×24。
@@ -576,8 +587,12 @@ pub async fn run_command(
     )
     .await?;
 
-    let mut vt_parser =
-        vt100::Parser::new_with_callbacks(vt_rows, vt_cols, 8096, WindowCallbacks::new());
+    let mut vt_parser = vt100::Parser::new_with_callbacks(
+        vt_rows,
+        vt_cols,
+        scrollback_lines,
+        WindowCallbacks::new(),
+    );
 
     // 「一页」的行数:由最近一次 sync 的像素高度推算(能塞下的行数 − 1)。滚动 rows=0 时用它。
     // 还没 sync 过就用初始终端行数兜底。
@@ -998,6 +1013,11 @@ pub async fn run_command(
             }
             TerminalEvent::UIEvent(crate::ui::UIEvent::ScrollUp { rows })
             | TerminalEvent::Input(ClientMessage::ScrollUp { rows }) => {
+                if let Some(key) = alt_screen_scroll_key(vt_parser.screen(), true) {
+                    log::debug!("ScrollUp rows={rows} on alt screen -> send PageUp to PTY");
+                    terminal.send_bytes(key).await?;
+                    continue;
+                }
                 let delta = scroll_delta(rows, page_rows);
                 let before = vt_parser.screen().scrollback();
                 vt_parser
@@ -1023,6 +1043,11 @@ pub async fn run_command(
             }
             TerminalEvent::UIEvent(crate::ui::UIEvent::ScrollDown { rows })
             | TerminalEvent::Input(ClientMessage::ScrollDown { rows }) => {
+                if let Some(key) = alt_screen_scroll_key(vt_parser.screen(), false) {
+                    log::debug!("ScrollDown rows={rows} on alt screen -> send PageDown to PTY");
+                    terminal.send_bytes(key).await?;
+                    continue;
+                }
                 let delta = scroll_delta(rows, page_rows);
                 let before = vt_parser.screen().scrollback();
                 vt_parser
@@ -1165,4 +1190,32 @@ pub async fn run_command(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::alt_screen_scroll_key;
+
+    #[test]
+    fn main_screen_scrolls_locally() {
+        let p = vt100::Parser::new(30, 40, 100);
+        assert_eq!(alt_screen_scroll_key(p.screen(), true), None);
+        assert_eq!(alt_screen_scroll_key(p.screen(), false), None);
+    }
+
+    #[test]
+    fn alt_screen_forwards_page_keys() {
+        let mut p = vt100::Parser::new(30, 40, 100);
+        p.process(b"\x1b[?1049h");
+        assert_eq!(
+            alt_screen_scroll_key(p.screen(), true),
+            Some(&b"\x1b[5~"[..])
+        );
+        assert_eq!(
+            alt_screen_scroll_key(p.screen(), false),
+            Some(&b"\x1b[6~"[..])
+        );
+        p.process(b"\x1b[?1049l");
+        assert_eq!(alt_screen_scroll_key(p.screen(), true), None);
+    }
 }

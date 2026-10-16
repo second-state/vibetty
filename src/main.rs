@@ -186,6 +186,7 @@ async fn main() {
         &mut tui,
         &mut ui_title,
         args.auto_submit,
+        args.scrollback_lines,
     )
     .await
     {
