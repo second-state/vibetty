@@ -177,12 +177,14 @@ async fn main() {
         .unwrap_or_else(|| {
             ui::parse_keybinding(ui::DEFAULT_MENU_KEY).expect("default menu key parses")
         });
-    ui::spawn_event_loop(ui_tx, menu_key);
+    // 鼠标透传 gate:子进程请求鼠标模式时由 ws 循环置位,事件循环据此转发 SGR。
+    let mouse_gate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    ui::spawn_event_loop(ui_tx, menu_key, mouse_gate.clone());
 
     let mut ui_title = String::new();
     let mut ui_rx = ui_rx;
 
-    let border = args.border().unwrap_or(false);
+    let border = args.border().unwrap_or(true);
     let command = args.command;
     if let Err(e) = ws::run_command(
         command,
@@ -195,6 +197,7 @@ async fn main() {
         &mut ui_title,
         args.auto_submit,
         border,
+        mouse_gate,
     )
     .await
     {

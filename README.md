@@ -71,9 +71,9 @@ hotkey, `ctrl+shift+p` by default. Override it in the same config file:
 ```toml
 [ui]
 menu_key = "ctrl+g"   # modifiers: ctrl / shift / alt / super + a single character key
-border = false        # draw a ratatui border around the terminal (toggled from the menu too);
-                      # the border color follows the agent state and the top-right corner
-                      # shows the current status
+border = true         # draw a ratatui border around the terminal (default on; toggled from
+                      # the menu too); the border color follows the agent state and the
+                      # top-right corner shows the current status
 ```
 
 ### 3. Run

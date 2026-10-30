@@ -1,10 +1,11 @@
 use std::io;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-        KeyModifiers, KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
-        PushKeyboardEnhancementFlags,
+        self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -23,17 +24,8 @@ use tui_term::widget::PseudoTerminal;
 
 use crate::terminal::agent::AgentState;
 
-/// 鼠标滚轮每格滚动的行数(客户端的 scroll 可自带 rows;0 = 整页)。
-const MOUSE_SCROLL_ROWS: u16 = 3;
-
 pub enum UIEvent {
     Input(Vec<u8>),
-    ScrollUp {
-        rows: u16,
-    },
-    ScrollDown {
-        rows: u16,
-    },
     Resize(u16, u16),
     /// 菜单快捷键(config `[ui] menu_key`,默认 ctrl+shift+p):开关主菜单弹窗。
     /// 在事件循环拦截,不转发 PTY。
@@ -183,10 +175,11 @@ pub fn init_terminal() -> io::Result<TuiTerminal> {
     // 开 kitty 键盘协议(仅 disambiguate 位):Ctrl+Shift+字母 这类没有 legacy 编码的
     // 组合会按 CSI-u 上报,crossterm 才能解出 CONTROL|SHIFT 修饰键(供 Ctrl+Shift+P
     // 快捷键)。不支持的终端忽略该序列,只是快捷键不触发,无副作用。
+    // 不开鼠标捕捉:点击/滚轮不再上报,vibetty 不支持鼠标交互;滚轮交给宿主终端
+    // 自己滚本地 scrollback。快捷键修饰键仍靠 kitty 协议(disambiguate 位)。
     execute!(
         stdout,
         EnterAlternateScreen,
-        EnableMouseCapture,
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
     )?;
     let backend = CrosstermBackend::new(stdout);
@@ -198,10 +191,55 @@ pub fn cleanup_terminal(terminal: &mut TuiTerminal) -> io::Result<()> {
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableMouseCapture,
         PopKeyboardEnhancementFlags
     )?;
     terminal.show_cursor()
+}
+
+/// 按需开/关对宿主终端的鼠标上报(?1002 按键事件 + ?1006 SGR 编码)。
+/// 由 ws 主循环在检测到子进程 DECSET 鼠标模式时调用——只有内部程序自己要鼠标,
+/// 我们才捕获并透传;普通 shell 不请求,点击就不会有转义序列灌进 PTY。
+pub fn set_mouse_capture(on: bool) {
+    use std::io::Write;
+    let seq: &[u8] = if on {
+        b"\x1b[?1002h\x1b[?1006h"
+    } else {
+        b"\x1b[?1002l\x1b[?1006l"
+    };
+    let mut out = std::io::stdout().lock();
+    let _ = out.write_all(seq);
+    let _ = out.flush();
+}
+
+/// 把 crossterm 鼠标事件编码成 SGR (1006) 字节序列,原样转发进 PTY。
+fn encode_mouse_sgr(m: &crossterm::event::MouseEvent) -> Option<Vec<u8>> {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    let mut code = match m.kind {
+        MouseEventKind::ScrollUp => 64,
+        MouseEventKind::ScrollDown => 65,
+        MouseEventKind::Down(b) | MouseEventKind::Up(b) | MouseEventKind::Drag(b) => match b {
+            MouseButton::Left => 0,
+            MouseButton::Middle => 1,
+            MouseButton::Right => 2,
+        },
+        _ => return None, // Moved(1003 模式)等不透传
+    };
+    // 拖动 +32;修饰键 shift/alt/ctrl = +4/+8/+16(xterm 规范)。
+    let release = matches!(m.kind, MouseEventKind::Up(_));
+    if matches!(m.kind, MouseEventKind::Drag(_)) {
+        code += 32;
+    }
+    if m.modifiers.contains(KeyModifiers::SHIFT) {
+        code += 4;
+    }
+    if m.modifiers.contains(KeyModifiers::ALT) {
+        code += 8;
+    }
+    if m.modifiers.contains(KeyModifiers::CONTROL) {
+        code += 16;
+    }
+    let final_ch = if release { 'm' } else { 'M' };
+    Some(format!("\x1b[<{};{};{}{}", code, m.column + 1, m.row + 1, final_ch).into_bytes())
 }
 
 pub fn render_frame(
@@ -502,15 +540,19 @@ fn agent_status_color(state: AgentState) -> Color {
     }
 }
 
-pub fn spawn_event_loop(ui_tx: UITx, menu_key: KeyBinding) {
+pub fn spawn_event_loop(ui_tx: UITx, menu_key: KeyBinding, mouse_gate: Arc<AtomicBool>) {
     let _thread = std::thread::spawn(move || {
-        if let Err(e) = event_loop_thread(ui_tx, menu_key) {
+        if let Err(e) = event_loop_thread(ui_tx, menu_key, mouse_gate) {
             log::error!("Event loop error: {}", e);
         }
     });
 }
 
-fn event_loop_thread(tx_to_pty: UITx, menu_key: KeyBinding) -> anyhow::Result<()> {
+fn event_loop_thread(
+    tx_to_pty: UITx,
+    menu_key: KeyBinding,
+    mouse_gate: Arc<AtomicBool>,
+) -> anyhow::Result<()> {
     let timeout = Duration::from_millis(500);
     loop {
         if event::poll(timeout)? {
@@ -547,19 +589,12 @@ fn event_loop_thread(tx_to_pty: UITx, menu_key: KeyBinding) -> anyhow::Result<()
                 let bytes = s.into_bytes();
                 let _ = tx_to_pty.blocking_send(UIEvent::Input(bytes));
             } else if let Event::Mouse(mouse) = evt {
-                // 按钮(和它们的点击/悬停)已收进菜单弹窗,鼠标只保留滚轮滚动。
-                match mouse.kind {
-                    MouseEventKind::ScrollUp => {
-                        let _ = tx_to_pty.blocking_send(UIEvent::ScrollUp {
-                            rows: MOUSE_SCROLL_ROWS,
-                        });
-                    }
-                    MouseEventKind::ScrollDown => {
-                        let _ = tx_to_pty.blocking_send(UIEvent::ScrollDown {
-                            rows: MOUSE_SCROLL_ROWS,
-                        });
-                    }
-                    _ => {}
+                // 鼠标透传:只有子进程自己请求了鼠标模式(gate)才编码成 SGR 转发,
+                // 否则事件直接丢弃(终端侧的上报也已被 ws 侧关掉,这里只是兜底)。
+                if mouse_gate.load(Ordering::Relaxed)
+                    && let Some(bytes) = encode_mouse_sgr(&mouse)
+                {
+                    let _ = tx_to_pty.blocking_send(UIEvent::Input(bytes));
                 }
             } else if let Event::Resize(cols, rows) = evt {
                 let _ = tx_to_pty.blocking_send(UIEvent::Resize(cols, rows));

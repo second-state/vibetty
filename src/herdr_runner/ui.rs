@@ -1,8 +1,8 @@
 //! herdr 模式的极简 TUI:只占 herdr 分出的 1 行 pane,显示一行状态。
 //!
 //! 不渲染 PTY 内容(agent 在上方自己的 pane 里看);本地按键不转发进 PTY,
-//! 只用 `Ctrl+C` / `q` 退出 vibetty。**只监听键盘,不开 mouse capture**(不
-//! 复用 `crate::ui::init_terminal`,那个会 EnableMouseCapture)。
+//! 只用 `Ctrl+C` / `q` 退出 vibetty。**只监听键盘**(vibetty 不支持鼠标交互;
+//! 不复用 `crate::ui::init_terminal`,herdr 模式需要自己的极简终端初始化)。
 
 use std::io;
 

@@ -36,6 +36,58 @@ fn vt_size(term_size: (u16, u16), border: bool) -> (u16, u16) {
     )
 }
 
+/// 从 PTY 输出流检测子进程的鼠标模式开关(DECSET 1000/1002/1003 的 h/l)。
+/// `tail` 携带上个 chunk 的末尾 8 字节,处理序列被 chunk 边界切开的情况。
+/// 返回 Some(on) = 子进程「要不要鼠标」的状态翻转,调用方据此开关宿主侧捕获。
+fn scan_mouse_modes(mask: &mut u8, tail: &mut [u8; 8], chunk: &[u8]) -> Option<bool> {
+    let mut buf = Vec::with_capacity(tail.len() + chunk.len());
+    buf.extend_from_slice(tail);
+    buf.extend_from_slice(chunk);
+    let tracks = [
+        (b"\x1b[?1000", 0b001u8),
+        (b"\x1b[?1002", 0b010),
+        (b"\x1b[?1003", 0b100),
+    ];
+    let mut new_mask = *mask;
+    let mut seen = false;
+    for (prefix, bit) in tracks {
+        let pat_h = [prefix.as_slice(), b"h"].concat();
+        let pat_l = [prefix.as_slice(), b"l"].concat();
+        let ih = buf
+            .windows(pat_h.len())
+            .rposition(|w| w == pat_h.as_slice());
+        let il = buf
+            .windows(pat_l.len())
+            .rposition(|w| w == pat_l.as_slice());
+        let on = match (ih, il) {
+            (Some(h), Some(l)) => h > l,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => continue,
+        };
+        seen = true;
+        if on {
+            new_mask |= bit;
+        } else {
+            new_mask &= !bit;
+        }
+    }
+    // 记录本 chunk 的末尾 8 字节(最长序列 9 字节,跨界的部分最多 8 字节)。
+    if buf.len() >= 8 {
+        tail.copy_from_slice(&buf[buf.len() - 8..]);
+    } else {
+        // 短 chunk:保留最新的一部分,前置补旧尾巴(简单起见右对齐拷贝)。
+        let keep = buf.len().min(8);
+        tail.copy_within(8 - keep.., 0);
+        tail[8 - keep..].copy_from_slice(&buf[..keep]);
+    }
+    if seen && new_mask != *mask {
+        *mask = new_mask;
+        return Some(new_mask != 0);
+    }
+    None
+}
+
 type ServerTx = broadcast::Sender<ServerMessage>;
 
 type ClientRx = mpsc::Receiver<ClientMessage>;
@@ -477,6 +529,7 @@ pub async fn run_command(
     ui_title: &mut String,
     auto_submit: bool,
     mut border: bool,
+    mouse_gate: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
     // headless(无 TTY,例如纯 MQTT、无 WS 客户端)时 crossterm 返回 0×0 而非 Err,
     // unwrap_or 兜不住;尺寸为 0 会让 vt80 渲染时 overflow panic。拿不到有效尺寸时默认 80×24。
@@ -550,6 +603,10 @@ pub async fn run_command(
     // MQTT control/sync 等事件都在各自 channel 里排队,进主 loop 后处理。
     const INIT_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
     const INIT_MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+    // 子进程鼠标模式跟踪:扫描 PTY 输出里的 DECSET 1000/1002/1003,状态翻转时
+    // 开/关宿主侧鼠标捕获并置 gate(事件循环据此决定是否透传 SGR 进 PTY)。
+    let mut mouse_mask: u8 = 0;
+    let mut mouse_tail = [0u8; 8];
     let init_started = tokio::time::Instant::now();
     let mut last_pty_at = tokio::time::Instant::now();
     'init: loop {
@@ -558,6 +615,13 @@ pub async fn run_command(
         tokio::select! {
                    result = terminal.read_pty_output() => match result {
                        Ok(output) if !output.is_empty() => {
+                           if let Some(on) =
+                               scan_mouse_modes(&mut mouse_mask, &mut mouse_tail, output.as_bytes())
+                           {
+                               crate::ui::set_mouse_capture(on);
+                               mouse_gate.store(on, Ordering::Relaxed);
+                               log::info!("[mouse] child mouse mode -> {on}");
+                           }
                            vt_parser.process(output.as_bytes());
                            // title / OSC 7501 状态更新,与主 loop PtyOutput 分支一致(此阶段
                            // 不广播,状态记下来即可,等 init 结束随首帧 presence 发出)。
@@ -764,6 +828,13 @@ pub async fn run_command(
                     },
                     vt_parser.screen().scrollback(),
                 );
+                if let Some(on) =
+                    scan_mouse_modes(&mut mouse_mask, &mut mouse_tail, output.as_bytes())
+                {
+                    crate::ui::set_mouse_capture(on);
+                    mouse_gate.store(on, Ordering::Relaxed);
+                    log::info!("[mouse] child mouse mode -> {on}");
+                }
                 vt_parser.process(output.as_bytes());
 
                 // Check for title / OSC 7501 status update from callbacks
@@ -956,6 +1027,8 @@ pub async fn run_command(
                 } else if matches!(modal, ModalState::None) {
                     log::debug!("UI Input: {:?}", String::from_utf8_lossy(&bytes));
                     terminal.send_bytes(&bytes).await?;
+                } else if bytes.starts_with(b"\x1b[<") {
+                    // 模态打开时鼠标透传序列直接丢弃(路由给表单会变成乱键)。
                 } else {
                     // 模态打开:按键路由给对话框,不进 PTY。返回新 modal 后重绘。
                     modal = {
@@ -980,8 +1053,7 @@ pub async fn run_command(
                     );
                 }
             }
-            TerminalEvent::UIEvent(crate::ui::UIEvent::ScrollUp { rows })
-            | TerminalEvent::Input(ClientMessage::ScrollUp { rows }) => {
+            TerminalEvent::Input(ClientMessage::ScrollUp { rows }) => {
                 let delta = scroll_delta(rows, page_rows);
                 let before = vt_parser.screen().scrollback();
                 vt_parser
@@ -1004,8 +1076,7 @@ pub async fn run_command(
                     send_screen(&tx, screen);
                 }
             }
-            TerminalEvent::UIEvent(crate::ui::UIEvent::ScrollDown { rows })
-            | TerminalEvent::Input(ClientMessage::ScrollDown { rows }) => {
+            TerminalEvent::Input(ClientMessage::ScrollDown { rows }) => {
                 let delta = scroll_delta(rows, page_rows);
                 let before = vt_parser.screen().scrollback();
                 vt_parser
