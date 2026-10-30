@@ -142,14 +142,20 @@ async fn main() {
     }
 
     // Default: Run mode
-    let args = cli.run_args();
+    let mut args = cli.run_args();
 
-    if args.command.is_empty() {
-        eprintln!("Error: No command specified. Use -- to separate options and command.");
-        std::process::exit(1);
-    }
+    // 不带 `-- <command>` 时默认跑 $SHELL(和 tmux/herdr 一个思路);
+    // $SHELL 未设置时按平台兜底。原先直接报错退出。
+    let command = if args.command.is_empty() {
+        let fallback = if cfg!(windows) { "cmd.exe" } else { "/bin/sh" };
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| fallback.to_string());
+        log::info!("No command given, falling back to $SHELL: {shell}");
+        vec![shell]
+    } else {
+        std::mem::take(&mut args.command)
+    };
 
-    log::info!("Starting Vibetty with command: {:?}", args.command);
+    log::info!("Starting Vibetty with command: {:?}", command);
 
     let (cli_tx, cli_rx) = tokio::sync::mpsc::channel(1024);
     let (tx, rx) = tokio::sync::broadcast::channel(1024);
@@ -185,7 +191,6 @@ async fn main() {
     let mut ui_rx = ui_rx;
 
     let border = args.border().unwrap_or(true);
-    let command = args.command;
     if let Err(e) = ws::run_command(
         command,
         cli_rx,

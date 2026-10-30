@@ -83,7 +83,7 @@ vibetty -- claude        # share a `claude` session
 vibetty -- codex         # share a `codex` session
 ```
 
-You **must** pass `-- <command>`. The MQTT entry in the menu popup (`<menu_key>` / `ctrl+shift+p`) shows `conn` once it has connected and is sharing.
+Bare `vibetty` (no `-- <command>`) shares your `$SHELL`. Explicit commands are still recommended for agents (`-- claude`); the MQTT entry in the menu popup (`<menu_key>` / `ctrl+shift+p`) shows `conn` once it has connected and is sharing.
 
 To keep it running in the background without occupying a terminal:
 
@@ -107,7 +107,7 @@ Run-mode options:
 
 | Flag                      | Description                                                                                                | Default                  |
 | ------------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------ |
-| `-- <command>`            | Program to run in the PTY (e.g. `-- claude`)                                                               | _(required)_             |
+| `-- <command>`            | Program to run in the PTY (e.g. `-- claude`)                                                               | `$SHELL`                 |
 | `--config <PATH>`         | Override the config file path                                                                              | `~/.vibetty/config.toml` |
 | `-a, --auto-submit`       | Append Enter to `input_text` so a sent command is executed                                                 | `true`                   |
 

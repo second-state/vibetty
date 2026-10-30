@@ -133,7 +133,7 @@ tmux capture-pane -t vibetty -p | tail -20
 
 ## Common pitfalls
 
-- **You must pass `-- <command>`**. If omitted (just `vibetty`), the PTY has no program to run and immediately hits EOF; vibetty then exits gracefully, and the tmux session disappears within seconds — `tmux ls` reports `no server running`. This is easily mistaken for a port conflict or a startup failure; the actual cause is that the shared terminal is empty and exits at once.
+- **Always pass `-- <command>` explicitly.** Bare `vibetty` falls back to `$SHELL`, which is rarely what you want when sharing an agent; if the command you pass exits at once, the PTY hits EOF, vibetty exits gracefully, and the tmux session disappears within seconds — easily mistaken for a port conflict or a startup failure.
 - **Configure `[mqtt]` first**. Without a `[mqtt]` section, vibetty does not enable MQTT and remote devices receive nothing; run `vibetty setup` to configure the broker before starting.
 - **The HTTP server is off by default**. HTTP is for the browser front-end; when sharing only over MQTT you don't need it — toggle the `HTTP` button on demand.
 - **Log location**: vibetty writes logs to `~/.vibetty/logs/`, one file per working directory (`vibetty-<cwd-with-slashes-as-dashes>_rCURRENT.log`, append mode, with rotation). Check there when troubleshooting (both routes).

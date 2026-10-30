@@ -155,7 +155,7 @@ vibetty -- claude        # share a claude session
 vibetty -- codex         # share a codex session
 ```
 
-⚠️ **You must pass `-- <command>`**. If you just run `vibetty`, the PTY has no program to run and immediately hits EOF, so vibetty exits right away — easily mistaken for a port conflict or a startup failure.
+⚠️ If you just run `vibetty`, it falls back to your `$SHELL` (or `/bin/sh` / `cmd.exe` when unset). Pass `-- <command>` for anything else.
 
 After launch you enter a ratatui TUI: the terminal fills the whole window — there is no top bar. A **menu popup** (agent status / MQTT / Fit / Quit) is toggled with the menu hotkey (`ctrl+shift+p` by default, configurable via `[ui] menu_key`).
 
@@ -220,7 +220,7 @@ vibetty skill uninstall  --claude [--codex] Remove the run-vibetty skill
 
 | Flag | Description | Default |
 |---|---|---|
-| `-- <command>` | Program to run in the PTY (e.g. `-- claude`, `-- codex`). **Required.** | _(required)_ |
+| `-- <command>` | Program to run in the PTY (e.g. `-- claude`, `-- codex`). | `$SHELL` |
 | `--config <PATH>` | Override the config file path. | `~/.vibetty/config.toml` |
 | `-a, --auto-submit` | Append Enter to `input_text` and execute it (also sets scrollback to 3, exposing a bit of history); turn off to only type the text with scrollback=0 (latest). | `true` |
 
@@ -603,7 +603,7 @@ vibetty uses flexi_logger to write logs to the **CWD** (the directory it was sta
 No. With no `[mqtt]` section in `~/.vibetty/config.toml`, startup should produce **zero MQTT logs**, and TUI / PTY behavior is unchanged.
 
 **It exits immediately after startup / `tmux ls` reports no server running?**
-Most likely you **didn't pass `-- <command>`**. The PTY has no program to run, hits EOF immediately, and vibetty exits; the tmux session disappears within seconds. This is easily mistaken for a port conflict or a startup failure.
+Most likely the shared program exited immediately. Since bare `vibetty` now falls back to `$SHELL`, this usually means the command you passed exited at once — check your arguments and that the tmux command includes `-- <command>`.
 
 **How do I open the browser debug page?**
 vibetty no longer ships an HTTP server. Host `resources/mqtt_ws.html` with any static server (e.g. `python3 -m http.server`) and open it; it connects to the built-in broker's WS port (config `builtin_ws_port`).

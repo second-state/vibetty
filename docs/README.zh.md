@@ -81,7 +81,7 @@ vibetty -- claude        # 分享一个 `claude` 会话
 vibetty -- codex         # 分享一个 `codex` 会话
 ```
 
-**必须**带 `-- <命令>`。菜单弹窗里的 `MQTT` 条目显示 `conn` 即表示已连接、正在分享。
+裸跑 `vibetty`(不带 `-- <命令>`)默认分享你的 `$SHELL`。agent 场景仍建议显式传命令(`-- claude`);菜单弹窗里的 `MQTT` 条目显示 `conn` 即表示已连接、正在分享。
 
 让它在后台跑、不占用当前终端：
 
@@ -105,7 +105,7 @@ vibetty skill uninstall  --claude [--codex] 移除 run-vibetty skill
 
 | 参数 | 说明 | 默认值 |
 |---|---|---|
-| `-- <命令>` | 在 PTY 里跑的程序（如 `-- claude`） | _(必填)_ |
+| `-- <命令>` | 在 PTY 里跑的程序（如 `-- claude`） | `$SHELL` |
 | `--config <PATH>` | 覆盖配置文件路径 | `~/.vibetty/config.toml` |
 | `-a, --auto-submit` | 收到 `input_text` 时自动追加回车并执行 | `true` |
 
