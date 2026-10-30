@@ -120,8 +120,12 @@ pub enum Commands {
         #[arg(short = 'a', long = "auto-submit", default_value = "true")]
         auto_submit: bool,
     },
-    /// herdr share action entrypoint (not for manual use)
-    ShareHerdr,
+    /// herdr share action entrypoint (also usable manually with --target)
+    ShareHerdr {
+        /// herdr agent target id (or HERDR_PANE_ID env)
+        #[arg(long)]
+        target: Option<String>,
+    },
     /// Update vibetty to the latest release (or a specific tag)
     Update {
         /// Release tag to install (default: latest stable, prereleases excluded)

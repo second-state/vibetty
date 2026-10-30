@@ -125,8 +125,8 @@ async fn main() {
         }) => {
             return run_herdr_mode(cli.config.clone(), target, auto_submit).await;
         }
-        Some(Commands::ShareHerdr) => {
-            if let Err(e) = herdr_runner::run_share_herdr().await {
+        Some(Commands::ShareHerdr { target }) => {
+            if let Err(e) = herdr_runner::run_share_herdr(target).await {
                 log::error!("herdr share-herdr failed: {e}");
             }
             return;
