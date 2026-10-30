@@ -26,6 +26,16 @@ const TUI_COLS_PADDING: u16 = 0;
 /// Rows reserved for TUI decorations: none — 顶部按钮行和边框都已移除,终端铺满整屏。
 const TUI_ROWS_PADDING: u16 = 0;
 
+/// PTY 可用尺寸 = 窗口尺寸 − TUI 装饰。边框(菜单 Border / `[ui] border`)开启时
+/// 四周各占 1 格。初始 sizing、窗口 Resize、Fit、Border 切换四处共用。
+fn vt_size(term_size: (u16, u16), border: bool) -> (u16, u16) {
+    let extra = if border { 2 } else { 0 };
+    (
+        term_size.0.saturating_sub(TUI_COLS_PADDING + extra),
+        term_size.1.saturating_sub(TUI_ROWS_PADDING + extra),
+    )
+}
+
 type ServerTx = broadcast::Sender<ServerMessage>;
 
 type ClientRx = mpsc::Receiver<ClientMessage>;
@@ -466,6 +476,7 @@ pub async fn run_command(
     tui: &mut crate::ui::TuiTerminal,
     ui_title: &mut String,
     auto_submit: bool,
+    mut border: bool,
 ) -> anyhow::Result<()> {
     // headless(无 TTY,例如纯 MQTT、无 WS 客户端)时 crossterm 返回 0×0 而非 Err,
     // unwrap_or 兜不住;尺寸为 0 会让 vt80 渲染时 overflow panic。拿不到有效尺寸时默认 80×24。
@@ -473,8 +484,8 @@ pub async fn run_command(
         Ok((c, r)) if c > 0 && r > 0 => (c, r),
         _ => (80, 24),
     };
-    let vt_cols = cols.saturating_sub(TUI_COLS_PADDING);
-    let vt_rows = rows.saturating_sub(TUI_ROWS_PADDING);
+    log::info!("[ui] startup border={border}");
+    let (vt_cols, vt_rows) = vt_size((cols, rows), border);
 
     let process_command = command.first().unwrap().as_str();
 
@@ -513,13 +524,15 @@ pub async fn run_command(
                       mqtt_broker_on: bool,
                       mqtt_client_on: bool,
                       modal: &ModalState,
-                      agent_state: crate::terminal::agent::AgentState| {
+                      agent_state: crate::terminal::agent::AgentState,
+                      border: bool| {
         let mqtt = MqttButtonsState {
             broker_on: mqtt_broker_on,
             client_on: mqtt_client_on,
         };
         let mqtt_opt = mqtt_cfg_present.then_some(&mqtt);
-        let _ = tui.draw(|f| crate::ui::render_frame(f, screen, mqtt_opt, modal, agent_state));
+        let _ =
+            tui.draw(|f| crate::ui::render_frame(f, screen, mqtt_opt, modal, agent_state, border));
     };
 
     // presence 心跳由 ws 主循环驱动:每 PRESENCE_INTERVAL_SECS 发一次 Presence(含 title+state)。
@@ -588,7 +601,7 @@ pub async fn run_command(
                                mqtt_broker_on,
                                mqtt_client.is_some(),
                                &modal,
-        agent_state,
+        agent_state, border,
                            );
                        }
                        Ok(_) => break 'init, // 空 = PTY EOF(子进程秒退),交给主 loop 处理退出。
@@ -606,7 +619,17 @@ pub async fn run_command(
                }
     }
     // 初始化完成(或达上限):发第一帧 screen + 上线 presence,然后进入主 loop。
+    // 本地首帧:init 循环里的 redraw 只在 PTY 有输出时执行,沉默的子进程(零输出)会
+    // 一帧都不画(本地窗口全空)。这里补一次,保证进主循环前本地至少画过一帧。
     let screen = Arc::new(vt_parser.screen().clone());
+    redraw(
+        &screen,
+        mqtt_broker_on,
+        mqtt_client.is_some(),
+        &modal,
+        agent_state,
+        border,
+    );
     send_screen(&tx, screen);
     let _ = tx.send(ServerMessage::Presence {
         title: ui_title.clone(),
@@ -648,6 +671,7 @@ pub async fn run_command(
                 mqtt_client.is_some(),
                 &modal,
                 agent_state,
+                border,
             );
         }
         // 每轮 copy 最新 send_deadline(Option<Instant> 是 Copy),让下面去抖 async 分支按最新
@@ -814,6 +838,7 @@ pub async fn run_command(
                     mqtt_client.is_some(),
                     &modal,
                     agent_state,
+                    border,
                 );
                 if resize_settle_until.is_some() {
                     // resize 后的重绘 burst:吸收,不转发 delta / 不入队去抖;vt300 已把输出吃进
@@ -854,6 +879,7 @@ pub async fn run_command(
                     mqtt_client.is_some(),
                     &modal,
                     agent_state,
+                    border,
                 );
             }
             TerminalEvent::UIEvent(crate::ui::UIEvent::Input(bytes)) => {
@@ -881,11 +907,25 @@ pub async fn run_command(
                                         modal = mqtt_panel_modal(cfg);
                                     }
                                 }
+                                MenuFocus::Border => {
+                                    border = !border;
+                                    if let Err(e) = crate::setup::save_ui_border(border, None) {
+                                        log::warn!("[ui] save border to config failed: {e}");
+                                    }
+                                    log::info!("[ui] border -> {border}");
+                                    // 边框占四周各 1 格:PTY 尺寸随之调整,进入 settle 吸收重绘。
+                                    let (vt_cols, vt_rows) = vt_size(term_size, border);
+                                    vt_parser.screen_mut().set_size(vt_rows, vt_cols);
+                                    let _ = terminal.resize(vt_rows, vt_cols);
+                                    resize_settle_until =
+                                        Some(tokio::time::Instant::now() + RESIZE_SETTLE);
+                                    pending_screen = None;
+                                    send_deadline = None;
+                                }
                                 MenuFocus::Fit => {
                                     // 把终端尺寸重置成当前 TUI 窗口(适配本地;撤销 ESP32
                                     // sync 改的小屏)。
-                                    let vt_cols = term_size.0.saturating_sub(TUI_COLS_PADDING);
-                                    let vt_rows = term_size.1.saturating_sub(TUI_ROWS_PADDING);
+                                    let (vt_cols, vt_rows) = vt_size(term_size, border);
                                     vt_parser.screen_mut().set_size(vt_rows, vt_cols);
                                     let _ = terminal.resize(vt_rows, vt_cols);
                                     log::info!("Fit: resize terminal to {vt_cols}x{vt_rows}");
@@ -911,6 +951,7 @@ pub async fn run_command(
                         mqtt_client.is_some(),
                         &modal,
                         agent_state,
+                        border,
                     );
                 } else if matches!(modal, ModalState::None) {
                     log::debug!("UI Input: {:?}", String::from_utf8_lossy(&bytes));
@@ -935,6 +976,7 @@ pub async fn run_command(
                         mqtt_client.is_some(),
                         &modal,
                         agent_state,
+                        border,
                     );
                 }
             }
@@ -954,6 +996,7 @@ pub async fn run_command(
                     mqtt_client.is_some(),
                     &modal,
                     agent_state,
+                    border,
                 );
 
                 // scroll 已到边界、scrollback 没变 → 屏幕内容无变化,不重发图。
@@ -977,6 +1020,7 @@ pub async fn run_command(
                     mqtt_client.is_some(),
                     &modal,
                     agent_state,
+                    border,
                 );
 
                 // scroll 已到边界、scrollback 没变 → 屏幕内容无变化,不重发图。
@@ -987,8 +1031,8 @@ pub async fn run_command(
             TerminalEvent::UIEvent(crate::ui::UIEvent::Resize(cols, rows)) => {
                 log::debug!("Resize: cols={}, rows={}", cols, rows);
                 term_size = (cols, rows);
-                let vt_cols = cols.saturating_sub(TUI_COLS_PADDING);
-                let vt_rows = rows.saturating_sub(TUI_ROWS_PADDING);
+                log::info!("[ui] startup border={border}");
+                let (vt_cols, vt_rows) = vt_size((cols, rows), border);
                 vt_parser.screen_mut().set_size(vt_rows, vt_cols);
                 let _ = terminal.resize(vt_rows, vt_cols);
                 let screen = Arc::new(vt_parser.screen().clone());
@@ -998,6 +1042,7 @@ pub async fn run_command(
                     mqtt_client.is_some(),
                     &modal,
                     agent_state,
+                    border,
                 );
                 // resize 触发 PTY 重绘 burst:进入 settle 吸收,等 500ms 静默后发全屏。
                 resize_settle_until = Some(tokio::time::Instant::now() + RESIZE_SETTLE);
@@ -1056,6 +1101,7 @@ pub async fn run_command(
                     mqtt_client.is_some(),
                     &modal,
                     agent_state,
+                    border,
                 );
                 if close {
                     // close=true:客户端暂停(不看),不发屏;清掉在途去抖/settle。

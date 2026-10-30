@@ -70,6 +70,8 @@ broker = "mqtt://user:pass@broker.example.com:1883"   # mqtts:// 走 TLS
 ```toml
 [ui]
 menu_key = "ctrl+g"   # 修饰键 ctrl / shift / alt / super + 单个字符键
+border = false        # 终端四周画 ratatui 边框(菜单里也可切换);边框颜色跟随 agent
+                      # 工作状态,右上角显示当前状态
 ```
 
 ### 3. 运行

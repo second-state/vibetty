@@ -141,3 +141,29 @@ pub fn run_setup(config: Option<std::path::PathBuf>) -> anyhow::Result<()> {
 
     Ok(())
 }
+
+/// 把 `[ui] border` 写回 config.toml(菜单里切换边框时持久化)。
+/// 与 `save_mqtt` 同思路:读整份 toml::Table,只合并 `ui.border` 一个键,
+/// 保留 `menu_key` 和其它段不动。
+pub(crate) fn save_ui_border(
+    border: bool,
+    override_path: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    let path =
+        config_path(override_path).ok_or_else(|| anyhow::anyhow!("Cannot find home directory"))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut table: toml::Table = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| toml::from_str(&s).ok())
+        .unwrap_or_default();
+    let ui = table
+        .entry("ui")
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    if let Some(ui_table) = ui.as_table_mut() {
+        ui_table.insert("border".to_string(), toml::Value::Boolean(border));
+    }
+    std::fs::write(&path, toml::to_string_pretty(&table)?)?;
+    Ok(())
+}

@@ -114,6 +114,7 @@ impl MqttFocus {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MenuFocus {
     Mqtt,
+    Border,
     Fit,
     Quit,
 }
@@ -122,7 +123,8 @@ impl MenuFocus {
     /// 下一项(↓/Tab):循环。`has_mqtt=false` 时跳过 Mqtt 条目(未配 [mqtt] 不可用)。
     pub(crate) fn next(self, has_mqtt: bool) -> Self {
         let mut f = match self {
-            MenuFocus::Mqtt => MenuFocus::Fit,
+            MenuFocus::Mqtt => MenuFocus::Border,
+            MenuFocus::Border => MenuFocus::Fit,
             MenuFocus::Fit => MenuFocus::Quit,
             MenuFocus::Quit => MenuFocus::Mqtt,
         };
@@ -136,7 +138,8 @@ impl MenuFocus {
     pub(crate) fn prev(self, has_mqtt: bool) -> Self {
         let mut f = match self {
             MenuFocus::Mqtt => MenuFocus::Quit,
-            MenuFocus::Fit => MenuFocus::Mqtt,
+            MenuFocus::Border => MenuFocus::Mqtt,
+            MenuFocus::Fit => MenuFocus::Border,
             MenuFocus::Quit => MenuFocus::Fit,
         };
         if !has_mqtt && f == MenuFocus::Mqtt {
@@ -207,19 +210,37 @@ pub fn render_frame(
     mqtt: Option<&MqttButtonsState>,
     modal: &ModalState,
     agent_state: AgentState,
+    border: bool,
 ) {
     let size = f.area();
 
-    // 顶部按钮行和边框都已移除,终端铺满整屏;HTTP/MQTT/Fit/Quit/agent 状态全部
-    // 收进 Ctrl+Shift+P 的菜单弹窗(见下方 Menu 分支)。
+    // 默认无边框,终端铺满整屏;所有控制入口在快捷键呼出的菜单弹窗里(见下方)。
+    // 菜单 Border 条目(config `[ui] border`)可打开 ratatui 全边框:边框颜色跟随 agent
+    // 工作状态,右上角 title 显示 `● <状态>`。PTY 尺寸由 ws 侧随 border 开关同步 resize。
     {
         let (term_rows, term_cols) = screen.size();
-        // 终端屏幕有固定的 cols×rows,可能小于整屏(如 ESP32 sync 把 PTY resize 成小屏后,
-        // 本地窗口仍很大)。按屏幕尺寸居中;屏幕大于窗口时铺满并裁切。
         // 先 Clear 整屏:居中的终端只重绘自己的 rect,不清的话其余区域会残留上一帧
         // (更宽时的)旧内容,滚动时尤其明显,看着像重复行。
         f.render_widget(Clear, size);
-        let area = centered_rect(size, term_cols, term_rows);
+        let mut content = size;
+        if border {
+            let color = agent_status_color(agent_state);
+            let block = Block::new()
+                .borders(Borders::ALL)
+                .border_style(Style::new().fg(color))
+                .title(
+                    Line::from(vec![
+                        Span::styled("● ", Style::new().fg(color)),
+                        Span::raw(agent_status_label(agent_state)),
+                    ])
+                    .alignment(Alignment::Right),
+                );
+            content = block.inner(size);
+            f.render_widget(block, size);
+        }
+        // 终端屏幕有固定的 cols×rows,可能小于可用区(如 ESP32 sync 把 PTY resize 成小屏后,
+        // 本地窗口仍很大)。按屏幕尺寸在可用区内居中;屏幕大于可用区时铺满并裁切。
+        let area = centered_rect(content, term_cols, term_rows);
         let pseudo_term = PseudoTerminal::new(screen);
         f.render_widget(pseudo_term, area);
     }
@@ -227,7 +248,7 @@ pub fn render_frame(
     // 模态对话框(菜单 / 输入地址 / MQTT 面板 / 错误),覆盖在终端之上。
     if !matches!(modal, ModalState::None) {
         let (w, h) = match modal {
-            ModalState::Menu { .. } => (40, 7),
+            ModalState::Menu { .. } => (40, 8),
             ModalState::MqttPanel { .. } => (48, 16),
             _ => (48, 9),
         };
@@ -267,7 +288,7 @@ pub fn render_frame(
         };
         match modal {
             ModalState::Menu { focus } => {
-                // 4 行:agent 状态(纯显示)+ MQTT / Fit / Quit 三个条目。
+                // 5 行:agent 状态(纯显示)+ MQTT / Border / Fit / Quit 四个条目。
                 let has_mqtt = mqtt.is_some();
                 let rows = Layout::default()
                     .direction(Direction::Vertical)
@@ -276,16 +297,11 @@ pub fn render_frame(
                         Constraint::Length(1),
                         Constraint::Length(1),
                         Constraint::Length(1),
+                        Constraint::Length(1),
                     ])
                     .split(panes[0]);
                 // 第一行:OSC 7501 agent 状态(彩色圆点 + 状态名,不可聚焦)。
-                let color = match agent_state {
-                    AgentState::Working => Color::Cyan,
-                    AgentState::Waiting => Color::Yellow,
-                    AgentState::Idle => Color::Gray,
-                    AgentState::Done => Color::Green,
-                    AgentState::Error => Color::Red,
-                };
+                let color = agent_status_color(agent_state);
                 f.render_widget(
                     Paragraph::new(Line::from(vec![
                         Span::styled("● ", Style::new().fg(color)),
@@ -294,10 +310,14 @@ pub fn render_frame(
                     rows[0],
                 );
                 // 条目行:选中项高亮(LightBlue 底,与 MqttPanel 聚焦行同款)。
-                let items: [(MenuFocus, String); 3] = [
+                let items: [(MenuFocus, String); 4] = [
                     (
                         MenuFocus::Mqtt,
                         mqtt.map_or_else(|| "MQTT (not configured)".to_string(), mqtt_button_label),
+                    ),
+                    (
+                        MenuFocus::Border,
+                        format!("Border: {}", if border { "on" } else { "off" }),
                     ),
                     (MenuFocus::Fit, "Fit".to_string()),
                     (MenuFocus::Quit, "Quit".to_string()),
@@ -467,6 +487,18 @@ fn agent_status_label(state: AgentState) -> &'static str {
         AgentState::Idle => "idle",
         AgentState::Done => "done",
         AgentState::Error => "error",
+    }
+}
+
+/// agent 状态对应的语义色(working=青 / waiting=黄 / idle=灰 / done=绿 / error=红)。
+/// 菜单状态行圆点和可选边框(Border 开启时整个边框)共用。
+fn agent_status_color(state: AgentState) -> Color {
+    match state {
+        AgentState::Working => Color::Cyan,
+        AgentState::Waiting => Color::Yellow,
+        AgentState::Idle => Color::Gray,
+        AgentState::Done => Color::Green,
+        AgentState::Error => Color::Red,
     }
 }
 

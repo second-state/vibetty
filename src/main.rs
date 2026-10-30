@@ -182,6 +182,7 @@ async fn main() {
     let mut ui_title = String::new();
     let mut ui_rx = ui_rx;
 
+    let border = args.border().unwrap_or(false);
     let command = args.command;
     if let Err(e) = ws::run_command(
         command,
@@ -193,6 +194,7 @@ async fn main() {
         &mut tui,
         &mut ui_title,
         args.auto_submit,
+        border,
     )
     .await
     {

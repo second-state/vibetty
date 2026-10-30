@@ -181,6 +181,11 @@ impl RunArgs {
     pub fn menu_key(&self) -> Option<String> {
         read_menu_key(self.config.as_deref())
     }
+
+    /// 读取可选的 `[ui] border`(终端 ratatui 边框,默认关)。
+    pub fn border(&self) -> Option<bool> {
+        read_border(self.config.as_deref())
+    }
 }
 
 /// 读取可选的 `[mqtt]` 配置。
@@ -203,20 +208,34 @@ pub fn read_mqtt_config(config_path: Option<&std::path::Path>) -> Option<MqttCon
 /// 读取可选的 `[ui] menu_key`(TUI 菜单弹窗快捷键,如 "ctrl+shift+p")。
 /// 未配置 → None(调用方用默认值);解析交给 `ui::parse_keybinding`。
 pub fn read_menu_key(config_path: Option<&std::path::Path>) -> Option<String> {
+    read_ui(config_path).and_then(|ui| ui.menu_key)
+}
+
+/// 读取可选的 `[ui] border`(TUI 终端边框,默认关)。
+pub fn read_border(config_path: Option<&std::path::Path>) -> Option<bool> {
+    read_ui(config_path).and_then(|ui| ui.border)
+}
+
+/// 读取 `[ui]` 段(无文件 / 无段 → None)。
+fn read_ui(config_path: Option<&std::path::Path>) -> Option<UiKeys> {
     #[derive(serde::Deserialize)]
     struct UiSection {
         #[serde(default)]
         ui: Option<UiKeys>,
-    }
-    #[derive(serde::Deserialize)]
-    struct UiKeys {
-        #[serde(default)]
-        menu_key: Option<String>,
     }
     let path = match config_path {
         Some(p) => p.to_path_buf(),
         None => dirs::home_dir()?.join(".vibetty").join("config.toml"),
     };
     let content = std::fs::read_to_string(&path).ok()?;
-    toml::from_str::<UiSection>(&content).ok()?.ui?.menu_key
+    toml::from_str::<UiSection>(&content).ok()?.ui
+}
+
+/// `[ui]` 段的可配置项(菜单快捷键、终端边框开关)。
+#[derive(serde::Deserialize)]
+struct UiKeys {
+    #[serde(default)]
+    menu_key: Option<String>,
+    #[serde(default)]
+    border: Option<bool>,
 }
