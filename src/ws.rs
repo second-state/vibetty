@@ -44,6 +44,8 @@ struct WindowCallbacks {
     /// 最近一条 OSC 7501(Program Status Protocol)上报;解析失败的不落 here。
     status: Option<ProgramStatus>,
     update_status: bool,
+    /// 同一条上报的原始 body(解析成功时与 status 成对记录),供透传给宿主终端。
+    passthrough_body: Option<Vec<u8>>,
     /// 收到 `7501;?` 特性探测:置 flag,由主循环往 PTY 输入侧写应答
     /// (回调拿不到 PTY writer)。claude 等实现先探测、得到应答才开始上报。
     status_query: bool,
@@ -56,6 +58,7 @@ impl WindowCallbacks {
             update_title: false,
             status: None,
             update_status: false,
+            passthrough_body: None,
             status_query: false,
         }
     }
@@ -79,6 +82,7 @@ impl Callbacks for WindowCallbacks {
                 if let Some(status) = parse_osc7501(body) {
                     self.status = Some(status);
                     self.update_status = true;
+                    self.passthrough_body = Some(body.to_vec());
                 }
             }
             None => {} // 裸 `7501` 无 body:既非探测也非报告,忽略
@@ -89,6 +93,20 @@ impl Callbacks for WindowCallbacks {
 fn send_screen(tx: &ServerTx, screen: Arc<vt100::Screen>) {
     // 广播整张屏幕;MQTT 桥编码为全屏 ANSI 基线帧发到 screen_text。
     let _ = tx.send(ServerMessage::Screen(screen));
+}
+
+/// 把一条 OSC 7501 报告原样写给本进程的 stdout,让**包裹 vibetty 的宿主终端**
+/// (iTerm2 3.7.5+ / Ghostty / herdr)也能感知 agent 状态、tab 随之翻转。
+/// body 用解析成功的那份原始字节(不换算 blocked→waiting,细分留给宿主);
+/// 只透传报告、不透传 `7501;?` 探测——探测由 vibetty 自己应答,宿主的应答若进来
+/// 反而会灌进 crossterm 输入流变成垃圾按键。宿主不支持时按协议静默忽略,无副作用。
+fn passthrough_osc7501(body: &[u8]) {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    let _ = out.write_all(b"\x1b]7501;");
+    let _ = out.write_all(body);
+    let _ = out.write_all(b"\x1b\\");
+    let _ = out.flush();
 }
 
 /// 把屏幕渲染成带 ANSI 转义的「可重放」字节流(`-q text` 模式):直接用 vt300 的
@@ -689,8 +707,15 @@ pub async fn run_command(
                             cb.update_title = false;
                             *ui_title = cb.title.clone();
                         }
-                        if cb.update_status && let Some(status) = cb.status.take() {
-                            agent_state = status.state;
+                        if cb.update_status {
+                            cb.update_status = false;
+                            // 启动期也透传(此阶段不广播 MQTT,但宿主终端可以开始跟状态)。
+                            if let Some(raw) = cb.passthrough_body.take() {
+                                passthrough_osc7501(&raw);
+                            }
+                            if let Some(status) = cb.status.take() {
+                                agent_state = status.state;
+                            }
                         }
                         if cb.status_query {
                             cb.status_query = false;
@@ -892,6 +917,11 @@ pub async fn run_command(
                     // OSC 7501 状态翻转 → 立即重发 presence(含新 title+state)。
                     if cb.update_status {
                         cb.update_status = false;
+                        // 透传给宿主终端(iTerm2/Ghostty/herdr):每条合法报告都转,
+                        // 同状态但 msg/progress 变化的报告宿主也能刷新。
+                        if let Some(raw) = cb.passthrough_body.take() {
+                            passthrough_osc7501(&raw);
+                        }
                         if let Some(status) = cb.status.take()
                             && status.state != agent_state
                         {

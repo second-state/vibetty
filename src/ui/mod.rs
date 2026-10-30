@@ -496,7 +496,8 @@ pub(crate) fn quit_button_rect(frame_area: Rect, label: &str) -> Rect {
     let want = label.chars().count() as u16 + 2; // +2:左右各留白 1 格(灰底填充,无边框)
     let width = want.min(button_row.width);
     // 右侧也内缩 1 格(-1),与左侧对称(见 http_button_rect)。
-    let x = button_row.x + button_row.width - 1 - width;
+    // saturating:终端还没拿到尺寸时(0×0,如刚 fork 的 pty)width-1 会下溢 panic。
+    let x = (button_row.x + button_row.width).saturating_sub(width + 1);
     Rect::new(x, button_row.y, width, button_row.height)
 }
 
