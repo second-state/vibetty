@@ -718,6 +718,12 @@ pub async fn run_command(
     const RESIZE_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
     let mut resize_settle_until: Option<tokio::time::Instant> = None;
 
+    // SIGTERM:系统服务/herdr 之类会直接 kill 进程。默认处置是立刻死,cleanup_terminal
+    // (退 alt screen / raw mode / 鼠标上报)全都没机会跑,终端会被留花。接进主循环,
+    // 走和菜单 Quit 一样的优雅收尾。
+    #[cfg(unix)]
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+
     loop {
         // 内置 broker 可能在后台悄悄退出(端口被占 bind 失败、panic 等)。broker 线程退出时
         // 会把 alive AtomicBool 置 false,这里每轮检测:一旦发现挂了就把按钮状态改回 off + 重绘,
@@ -747,6 +753,17 @@ pub async fn run_command(
         // 控制消息在下一段 PTY 之前先处理掉。PTY 是流量大头,排在控制之后不会饿死(控制是稀疏的)。
         let event = tokio::select! {
             biased;
+            _ = async {
+                #[cfg(unix)]
+                {
+                    sigterm.recv().await;
+                }
+                #[cfg(not(unix))]
+                std::future::pending::<()>().await;
+            } => {
+                log::info!("[ws] SIGTERM received, shutting down gracefully");
+                break;
+            }
             msg = rx.recv() => match msg {
                 Some(input) => TerminalEvent::Input(input),
                 None => TerminalEvent::InputClosed,
@@ -1213,6 +1230,13 @@ pub async fn run_command(
                 break;
             }
         }
+    }
+
+    // 优雅退出也必须杀掉子进程:它握着 PTY slave,reader 线程的 master 克隆永远
+    // EOF 不了,tokio runtime 会等 spawn_blocking 任务,进程就挂在退不出去。
+    // (菜单 Quit 此前「看起来能退」只是因为 0x03 恰好把子进程打死了。)
+    if let Err(e) = terminal.kill().await {
+        log::warn!("[{}] kill child on shutdown: {e}", terminal.session_id());
     }
 
     Ok(())

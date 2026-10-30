@@ -188,6 +188,9 @@ pub fn init_terminal() -> io::Result<TuiTerminal> {
 
 pub fn cleanup_terminal(terminal: &mut TuiTerminal) -> io::Result<()> {
     disable_raw_mode()?;
+    // 鼠标上报若因子进程请求而开着,退出前必须关掉——否则宿主终端继续上报鼠标,
+    // 退出后的 shell 一点击就是一串转义乱码。关序列重复发无害。
+    set_mouse_capture(false);
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
