@@ -20,6 +20,8 @@ use tokio::sync::mpsc;
 use tokio::time::Duration;
 use tui_term::widget::PseudoTerminal;
 
+use crate::terminal::agent::AgentState;
+
 /// 鼠标滚轮每格滚动的行数(客户端的 scroll 可自带 rows;0 = 整页)。
 const MOUSE_SCROLL_ROWS: u16 = 3;
 
@@ -158,6 +160,7 @@ pub fn render_frame(
     mqtt: Option<&MqttButtonsState>,
     modal: &ModalState,
     hover: HoveredBtn,
+    agent_state: AgentState,
     title_tail: Option<&str>,
 ) {
     let size = f.area();
@@ -219,6 +222,9 @@ pub fn render_frame(
             "Quit",
             hover == HoveredBtn::Quit,
         );
+        // 状态显示块(OSC 7501):Quit 左侧。纯显示——不参与悬停/点击命中
+        // (button_row_at 只认 *_button_rect,悬停划过它不会有高亮)。
+        render_agent_status(f, status_rect(f.area(), agent_state), agent_state);
     }
 
     // 模态对话框(输入地址 / 显示错误),覆盖在终端之上。
@@ -497,6 +503,42 @@ pub(crate) fn quit_button_rect(frame_area: Rect, label: &str) -> Rect {
 /// 点击/悬停坐标是否落在 `r` 内。
 pub(crate) fn hit_test(col: u16, row: u16, r: Rect) -> bool {
     col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
+}
+
+/// 「agent 状态」显示块的 label(Osc 7501 状态名,与 presence 的 state 字串一致)。
+fn agent_status_label(state: AgentState) -> &'static str {
+    match state {
+        AgentState::Working => "working",
+        AgentState::Waiting => "waiting",
+        AgentState::Idle => "idle",
+        AgentState::Done => "done",
+        AgentState::Error => "error",
+    }
+}
+
+/// Quit 左侧「agent 状态」显示块的 Rect(宽度随状态名变化,与 Quit 间隔 1 格)。
+/// 纯显示块,**不**参与点击/悬停命中(那套只走 *_button_rect)。
+fn status_rect(frame_area: Rect, state: AgentState) -> Rect {
+    let quit = quit_button_rect(frame_area, "Quit");
+    let width = agent_status_label(state).chars().count() as u16 + 2; // +2:左右留白 1 格
+    Rect::new(quit.x.saturating_sub(width + 1), quit.y, width, quit.height)
+}
+
+/// 渲染 agent 状态显示块:彩色圆点 + 状态名。颜色按状态语义区分
+/// (working=青 / waiting=黄 / idle=灰 / done=绿 / error=红)。
+fn render_agent_status(f: &mut Frame, area: Rect, state: AgentState) {
+    let color = match state {
+        AgentState::Working => Color::Cyan,
+        AgentState::Waiting => Color::Yellow,
+        AgentState::Idle => Color::Gray,
+        AgentState::Done => Color::Green,
+        AgentState::Error => Color::Red,
+    };
+    let line = Line::from(vec![
+        Span::styled("● ", Style::new().fg(color)),
+        Span::raw(agent_status_label(state)),
+    ]);
+    f.render_widget(Paragraph::new(line), area);
 }
 
 /// (col, row) 当前悬停在顶部按钮行的哪个按钮上(`None` = 不在任何按钮上)。与点击同源:

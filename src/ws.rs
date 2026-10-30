@@ -12,6 +12,7 @@ use crate::broker;
 use crate::config::MqttConfig;
 use crate::mqtt;
 use crate::protocol::{ClientMessage, ServerMessage};
+use crate::terminal::agent::{OSC7501_PROBE_REPLY, ProgramStatus, parse_osc7501};
 use crate::ui::{
     HoveredBtn, HttpBtnState, ModalState, MqttButtonsState, MqttFocus, button_label, button_row_at,
     fit_button_rect, hit_test, http_button_rect, mqtt_button_label, mqtt_button_rect,
@@ -40,6 +41,12 @@ type ClientRx = mpsc::Receiver<ClientMessage>;
 struct WindowCallbacks {
     title: String,
     update_title: bool,
+    /// 最近一条 OSC 7501(Program Status Protocol)上报;解析失败的不落 here。
+    status: Option<ProgramStatus>,
+    update_status: bool,
+    /// 收到 `7501;?` 特性探测:置 flag,由主循环往 PTY 输入侧写应答
+    /// (回调拿不到 PTY writer)。claude 等实现先探测、得到应答才开始上报。
+    status_query: bool,
 }
 
 impl WindowCallbacks {
@@ -47,6 +54,9 @@ impl WindowCallbacks {
         Self {
             title: String::new(),
             update_title: false,
+            status: None,
+            update_status: false,
+            status_query: false,
         }
     }
 }
@@ -55,6 +65,24 @@ impl Callbacks for WindowCallbacks {
     fn set_window_title(&mut self, _: &mut vt100::Screen, title: &[u8]) {
         self.title = std::str::from_utf8(title).unwrap().to_string();
         self.update_title = true;
+    }
+
+    fn unhandled_osc(&mut self, _: &mut vt100::Screen, params: &[&[u8]]) {
+        // OSC 7501:params = ["7501", body](';' 分割)。
+        if params.first() != Some(&b"7501".as_slice()) {
+            return;
+        }
+        match params.get(1).map(|b| &b[..]) {
+            // 特性探测 `7501;?`:置 flag,应答由主循环写(见 OSC7501_PROBE_REPLY)。
+            Some(b"?") => self.status_query = true,
+            Some(body) => {
+                if let Some(status) = parse_osc7501(body) {
+                    self.status = Some(status);
+                    self.update_status = true;
+                }
+            }
+            None => {} // 裸 `7501` 无 body:既非探测也非报告,忽略
+        }
     }
 }
 
@@ -559,7 +587,8 @@ pub async fn run_command(
 
     let process_command = command.first().unwrap().as_str();
 
-    let mut agent_type = crate::terminal::agent::AgentType::new(process_command);
+    // agent 状态:唯一来源是 OSC 7501 上报;程序不发就停在初始 Working。
+    let mut agent_state = crate::terminal::agent::AgentState::Working;
 
     let mut terminal = crate::terminal::pty::new_with_command(
         process_command,
@@ -606,14 +635,25 @@ pub async fn run_command(
                       mqtt_broker_on: bool,
                       mqtt_client_on: bool,
                       modal: &ModalState,
-                      hover: HoveredBtn| {
+                      hover: HoveredBtn,
+                      agent_state: crate::terminal::agent::AgentState| {
         let mqtt = MqttButtonsState {
             broker_on: mqtt_broker_on,
             client_on: mqtt_client_on,
         };
         let mqtt_opt = mqtt_cfg_present.then_some(&mqtt);
         let _ = tui.draw(|f| {
-            crate::ui::render_frame(f, screen, title, http, mqtt_opt, modal, hover, None)
+            crate::ui::render_frame(
+                f,
+                screen,
+                title,
+                http,
+                mqtt_opt,
+                modal,
+                hover,
+                agent_state,
+                None,
+            )
         });
     };
 
@@ -623,8 +663,8 @@ pub async fn run_command(
         tokio::time::interval(std::time::Duration::from_secs(mqtt::PRESENCE_INTERVAL_SECS));
 
     // ── 启动初始化去抖 ──────────────────────────────────────────────
-    // agent 刚启动时 PTY 狂输出(初始化 UI、motd、prompt 绘制…),而初始 title 往往让
-    // agent 被判 Waiting(见 agent.rs),主 loop 的 is_waiting 旁路会让每次输出都广播
+    // agent 刚启动时 PTY 狂输出(初始化 UI、motd、prompt 绘制…),若此时 OSC 7501
+    // 已把状态翻成 Waiting,主 loop 的 is_waiting 旁路会让每次输出都广播
     // 一整张 screen JPEG → MQTT 流量爆发。这里在进主 loop 前先等 PTY 输出静默满
     // INIT_SETTLE(500ms),稳定后只发一帧 screen + 一次 presence(上线);之后再进主
     // loop,实时性不变(waiting 仍即时发、working 5s 一帧)。静默迟迟达不到时最多等
@@ -641,14 +681,30 @@ pub async fn run_command(
             result = terminal.read_pty_output() => match result {
                 Ok(output) if !output.is_empty() => {
                     vt_parser.process(output.as_bytes());
-                    // title / agent 状态更新,与主 loop PtyOutput 分支一致。
+                    // title / OSC 7501 状态更新,与主 loop PtyOutput 分支一致(此阶段
+                    // 不广播,状态记下来即可,等 init 结束随首帧 presence 发出)。
                     {
                         let cb = vt_parser.callbacks_mut();
                         if cb.update_title {
                             cb.update_title = false;
-                            let new_title = cb.title.clone();
-                            agent_type.update_by_title(&new_title);
-                            *ui_title = new_title;
+                            *ui_title = cb.title.clone();
+                        }
+                        if cb.update_status && let Some(status) = cb.status.take() {
+                            agent_state = status.state;
+                        }
+                        if cb.status_query {
+                            cb.status_query = false;
+                            // agent 启动期间的探测也要答,否则它判定"终端不支持"从此不上报。
+                            match terminal.send_bytes(OSC7501_PROBE_REPLY).await {
+                                Ok(()) => log::info!(
+                                    "[{}] replied OSC 7501 capability probe",
+                                    terminal.session_id()
+                                ),
+                                Err(e) => log::warn!(
+                                    "[{}] OSC 7501 probe reply failed: {e}",
+                                    terminal.session_id()
+                                ),
+                            }
                         }
                     }
                     last_pty_at = tokio::time::Instant::now();
@@ -663,6 +719,7 @@ pub async fn run_command(
                         mqtt_client.is_some(),
                         &modal,
                         hover,
+                        agent_state,
                     );
                 }
                 Ok(_) => break 'init, // 空 = PTY EOF(子进程秒退),交给主 loop 处理退出。
@@ -684,7 +741,7 @@ pub async fn run_command(
     send_screen(&tx, screen);
     let _ = tx.send(ServerMessage::Presence {
         title: ui_title.clone(),
-        state: agent_type.state(),
+        state: agent_state,
     });
     log::info!(
         "[{}] init settled after {}ms, sent first screen + presence",
@@ -724,6 +781,7 @@ pub async fn run_command(
                 mqtt_client.is_some(),
                 &modal,
                 hover,
+                agent_state,
             );
         }
         // 每轮 copy 最新 send_deadline(Option<Instant> 是 Copy),让下面去抖 async 分支按最新
@@ -757,7 +815,7 @@ pub async fn run_command(
                 // presence 心跳(上线/状态):定期由 ws 触发,含当前 title + agent 状态。
                 let _ = tx.send(ServerMessage::Presence {
                     title: ui_title.clone(),
-                    state: agent_type.state(),
+                    state: agent_state,
                 });
                 continue;
             },
@@ -818,29 +876,57 @@ pub async fn run_command(
                 );
                 vt_parser.process(output.as_bytes());
 
-                // Check for title update from callbacks
+                // Check for title / OSC 7501 status update from callbacks
                 let mut became_waiting = false;
                 {
                     let cb = vt_parser.callbacks_mut();
                     if cb.update_title {
                         cb.update_title = false;
-                        let new_title = cb.title.clone();
-                        let state_changed = agent_type.update_by_title(&new_title);
-                        *ui_title = new_title;
+                        *ui_title = cb.title.clone();
                         log::debug!(
                             "[{}] Window title updated: {}",
                             terminal.session_id(),
                             ui_title
                         );
-                        // 状态翻转(codex/claude working↔waiting)→ 立即重发 presence(含新 title+state)。
-                        if state_changed {
+                    }
+                    // OSC 7501 状态翻转 → 立即重发 presence(含新 title+state)。
+                    if cb.update_status {
+                        cb.update_status = false;
+                        if let Some(status) = cb.status.take()
+                            && status.state != agent_state
+                        {
+                            agent_state = status.state;
+                            log::info!(
+                                "[{}] agent status → {agent_state:?} (app={:?}, kind={:?}, \
+                                 progress={:?}, msg={:?})",
+                                terminal.session_id(),
+                                status.app,
+                                status.kind,
+                                status.progress,
+                                status.msg
+                            );
                             let _ = tx.send(ServerMessage::Presence {
                                 title: ui_title.clone(),
-                                state: agent_type.state(),
+                                state: agent_state,
                             });
                             // 翻转到 waiting:agent 在等用户操作,把滚动拉回最新(scrollback=0),
                             // 免得用户停在历史区看漏新提示。cb 正借用 vt_parser,先标记、出块再改 screen。
-                            became_waiting = agent_type.state().is_waiting();
+                            became_waiting = agent_state.is_waiting();
+                        }
+                    }
+                    // 探测应答:标记后出 cb 块再写 PTY(回调拿不到 writer)。
+                    if cb.status_query {
+                        cb.status_query = false;
+                        if let Err(e) = terminal.send_bytes(OSC7501_PROBE_REPLY).await {
+                            log::warn!(
+                                "[{}] OSC 7501 probe reply failed: {e}",
+                                terminal.session_id()
+                            );
+                        } else {
+                            log::info!(
+                                "[{}] replied OSC 7501 capability probe",
+                                terminal.session_id()
+                            );
                         }
                     }
                 }
@@ -859,6 +945,7 @@ pub async fn run_command(
                     mqtt_client.is_some(),
                     &modal,
                     hover,
+                    agent_state,
                 );
                 if resize_settle_until.is_some() {
                     // resize 后的重绘 burst:吸收,不转发 delta / 不入队去抖;vt300 已把输出吃进
@@ -899,6 +986,7 @@ pub async fn run_command(
                         mqtt_client.is_some(),
                         &modal,
                         hover,
+                        agent_state,
                     );
                 }
             }
@@ -937,6 +1025,7 @@ pub async fn run_command(
                                 mqtt_client.is_some(),
                                 &modal,
                                 hover,
+                                agent_state,
                             );
                         }
                         ClickOutcome::FitSize => {
@@ -955,6 +1044,7 @@ pub async fn run_command(
                                 mqtt_client.is_some(),
                                 &modal,
                                 hover,
+                                agent_state,
                             );
                             // resize 触发 PTY 重绘 burst:进入 settle 吸收,等 500ms 静默后发全屏。
                             resize_settle_until = Some(tokio::time::Instant::now() + RESIZE_SETTLE);
@@ -992,6 +1082,7 @@ pub async fn run_command(
                             mqtt_client.is_some(),
                             &modal,
                             hover,
+                            agent_state,
                         );
                     }
                 }
@@ -1014,6 +1105,7 @@ pub async fn run_command(
                     mqtt_client.is_some(),
                     &modal,
                     hover,
+                    agent_state,
                 );
 
                 // scroll 已到边界、scrollback 没变 → 屏幕内容无变化,不重发图。
@@ -1039,6 +1131,7 @@ pub async fn run_command(
                     mqtt_client.is_some(),
                     &modal,
                     hover,
+                    agent_state,
                 );
 
                 // scroll 已到边界、scrollback 没变 → 屏幕内容无变化,不重发图。
@@ -1062,6 +1155,7 @@ pub async fn run_command(
                     mqtt_client.is_some(),
                     &modal,
                     hover,
+                    agent_state,
                 );
                 // resize 触发 PTY 重绘 burst:进入 settle 吸收,等 500ms 静默后发全屏。
                 resize_settle_until = Some(tokio::time::Instant::now() + RESIZE_SETTLE);
@@ -1122,6 +1216,7 @@ pub async fn run_command(
                     mqtt_client.is_some(),
                     &modal,
                     hover,
+                    agent_state,
                 );
                 if close {
                     // close=true:客户端暂停(不看),不发屏;清掉在途去抖/settle。
