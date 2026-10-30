@@ -1,9 +1,6 @@
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use axum::{Router, routing::get};
-use ratatui::layout::Rect;
 use tokio::sync::{broadcast, mpsc};
 use tui_input::InputRequest;
 use vt100::Callbacks;
@@ -13,11 +10,7 @@ use crate::config::MqttConfig;
 use crate::mqtt;
 use crate::protocol::{ClientMessage, ServerMessage};
 use crate::terminal::agent::{OSC7501_PROBE_REPLY, ProgramStatus, parse_osc7501};
-use crate::ui::{
-    HoveredBtn, HttpBtnState, ModalState, MqttButtonsState, MqttFocus, button_label, button_row_at,
-    fit_button_rect, hit_test, http_button_rect, mqtt_button_label, mqtt_button_rect,
-    quit_button_rect,
-};
+use crate::ui::{MenuFocus, ModalState, MqttButtonsState, MqttFocus};
 
 /// 客户端 Sync 在 `pixels=true` 时发的是【设备像素】,按此 cell 尺寸换算成 PTY 列数
 /// (8×18 = 经典终端 cell 比例,历史约定)。
@@ -30,9 +23,8 @@ pub(crate) const SCREEN_PADDING: u32 = 16;
 /// Columns reserved for TUI decorations: the terminal pane has no left/right borders
 /// (only top + bottom), so nothing is reserved horizontally.
 const TUI_COLS_PADDING: u16 = 0;
-/// Rows reserved for TUI decorations: top button row (1) + the terminal pane's top border
-/// (1 row; no bottom border). (Header 标题块已移除。)
-const TUI_ROWS_PADDING: u16 = 2;
+/// Rows reserved for TUI decorations: none — 顶部按钮行和边框都已移除,终端铺满整屏。
+const TUI_ROWS_PADDING: u16 = 0;
 
 type ServerTx = broadcast::Sender<ServerMessage>;
 
@@ -116,29 +108,6 @@ pub(crate) fn render_screen_to_text(screen: &vt100::Screen) -> String {
     String::from_utf8_lossy(&screen.contents_formatted()).into_owned()
 }
 
-/// 构造 HTTP 路由:/mqtt_ws 调试页。
-fn build_router() -> Router {
-    Router::new().route("/mqtt_ws", get(crate::static_page::mqtt_ws_handler))
-}
-
-/// 按指定绑定地址(如 `0.0.0.0:3000`、`127.0.0.1:8080`)后台启动 HTTP server,
-/// 返回实际绑定的 `host:port`。失败(地址占用/无权限/格式非法等)返回 Err。
-async fn start_http(bind: &str) -> anyhow::Result<String> {
-    let listener = tokio::net::TcpListener::bind(bind).await?;
-    let bound = listener.local_addr()?.to_string();
-    let app = build_router();
-    tokio::spawn(async move {
-        let serve = axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<SocketAddr>(),
-        );
-        if let Err(e) = serve.await {
-            log::error!("[http] server error: {e}");
-        }
-    });
-    Ok(bound)
-}
-
 /// 解析两个端口(须 > 0)。TCP 端口写回 broker URL(端口现在是 URL 的一部分),
 /// WS 端口留在 `builtin_ws_port`;有变化则把整段 `[mqtt]` 写回 `~/.vibetty/config.toml`,
 /// 并同步更新内存里的 `mqtt_cfg`(后续 client (重)spawn 的 `for_client()` 用得到——
@@ -200,14 +169,18 @@ enum TerminalEvent {
     Error,
 }
 
-/// 点击顶部按钮的结果:退出程序 / 打开对话框 / 重置终端尺寸 / 无命中。
-/// `Modal` 装箱:另几个变体无数据,装箱避免整个枚举撑到 ModalState 的大小
-/// (clippy::large_enum_variant);该值每次点击产生后立即消费,一次分配可忽略。
-enum ClickOutcome {
-    Quit,
-    Modal(Box<ModalState>),
-    FitSize,
-    None,
+/// 按当前 `[mqtt]` 配置构造 MqttPanel 模态(输入框预填)。菜单和 Ctrl+Shift+P 共用,
+/// 保证两条路径看到的面板一致。
+fn mqtt_panel_modal(cfg: &MqttConfig) -> ModalState {
+    ModalState::MqttPanel {
+        // TCP 输入框预填 broker URL 的端口(端口是 URL 的一部分)。
+        tcp: tui_input::Input::new(cfg.builtin_port().to_string()),
+        ws: tui_input::Input::new(cfg.builtin_ws_port.to_string()),
+        // 预填生效 URL(见 MqttConfig::for_client):填了 broker 就用配置值,
+        // 没填 + 内置 broker 才默认本地。
+        url: tui_input::Input::new(cfg.for_client().broker),
+        focus: MqttFocus::Tcp,
+    }
 }
 
 /// MqttPanel 操作需要的可变状态(改端口/URL 写 config、起停 broker/client)。
@@ -280,46 +253,6 @@ fn autostart_mqtt(
     log::info!("[mqtt] client auto-started");
     let client = Some(mqtt::spawn(cfg.for_client(), cli_tx.clone(), tx.clone()).0);
     (broker_on, client, broker_alive)
-}
-
-/// 处理 HTTP 端口输入框的按键:Enter 按地址起 server、Esc 取消、其余编辑输入。
-async fn handle_port_input(
-    mut input: tui_input::Input,
-    bytes: &[u8],
-    http: &mut HttpBtnState,
-) -> ModalState {
-    // Enter:尝试按输入地址起 HTTP server。
-    if bytes == b"\r" || bytes == b"\n" {
-        let bind = input.value().trim().to_string();
-        if bind.is_empty() {
-            return ModalState::Error("invalid address".to_string());
-        }
-        return match start_http(&bind).await {
-            Ok(addr) => {
-                log::info!("[http] started on {addr}");
-                *http = HttpBtnState::On(addr);
-                ModalState::None
-            }
-            Err(e) => {
-                log::warn!("[http] start failed: {e}");
-                ModalState::Error(format!("listen failed: {e}"))
-            }
-        };
-    }
-    if bytes == b"\x1b" {
-        return ModalState::None; // Esc 取消
-    }
-    // 地址可含字母/数字/.:[];导航/Home/End/Backspace 通用。
-    let req = parse_input_request(
-        bytes,
-        |c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b':' | b'[' | b']'),
-        input.value().len(),
-        45,
-    );
-    if let Some(req) = req {
-        input.handle(req);
-    }
-    ModalState::PortInput { input }
 }
 
 /// 把面板表单重新打包(保留输入字段、更新聚焦项)。
@@ -506,14 +439,8 @@ async fn handle_mqtt_panel(
 }
 
 /// 处理模态打开时的按键:按对话框类型路由。返回新的 modal 状态。
-async fn handle_modal_input(
-    modal: ModalState,
-    bytes: &[u8],
-    http: &mut HttpBtnState,
-    mqtt: &mut MqttCtx<'_>,
-) -> ModalState {
+async fn handle_modal_input(modal: ModalState, bytes: &[u8], mqtt: &mut MqttCtx<'_>) -> ModalState {
     match modal {
-        ModalState::PortInput { input } => handle_port_input(input, bytes, http).await,
         ModalState::MqttPanel {
             tcp,
             ws,
@@ -521,64 +448,11 @@ async fn handle_modal_input(
             focus,
         } => handle_mqtt_panel(tcp, ws, url, focus, bytes, mqtt).await,
         ModalState::Error(_) => ModalState::None, // 任意键关闭
+        // Menu 的按键在 run_command 主循环就地处理(Enter 动作需要 terminal/tx 等状态),
+        // 理论上不会路由到这里;兜底原样返回。
+        ModalState::Menu { .. } => modal,
         ModalState::None => ModalState::None,
     }
-}
-
-/// footer 点击命中检测:Quit(右)/ HTTP(off 态,左)/ MQTT(配了 [mqtt] 才显示)。
-/// 命中按钮分别返回退出、打开对应对话框;无命中返回 None。
-fn handle_click(
-    col: u16,
-    row: u16,
-    term_size: (u16, u16),
-    http: &HttpBtnState,
-    default_bind: &str,
-    mqtt_cfg: Option<&MqttConfig>,
-    mqtt: MqttButtonsState,
-) -> ClickOutcome {
-    let area = Rect::new(0, 0, term_size.0, term_size.1);
-    // 退出按钮(右):发 0x03 + 退出循环,等同 Ctrl+C。
-    let quit = quit_button_rect(area, "Quit");
-    if hit_test(col, row, quit) {
-        return ClickOutcome::Quit;
-    }
-    // HTTP 按钮(左,off 态):打开地址输入框。
-    if matches!(http, HttpBtnState::Off) {
-        let btn = http_button_rect(area, "HTTP off");
-        if hit_test(col, row, btn) {
-            return ClickOutcome::Modal(Box::new(ModalState::PortInput {
-                input: tui_input::Input::new(default_bind.to_string()),
-            }));
-        }
-    }
-    // MQTT 按钮(HTTP 右边):只要配了 [mqtt] 就开控制面板(起停都在面板里,不看 off 态)。
-    if let Some(cfg) = mqtt_cfg {
-        let hl = button_label("HTTP", http);
-        let mlabel = mqtt_button_label(&mqtt);
-        let mbtn = mqtt_button_rect(area, &hl, &mlabel);
-        if hit_test(col, row, mbtn) {
-            return ClickOutcome::Modal(Box::new(ModalState::MqttPanel {
-                // TCP 输入框预填 broker URL 的端口(端口是 URL 的一部分)。
-                tcp: tui_input::Input::new(cfg.builtin_port().to_string()),
-                ws: tui_input::Input::new(cfg.builtin_ws_port.to_string()),
-                // 预填生效 URL(见 MqttConfig::for_client):填了 broker 就用配置值,
-                // 没填 + 内置 broker 才默认本地。
-                url: tui_input::Input::new(cfg.for_client().broker),
-                focus: MqttFocus::Tcp,
-            }));
-        }
-    }
-    // Fit 按钮(MQTT 右边或 HTTP 右边):把终端尺寸重置成当前窗口。
-    let http_label = button_label("HTTP", http);
-    let mqtt_label = mqtt_cfg.map(|_| mqtt_button_label(&mqtt));
-    if hit_test(
-        col,
-        row,
-        fit_button_rect(area, &http_label, mqtt_label.as_deref()),
-    ) {
-        return ClickOutcome::FitSize;
-    }
-    ClickOutcome::None
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -588,7 +462,6 @@ pub async fn run_command(
     ui_rx: &mut mpsc::Receiver<crate::ui::UIEvent>,
     tx: ServerTx,
     cli_tx: mpsc::Sender<ClientMessage>,
-    default_bind: String,
     mut mqtt_cfg: Option<MqttConfig>,
     tui: &mut crate::ui::TuiTerminal,
     ui_title: &mut String,
@@ -611,14 +484,7 @@ pub async fn run_command(
     let mut terminal = crate::terminal::pty::new_with_command(
         process_command,
         &command[1..],
-        &[(
-            "VIBETTY_PORT".to_string(),
-            default_bind
-                .rsplit_once(':')
-                .map(|(_, p)| p)
-                .unwrap_or("0")
-                .to_string(),
-        )],
+        &[],
         (vt_rows, vt_cols),
     )
     .await?;
@@ -630,8 +496,7 @@ pub async fn run_command(
     // 还没 sync 过就用初始终端行数兜底。
     let mut page_rows: u16 = vt_rows;
 
-    // footer HTTP 按钮状态 + 对话框状态;启动时都 off。
-    let mut http = HttpBtnState::Off;
+    // 对话框状态。
     let mut modal = ModalState::None;
     // 终端整体尺寸(单元格),用于点击命中检测;随 Resize 更新。
     let mut term_size: (u16, u16) = (cols, rows);
@@ -643,36 +508,18 @@ pub async fn run_command(
     // footer MQTT 按钮:只要配了 [mqtt] 就显示(不再绑 builtin_broker)。
     let mqtt_cfg_present = mqtt_cfg.is_some();
 
-    // footer 按钮悬停态。HoveredBtn 是 Copy,直接当参数传进 redraw,比捕获个 Cell 直白。
-    let mut hover = HoveredBtn::None;
-
-    // 统一重绘:画 screen/title + 按钮状态 + 对话框 + 悬停高亮。`tui` 仅由此闭包借用。
+    // 统一重绘:画整屏终端 + 菜单/对话框。`tui` 仅由此闭包借用。
     let mut redraw = |screen: &vt100::Screen,
-                      title: &str,
-                      http: &HttpBtnState,
                       mqtt_broker_on: bool,
                       mqtt_client_on: bool,
                       modal: &ModalState,
-                      hover: HoveredBtn,
                       agent_state: crate::terminal::agent::AgentState| {
         let mqtt = MqttButtonsState {
             broker_on: mqtt_broker_on,
             client_on: mqtt_client_on,
         };
         let mqtt_opt = mqtt_cfg_present.then_some(&mqtt);
-        let _ = tui.draw(|f| {
-            crate::ui::render_frame(
-                f,
-                screen,
-                title,
-                http,
-                mqtt_opt,
-                modal,
-                hover,
-                agent_state,
-                None,
-            )
-        });
+        let _ = tui.draw(|f| crate::ui::render_frame(f, screen, mqtt_opt, modal, agent_state));
     };
 
     // presence 心跳由 ws 主循环驱动:每 PRESENCE_INTERVAL_SECS 发一次 Presence(含 title+state)。
@@ -696,70 +543,67 @@ pub async fn run_command(
         let settle_deadline = last_pty_at + INIT_SETTLE;
         let max_deadline = init_started + INIT_MAX_WAIT;
         tokio::select! {
-            result = terminal.read_pty_output() => match result {
-                Ok(output) if !output.is_empty() => {
-                    vt_parser.process(output.as_bytes());
-                    // title / OSC 7501 状态更新,与主 loop PtyOutput 分支一致(此阶段
-                    // 不广播,状态记下来即可,等 init 结束随首帧 presence 发出)。
-                    {
-                        let cb = vt_parser.callbacks_mut();
-                        if cb.update_title {
-                            cb.update_title = false;
-                            *ui_title = cb.title.clone();
-                        }
-                        if cb.update_status {
-                            cb.update_status = false;
-                            // 启动期也透传(此阶段不广播 MQTT,但宿主终端可以开始跟状态)。
-                            if let Some(raw) = cb.passthrough_body.take() {
-                                passthrough_osc7501(&raw);
-                            }
-                            if let Some(status) = cb.status.take() {
-                                agent_state = status.state;
-                            }
-                        }
-                        if cb.status_query {
-                            cb.status_query = false;
-                            // agent 启动期间的探测也要答,否则它判定"终端不支持"从此不上报。
-                            match terminal.send_bytes(OSC7501_PROBE_REPLY).await {
-                                Ok(()) => log::info!(
-                                    "[{}] replied OSC 7501 capability probe",
-                                    terminal.session_id()
-                                ),
-                                Err(e) => log::warn!(
-                                    "[{}] OSC 7501 probe reply failed: {e}",
-                                    terminal.session_id()
-                                ),
-                            }
-                        }
-                    }
-                    last_pty_at = tokio::time::Instant::now();
-                    // 本地 TUI redraw(让本地用户看到启动过程);**不**广播 screen/presence,
-                    // MQTT 在此期间保持安静。
-                    let screen = Arc::new(vt_parser.screen().clone());
-                    redraw(
-                        &screen,
-                        ui_title,
-                        &http,
-                        mqtt_broker_on,
-                        mqtt_client.is_some(),
-                        &modal,
-                        hover,
-                        agent_state,
-                    );
-                }
-                Ok(_) => break 'init, // 空 = PTY EOF(子进程秒退),交给主 loop 处理退出。
-                Err(e) => {
-                    log::error!(
-                        "[{}] init PTY read error: {:?}",
-                        terminal.session_id(),
-                        e
-                    );
-                    break 'init;
-                }
-            },
-            _ = tokio::time::sleep_until(settle_deadline) => break 'init, // 静默满 500ms → settled
-            _ = tokio::time::sleep_until(max_deadline) => break 'init,     // 上限保护
-        }
+                   result = terminal.read_pty_output() => match result {
+                       Ok(output) if !output.is_empty() => {
+                           vt_parser.process(output.as_bytes());
+                           // title / OSC 7501 状态更新,与主 loop PtyOutput 分支一致(此阶段
+                           // 不广播,状态记下来即可,等 init 结束随首帧 presence 发出)。
+                           {
+                               let cb = vt_parser.callbacks_mut();
+                               if cb.update_title {
+                                   cb.update_title = false;
+                                   *ui_title = cb.title.clone();
+                               }
+                               if cb.update_status {
+                                   cb.update_status = false;
+                                   // 启动期也透传(此阶段不广播 MQTT,但宿主终端可以开始跟状态)。
+                                   if let Some(raw) = cb.passthrough_body.take() {
+                                       passthrough_osc7501(&raw);
+                                   }
+                                   if let Some(status) = cb.status.take() {
+                                       agent_state = status.state;
+                                   }
+                               }
+                               if cb.status_query {
+                                   cb.status_query = false;
+                                   // agent 启动期间的探测也要答,否则它判定"终端不支持"从此不上报。
+                                   match terminal.send_bytes(OSC7501_PROBE_REPLY).await {
+                                       Ok(()) => log::info!(
+                                           "[{}] replied OSC 7501 capability probe",
+                                           terminal.session_id()
+                                       ),
+                                       Err(e) => log::warn!(
+                                           "[{}] OSC 7501 probe reply failed: {e}",
+                                           terminal.session_id()
+                                       ),
+                                   }
+                               }
+                           }
+                           last_pty_at = tokio::time::Instant::now();
+                           // 本地 TUI redraw(让本地用户看到启动过程);**不**广播 screen/presence,
+                           // MQTT 在此期间保持安静。
+                           let screen = Arc::new(vt_parser.screen().clone());
+                           redraw(
+                               &screen,
+                               mqtt_broker_on,
+                               mqtt_client.is_some(),
+                               &modal,
+        agent_state,
+                           );
+                       }
+                       Ok(_) => break 'init, // 空 = PTY EOF(子进程秒退),交给主 loop 处理退出。
+                       Err(e) => {
+                           log::error!(
+                               "[{}] init PTY read error: {:?}",
+                               terminal.session_id(),
+                               e
+                           );
+                           break 'init;
+                       }
+                   },
+                   _ = tokio::time::sleep_until(settle_deadline) => break 'init, // 静默满 500ms → settled
+                   _ = tokio::time::sleep_until(max_deadline) => break 'init,     // 上限保护
+               }
     }
     // 初始化完成(或达上限):发第一帧 screen + 上线 presence,然后进入主 loop。
     let screen = Arc::new(vt_parser.screen().clone());
@@ -800,12 +644,9 @@ pub async fn run_command(
             let screen = Arc::new(vt_parser.screen().clone());
             redraw(
                 &screen,
-                ui_title,
-                &http,
                 mqtt_broker_on,
                 mqtt_client.is_some(),
                 &modal,
-                hover,
                 agent_state,
             );
         }
@@ -969,12 +810,9 @@ pub async fn run_command(
                 // 根本不碰 screen;只有 jpeg 入队 pending 时才需要拥有,见下)。
                 redraw(
                     vt_parser.screen(),
-                    ui_title,
-                    &http,
                     mqtt_broker_on,
                     mqtt_client.is_some(),
                     &modal,
-                    hover,
                     agent_state,
                 );
                 if resize_settle_until.is_some() {
@@ -989,8 +827,92 @@ pub async fn run_command(
                 }
             }
 
+            TerminalEvent::UIEvent(crate::ui::UIEvent::ToggleMenu) => {
+                // 菜单快捷键:开关主菜单弹窗。其它模态(MqttPanel/Error)打开时不响应。
+                log::debug!(
+                    "[ws] ToggleMenu received (modal_open={}, mqtt_cfg={})",
+                    !matches!(modal, ModalState::None),
+                    mqtt_cfg.is_some()
+                );
+                match &modal {
+                    ModalState::None => {
+                        modal = ModalState::Menu {
+                            focus: if mqtt_cfg.is_some() {
+                                MenuFocus::Mqtt
+                            } else {
+                                MenuFocus::Fit
+                            },
+                        };
+                    }
+                    ModalState::Menu { .. } => modal = ModalState::None,
+                    _ => {}
+                }
+                let screen = Arc::new(vt_parser.screen().clone());
+                redraw(
+                    &screen,
+                    mqtt_broker_on,
+                    mqtt_client.is_some(),
+                    &modal,
+                    agent_state,
+                );
+            }
             TerminalEvent::UIEvent(crate::ui::UIEvent::Input(bytes)) => {
-                if matches!(modal, ModalState::None) {
+                // 菜单弹窗的按键在主循环就地处理(Enter 的动作要发 PTY/起停资源,
+                // handle_modal_input 拿不到这些)。Esc/导航改 focus。
+                if let ModalState::Menu { focus } = modal {
+                    let has_mqtt = mqtt_cfg.is_some();
+                    match bytes.as_slice() {
+                        b"\x1b" => modal = ModalState::None, // Esc 关闭
+                        b"\x1b[A" => {
+                            modal = ModalState::Menu {
+                                focus: focus.prev(has_mqtt),
+                            }
+                        }
+                        b"\x1b[B" | b"\t" | b"\x1b[Z" => {
+                            modal = ModalState::Menu {
+                                focus: focus.next(has_mqtt),
+                            }
+                        }
+                        b"\r" => {
+                            // Enter 执行聚焦项;动作需要的可变状态在这里现场借。
+                            match focus {
+                                MenuFocus::Mqtt => {
+                                    if let Some(cfg) = mqtt_cfg.as_ref() {
+                                        modal = mqtt_panel_modal(cfg);
+                                    }
+                                }
+                                MenuFocus::Fit => {
+                                    // 把终端尺寸重置成当前 TUI 窗口(适配本地;撤销 ESP32
+                                    // sync 改的小屏)。
+                                    let vt_cols = term_size.0.saturating_sub(TUI_COLS_PADDING);
+                                    let vt_rows = term_size.1.saturating_sub(TUI_ROWS_PADDING);
+                                    vt_parser.screen_mut().set_size(vt_rows, vt_cols);
+                                    let _ = terminal.resize(vt_rows, vt_cols);
+                                    log::info!("Fit: resize terminal to {vt_cols}x{vt_rows}");
+                                    // resize 触发 PTY 重绘 burst:进入 settle 吸收。
+                                    resize_settle_until =
+                                        Some(tokio::time::Instant::now() + RESIZE_SETTLE);
+                                    pending_screen = None;
+                                    send_deadline = None;
+                                }
+                                MenuFocus::Quit => {
+                                    log::info!("Quit selected in menu, sending Ctrl+C (0x03)");
+                                    terminal.send_bytes(&[0x03]).await?;
+                                    break;
+                                }
+                            }
+                        }
+                        _ => {} // 其它按键不进 PTY,忽略
+                    }
+                    let screen = Arc::new(vt_parser.screen().clone());
+                    redraw(
+                        &screen,
+                        mqtt_broker_on,
+                        mqtt_client.is_some(),
+                        &modal,
+                        agent_state,
+                    );
+                } else if matches!(modal, ModalState::None) {
                     log::debug!("UI Input: {:?}", String::from_utf8_lossy(&bytes));
                     terminal.send_bytes(&bytes).await?;
                 } else {
@@ -1004,117 +926,16 @@ pub async fn run_command(
                             cli_tx: &cli_tx,
                             tx: &tx,
                         };
-                        handle_modal_input(std::mem::take(&mut modal), &bytes, &mut http, &mut mqtt)
-                            .await
+                        handle_modal_input(std::mem::take(&mut modal), &bytes, &mut mqtt).await
                     };
                     let screen = Arc::new(vt_parser.screen().clone());
                     redraw(
                         &screen,
-                        ui_title,
-                        &http,
                         mqtt_broker_on,
                         mqtt_client.is_some(),
                         &modal,
-                        hover,
                         agent_state,
                     );
-                }
-            }
-            TerminalEvent::UIEvent(crate::ui::UIEvent::Click { col, row }) => {
-                // 模态打开时忽略点击。
-                if matches!(modal, ModalState::None) {
-                    let mqtt_state = MqttButtonsState {
-                        broker_on: mqtt_broker_on,
-                        client_on: mqtt_client.is_some(),
-                    };
-                    match handle_click(
-                        col,
-                        row,
-                        term_size,
-                        &http,
-                        &default_bind,
-                        mqtt_cfg.as_ref(),
-                        mqtt_state,
-                    ) {
-                        ClickOutcome::Quit => {
-                            log::info!("Quit button clicked, sending Ctrl+C (0x03)");
-                            terminal.send_bytes(&[0x03]).await?;
-                            break;
-                        }
-                        ClickOutcome::Modal(m) => {
-                            // 打开模态时清悬停态:模态期间 Hover 分支被挡不更新,
-                            // 清掉可避免关闭模态后残留上次的高亮。
-                            hover = HoveredBtn::None;
-                            modal = *m;
-                            let screen = Arc::new(vt_parser.screen().clone());
-                            redraw(
-                                &screen,
-                                ui_title,
-                                &http,
-                                mqtt_broker_on,
-                                mqtt_client.is_some(),
-                                &modal,
-                                hover,
-                                agent_state,
-                            );
-                        }
-                        ClickOutcome::FitSize => {
-                            // 把终端尺寸重置成当前 TUI 窗口(适配本地;撤销 ESP32 sync 改的小屏)。
-                            let vt_cols = term_size.0.saturating_sub(TUI_COLS_PADDING);
-                            let vt_rows = term_size.1.saturating_sub(TUI_ROWS_PADDING);
-                            vt_parser.screen_mut().set_size(vt_rows, vt_cols);
-                            let _ = terminal.resize(vt_rows, vt_cols);
-                            log::info!("Fit: resize terminal to {vt_cols}x{vt_rows}");
-                            let screen = Arc::new(vt_parser.screen().clone());
-                            redraw(
-                                &screen,
-                                ui_title,
-                                &http,
-                                mqtt_broker_on,
-                                mqtt_client.is_some(),
-                                &modal,
-                                hover,
-                                agent_state,
-                            );
-                            // resize 触发 PTY 重绘 burst:进入 settle 吸收,等 500ms 静默后发全屏。
-                            resize_settle_until = Some(tokio::time::Instant::now() + RESIZE_SETTLE);
-                            pending_screen = None;
-                            send_deadline = None;
-                        }
-                        ClickOutcome::None => {}
-                    }
-                }
-            }
-            TerminalEvent::UIEvent(crate::ui::UIEvent::Hover { col, row }) => {
-                // 模态打开时忽略悬停(footer 被遮)。且只在悬停按钮「变化」时才重绘——
-                // ?1003h 会对光标划过的每个单元格都报一次 Moved,在终端区/同一按钮内移动时
-                // 悬停态不变,这里直接跳过,避免刷屏。
-                if matches!(modal, ModalState::None) {
-                    let mqtt_state = MqttButtonsState {
-                        broker_on: mqtt_broker_on,
-                        client_on: mqtt_client.is_some(),
-                    };
-                    let now = button_row_at(
-                        col,
-                        row,
-                        Rect::new(0, 0, term_size.0, term_size.1),
-                        &http,
-                        mqtt_cfg_present.then_some(&mqtt_state),
-                    );
-                    if now != hover {
-                        hover = now;
-                        let screen = Arc::new(vt_parser.screen().clone());
-                        redraw(
-                            &screen,
-                            ui_title,
-                            &http,
-                            mqtt_broker_on,
-                            mqtt_client.is_some(),
-                            &modal,
-                            hover,
-                            agent_state,
-                        );
-                    }
                 }
             }
             TerminalEvent::UIEvent(crate::ui::UIEvent::ScrollUp { rows })
@@ -1129,12 +950,9 @@ pub async fn run_command(
                 let screen = Arc::new(vt_parser.screen().clone());
                 redraw(
                     &screen,
-                    ui_title,
-                    &http,
                     mqtt_broker_on,
                     mqtt_client.is_some(),
                     &modal,
-                    hover,
                     agent_state,
                 );
 
@@ -1155,12 +973,9 @@ pub async fn run_command(
                 let screen = Arc::new(vt_parser.screen().clone());
                 redraw(
                     &screen,
-                    ui_title,
-                    &http,
                     mqtt_broker_on,
                     mqtt_client.is_some(),
                     &modal,
-                    hover,
                     agent_state,
                 );
 
@@ -1179,12 +994,9 @@ pub async fn run_command(
                 let screen = Arc::new(vt_parser.screen().clone());
                 redraw(
                     &screen,
-                    ui_title,
-                    &http,
                     mqtt_broker_on,
                     mqtt_client.is_some(),
                     &modal,
-                    hover,
                     agent_state,
                 );
                 // resize 触发 PTY 重绘 burst:进入 settle 吸收,等 500ms 静默后发全屏。
@@ -1240,12 +1052,9 @@ pub async fn run_command(
                 // 立即重绘本地 TUI,否则要等下一次 PTY 输出才看得到 resize/居中效果。
                 redraw(
                     &screen,
-                    ui_title,
-                    &http,
                     mqtt_broker_on,
                     mqtt_client.is_some(),
                     &modal,
-                    hover,
                     agent_state,
                 );
                 if close {

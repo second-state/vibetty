@@ -2,7 +2,7 @@
 
 > 中文版：[USAGE.zh.md](USAGE.zh.md)
 
-This is the complete vibetty documentation: installation, configuration, running, TUI operation, HTTP endpoints, the **full MQTT protocol specification**, an **ESP32 / MCU** integration guide, and debugging tips.
+This is the complete vibetty documentation: installation, configuration, running, TUI operation, the **full MQTT protocol specification**, an **ESP32 / MCU** integration guide, and debugging tips.
 >
 > Protocol details are sourced exclusively from `src/mqtt.rs` in the repository; this document is a readable snapshot of it.
 
@@ -52,7 +52,7 @@ program │  vibetty    │ ───────► │ render terminal → JPE
                               └──────────────┘
 ```
 
-> As of 0.4.0, MQTT is the primary sharing transport; an **optional HTTP path** (`/screenshot` for images, `/mqtt_ws` debug page) is also kept. Both share one PTY session.
+> MQTT is the primary sharing transport. There is no HTTP server anymore — the browser debug page (`resources/mqtt_ws.html`) is hosted by you. Both the device and the page share one broker/PTY session.
 
 ---
 
@@ -157,9 +157,9 @@ vibetty -- codex         # share a codex session
 
 ⚠️ **You must pass `-- <command>`**. If you just run `vibetty`, the PTY has no program to run and immediately hits EOF, so vibetty exits right away — easily mistaken for a port conflict or a startup failure.
 
-After launch you enter a ratatui TUI: the screen shows the shared terminal, and the **first row at the top** is the button row `HTTP | MQTT | Fit | Quit`.
+After launch you enter a ratatui TUI: the terminal fills the whole window — there is no top bar. A **menu popup** (agent status / MQTT / Fit / Quit) is toggled with the menu hotkey (`ctrl+shift+p` by default, configurable via `[ui] menu_key`).
 
-- The `MQTT` button text reflects the combined state: `off` (neither client nor broker running) / `brkr` (only the broker is running) / `conn` (client connected) / `on` (both broker and client running).
+- The `MQTT` entry text reflects the combined state: `off` (neither client nor broker running) / `brkr` (only the broker is running) / `conn` (client connected) / `on` (both broker and client running).
 - `conn` means it has connected to the broker and is sharing the screen.
 
 ### 4.2 Running in the background (tmux)
@@ -170,36 +170,39 @@ Keep the sharing running in the background without occupying your terminal:
 tmux new-session -d -s vibetty -c "$HOME/workspace" 'vibetty -- claude'
 sleep 6
 tmux ls                                            # should list a session named vibetty
-tmux capture-pane -t vibetty -p | tail -20         # confirm claude is up and the MQTT button shows conn
+tmux capture-pane -t vibetty -p | tail -20         # confirm claude is up (check the menu's MQTT entry shows conn)
 ```
 
 - `-s vibetty`: the tmux session name; customize as you like. To share multiple sessions at once, give each a distinct name.
 - `-c "<dir>"`: the working directory for the terminal session. **Use `-c`, not `cd ... && tmux`** (the latter does not switch directories as expected when a tmux server is already running).
 - `tmux attach -t vibetty` enters the session to view/operate; `Ctrl-b d` detaches (the session keeps running); `tmux kill-session -t vibetty` ends it.
 
-### 4.3 TUI operation (top buttons + MqttPanel)
+### 4.3 TUI operation (menu popup + MqttPanel)
 
-The top button row (first screen row) `HTTP | MQTT | Fit | Quit` is mouse-clickable and highlights on hover:
+Press the menu hotkey (`ctrl+shift+p` by default) to toggle the **Menu** popup; `↑↓`/`Tab` move, Enter selects, Esc closes:
 
-- **HTTP**: start/stop the HTTP server on demand (off by default). Clicking it lets you confirm the listen address (prefilled from `--bind-addr`).
 - **MQTT**: opens the **MqttPanel** popup, split into two blocks:
   - **Broker block**: the `TCP:` / `WS :` ports are editable (Enter writes back to config); `Start broker` launches the built-in rumqttd (⚠️ **start-only, no stop** — rumqttd has no shutdown API; once started it becomes read-only `● broker running :{port}`).
   - **Client block**: the `URL:` broker address is editable (Enter writes back to `[mqtt] broker`); `Start client` / `Stop client` start/stop the transport client.
   - `Tab` / `↑↓` cycle through the items; Enter's behavior depends on the focused item (port = save, BrokerStart = start broker, URL = save URL, ClientToggle = toggle client).
-- **Fit**: one click resets the terminal size to the current window size (the usable area after subtracting the button row and the top border).
+- **Fit**: resets the terminal size to the current window size (undoing a small size set by an ESP32 sync).
 - **Quit**: exit the TUI directly.
 
 > Messages are not buffered while the client is stopped and are not replayed on restart; real teardown relies on the **LWT** (empty retained): once the connection drops, the broker automatically clears the presence.
 
-### 4.4 HTTP endpoints (started on demand)
+### 4.4 Browser debug page (served by you)
 
-The HTTP server is **off by default**; start it with the `HTTP` button (listen address prefilled from `-b/--bind-addr`, default `0.0.0.0:3000`):
+`resources/mqtt_ws.html` in the repo is a self-contained MQTT-over-WebSocket debug page: mqtt.js
+connects to the **built-in broker's WS port** (default `:9001`), auto-discovers instances, shows the
+screen, and can send input. **The easiest way to test without ESP32 hardware.** vibetty no longer
+ships an HTTP server — host the file with any static server and open it in a browser:
 
-- `GET /screenshot` — returns the current terminal screen as an image (JPEG). Includes `Cache-Control: no-cache`, so you can poll for the latest frame.
-- `GET /mqtt_ws` — a browser MQTT-over-WebSocket debug page: uses mqtt.js to connect to the **built-in broker's WS port** (default `:9001`), auto-discovers instances, shows the screen image, and can send input. **The easiest way to test without ESP32 hardware.**
+```bash
+cd vibetty && python3 -m http.server 3000
+# open http://localhost:3000/resources/mqtt_ws.html
+```
 
-> ⚠️ These endpoints exist only after you explicitly start the HTTP server; otherwise there is no external HTTP service at all.
-
+> The page needs `builtin_ws_port` != 0 in the config (the built-in broker's WS listener).
 ---
 
 ## 5. CLI and configuration reference
@@ -219,9 +222,7 @@ vibetty skill uninstall  --claude [--codex] Remove the run-vibetty skill
 |---|---|---|
 | `-- <command>` | Program to run in the PTY (e.g. `-- claude`, `-- codex`). **Required.** | _(required)_ |
 | `--config <PATH>` | Override the config file path. | `~/.vibetty/config.toml` |
-| `-b, --bind-addr <ADDR>` | HTTP listen address (used as the dialog default when starting HTTP). | `0.0.0.0:3000` |
 | `-a, --auto-submit` | Append Enter to `input_text` and execute it (also sets scrollback to 3, exposing a bit of history); turn off to only type the text with scrollback=0 (latest). | `true` |
-| `-q, --quality <QUALITY>` | Screen output format: `text` (default; plain ANSI text stream on `P/screen_text`, no image — see §6.5b), or `high` (JPEG q85 color), `medium` (JPEG q70 color), `low` (JPEG q50 grayscale). | `text` |
 
 ### Screenshot rendering parameters (fixed)
 
@@ -538,7 +539,7 @@ tmux new-session -d -s vibetty -c "$HOME/workspace" 'vibetty -- claude'
 
 **② Browser debug page (recommended, zero code)**
 
-Start the HTTP server (click the `HTTP` button in the TUI) and open `http://localhost:3000/mqtt_ws` in a browser: it connects to the built-in broker's WS port, discovers instances, shows the screen, and can send input.
+Host `resources/mqtt_ws.html` with any static server and open it in a browser: it connects to the built-in broker's WS port, discovers instances, shows the screen, and can send input. (See §4.4.)
 
 **③ Python `paho-mqtt` to simulate a remote**
 
@@ -604,8 +605,8 @@ No. With no `[mqtt]` section in `~/.vibetty/config.toml`, startup should produce
 **It exits immediately after startup / `tmux ls` reports no server running?**
 Most likely you **didn't pass `-- <command>`**. The PTY has no program to run, hits EOF immediately, and vibetty exits; the tmux session disappears within seconds. This is easily mistaken for a port conflict or a startup failure.
 
-**Why can't I access HTTP?**
-The HTTP server is **off by default**; you must start it via the `HTTP` button in the TUI. Without starting it, there is no `/screenshot` or `/mqtt_ws`.
+**How do I open the browser debug page?**
+vibetty no longer ships an HTTP server. Host `resources/mqtt_ws.html` with any static server (e.g. `python3 -m http.server`) and open it; it connects to the built-in broker's WS port (config `builtin_ws_port`).
 
 **The ESP32 receives no screen?**
 Check in order:
@@ -634,7 +635,7 @@ Yes; the default 80×24 size is already handled (no panic). But receiving `scree
 | `src/config.rs` | `Cli` / `RunArgs` / `MqttConfig` (all `[mqtt]` fields), `MqttConfig::for_client()` (URL parsing, the single source), `mqtt_config()` (read config). |
 | `src/protocol.rs` | `ClientMessage` (the serde source for `control` JSON), `ServerMessage`, `ImageFormat`. |
 | `src/terminal/agent.rs` | `AgentState` (Working/Waiting); detects Codex / Claude Code state from the terminal title. |
-| `src/ws.rs` | `run_command` (main loop: PTY, TUI, buttons, boot auto-start MQTT, agent state broadcast), `SCREEN_*` rendering constants, `render_screen_to_image`, `/screenshot` + `/mqtt_ws` routes. |
+| `src/ws.rs` | `run_command` (main loop: PTY, TUI, menu popup, boot auto-start MQTT, OSC 7501 agent state + pass-through). |
 | `src/broker.rs` | `spawn_builtin()`: runs rumqttd on a dedicated thread (TCP + WS, anonymous, 1MB payload). No shutdown. |
 | `src/setup.rs` | The `vibetty setup` ratatui TUI; edits all `[mqtt]` fields and writes them back to the config. |
 | `src/skill.rs` | `vibetty skill install/uninstall` implementation; embeds `resources/skills/run-vibetty/SKILL.md`. |

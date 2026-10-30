@@ -2,20 +2,19 @@
 
 Share an interactive terminal session (`claude`, `codex`) running on your PC with remote devices (ESP32, MCU, another machine) in real time — over MQTT.
 
-vibetty runs a program in a PTY, renders the terminal screen to an image, and publishes it to MQTT. Remote clients subscribe to display the live screen and send keystrokes back. Both ends are just MQTT clients talking to the same broker, so **no port on your PC needs to be exposed** to the public internet.
+vibetty runs a program in a PTY and publishes the terminal screen as ANSI text frames over MQTT. Remote clients subscribe to display the live screen and send keystrokes back. Both ends are just MQTT clients talking to the same broker, so **no port on your PC needs to be exposed** to the public internet.
 
-> 0.4.0 introduces MQTT as the primary sharing transport, alongside an optional HTTP path. Both share one PTY session. MQTT is opt-in: it turns on only when a `[mqtt]` section exists in the config; otherwise MQTT is never touched. See the [changelog](CHANGELOG.md).
+> MQTT is the primary sharing transport. It is opt-in: it turns on only when a `[mqtt]` section exists in the config; otherwise MQTT is never touched. See the [changelog](CHANGELOG.md).
 >
 > **⚠️ Firmware update required:** vibetty `0.4.x` changed the MQTT protocol (new topics, `screen_text` tag bytes, `Sync.pixels`/`close` fields, presence `format`). If you use a **vibekeys** keyboard device, **update its firmware to `v0.4.0+`** — older firmware will not be able to connect or display correctly.
 
 ## Features
 
-- **Live terminal sharing over MQTT** — the screen is published as JPEG screenshots; remote devices subscribe and send keystrokes back.
+- **Live terminal sharing over MQTT** — the screen is published as ANSI text frames (full baseline + raw PTY increments); remote devices subscribe and send keystrokes back.
 - **Built-in broker** — pointing the broker URL at localhost makes vibetty auto-start an in-process rumqttd broker (TCP; optional WS for the debug page), so you need zero external infrastructure.
 - **Multi-instance discovery** — each instance announces itself with a retained presence; a client discovers every one of your instances with a single wildcard subscription.
 - **Agent state detection** — the terminal title is parsed to tell whether Codex / Claude Code is `working` or `waiting`, and that state is broadcast alongside presence.
-- **TUI controls** — a ratatui interface with `HTTP` / `MQTT` / `Fit` / `Quit` buttons; the `MQTT` button reflects the combined state (`off` / `brkr` / `conn` / `on`).
-- **Optional HTTP path** — a `/screenshot` endpoint and an MQTT-over-WebSocket debug page (`/mqtt_ws`), started on demand.
+- **TUI controls** — the terminal fills the window; a menu popup (agent status / MQTT / Fit / Quit) is toggled with a hotkey (`ctrl+shift+p` by default, configurable). The MQTT entry reflects the combined state (`off` / `brkr` / `conn` / `on`).
 - **Cross-platform** — Linux, macOS, Windows (via ConPTY).
 
 ## Quick start
@@ -66,6 +65,14 @@ broker = "mqtt://user:pass@broker.example.com:1883"   # mqtts:// for TLS
 
 > Without a `[mqtt]` section, vibetty does not enable MQTT and never reaches the broker.
 
+Optional UI settings: the menu popup (MQTT / Fit / Quit + agent status) is toggled with a
+hotkey, `ctrl+shift+p` by default. Override it in the same config file:
+
+```toml
+[ui]
+menu_key = "ctrl+g"   # modifiers: ctrl / shift / alt / super + a single character key
+```
+
 ### 3. Run
 
 ```bash
@@ -73,7 +80,7 @@ vibetty -- claude        # share a `claude` session
 vibetty -- codex         # share a `codex` session
 ```
 
-You **must** pass `-- <command>`. The `MQTT` button at the top of the TUI shows `conn` once it has connected and is sharing.
+You **must** pass `-- <command>`. The MQTT entry in the menu popup (`<menu_key>` / `ctrl+shift+p`) shows `conn` once it has connected and is sharing.
 
 To keep it running in the background without occupying a terminal:
 
@@ -99,16 +106,14 @@ Run-mode options:
 | ------------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------ |
 | `-- <command>`            | Program to run in the PTY (e.g. `-- claude`)                                                               | _(required)_             |
 | `--config <PATH>`         | Override the config file path                                                                              | `~/.vibetty/config.toml` |
-| `-b, --bind-addr <ADDR>`  | HTTP listen address (used as the dialog default)                                                           | `0.0.0.0:3000`           |
 | `-a, --auto-submit`       | Append Enter to `input_text` so a sent command is executed                                                 | `true`                   |
-| `-q, --quality <QUALITY>` | Screen output format: `text` (ANSI text stream on `P/screen_text`) or `high`/`medium`/`low` (JPEG quality) | `text`                   |
 
-## HTTP endpoints (started on demand)
+## Browser debug page (served by you)
 
-The HTTP server is **off by default**; toggle it with the `HTTP` button in the TUI.
-
-- `GET /screenshot` — the current terminal screen as a JPEG image (quality set by `-q, --quality`).
-- `GET /mqtt_ws` — a browser MQTT-over-WebSocket viewer. It connects to the built-in broker's WS port (`builtin_ws_port` in the config; `0` disables it), discovers instances, shows the screen, and can send input. Handy for testing without hardware.
+`resources/mqtt_ws.html` is a self-contained MQTT-over-WebSocket viewer: it connects to the built-in
+broker's WS port (`builtin_ws_port` in the config; `0` disables it), discovers instances, shows the
+screen, and can send input. vibetty no longer ships an HTTP server — host the file with any static
+server (e.g. `python3 -m http.server`) and open it in a browser. Handy for testing without hardware.
 
 ## Use as a Herdr plugin
 

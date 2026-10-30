@@ -16,11 +16,7 @@ toml = "0.9"
 
 anyhow = "1.0"
 
-axum = "0.8.1"
-
 tokio = { version = "1", features = ["full"] }
-
-futures-util = "0.3.32"
 
 dirs = "6"
 bytes = "1.11.1"

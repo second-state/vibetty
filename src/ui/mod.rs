@@ -3,7 +3,8 @@ use std::io;
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-        KeyModifiers, MouseButton, MouseEventKind,
+        KeyModifiers, KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -27,17 +28,6 @@ const MOUSE_SCROLL_ROWS: u16 = 3;
 
 pub enum UIEvent {
     Input(Vec<u8>),
-    /// 鼠标左键点击(col/row 为终端单元格坐标)。
-    Click {
-        col: u16,
-        row: u16,
-    },
-    /// 鼠标悬停移动(无按键,来自 crossterm `MouseEventKind::Moved`)。
-    /// 用于 footer 按钮高亮;消费者只在悬停按钮变化时才重绘。
-    Hover {
-        col: u16,
-        row: u16,
-    },
     ScrollUp {
         rows: u16,
     },
@@ -45,14 +35,38 @@ pub enum UIEvent {
         rows: u16,
     },
     Resize(u16, u16),
+    /// 菜单快捷键(config `[ui] menu_key`,默认 ctrl+shift+p):开关主菜单弹窗。
+    /// 在事件循环拦截,不转发 PTY。
+    ToggleMenu,
 }
 
-/// footer HTTP 按钮的显示状态。
-#[derive(Default)]
-pub(crate) enum HttpBtnState {
-    #[default]
-    Off,
-    On(String),
+/// menu_key 的默认值,写进文档和 config 解析失败时的兜底。
+pub const DEFAULT_MENU_KEY: &str = "ctrl+shift+p";
+
+/// 解析后的菜单快捷键(与 crossterm 的 KeyEvent 精确比对)。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeyBinding {
+    pub modifiers: KeyModifiers,
+    pub code: KeyCode,
+}
+
+/// 解析 `ctrl+shift+p` 这类快捷键描述:`+` 分隔修饰键(ctrl/shift/alt/super)+ 单个字符键。
+/// 解析不了返回 None(调用方回退默认值)。
+pub fn parse_keybinding(s: &str) -> Option<KeyBinding> {
+    let mut modifiers = KeyModifiers::empty();
+    let mut key: Option<char> = None;
+    for part in s.split('+') {
+        match part.trim().to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => modifiers |= KeyModifiers::CONTROL,
+            "shift" => modifiers |= KeyModifiers::SHIFT,
+            "alt" | "opt" | "option" => modifiers |= KeyModifiers::ALT,
+            "super" | "cmd" | "meta" => modifiers |= KeyModifiers::SUPER,
+            other if other.chars().count() == 1 => key = Some(other.chars().next()?),
+            _ => return None,
+        }
+    }
+    let code = KeyCode::Char(key?);
+    Some(KeyBinding { modifiers, code })
 }
 
 /// footer MQTT 按钮的显示状态(broker / client 各一个开关),也供 MqttPanel 渲染状态用。
@@ -60,17 +74,6 @@ pub(crate) enum HttpBtnState {
 pub(crate) struct MqttButtonsState {
     pub broker_on: bool,
     pub client_on: bool,
-}
-
-/// footer 按钮悬停态(鼠标当前在哪个按钮上,None = 不在任何按钮上)。
-#[derive(Clone, Copy, PartialEq, Default)]
-pub(crate) enum HoveredBtn {
-    #[default]
-    None,
-    Http,
-    Mqtt,
-    Fit,
-    Quit,
 }
 
 /// MqttPanel 对话框聚焦的项(↑↓/Tab 在各项间循环)。
@@ -107,14 +110,52 @@ impl MqttFocus {
     }
 }
 
-/// 端口输入对话框的状态(打开时键盘事件路由给它,不进 PTY)。
+/// 菜单弹窗(菜单快捷键)里可聚焦的条目。↑↓/Tab 循环,Enter 执行。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MenuFocus {
+    Mqtt,
+    Fit,
+    Quit,
+}
+
+impl MenuFocus {
+    /// 下一项(↓/Tab):循环。`has_mqtt=false` 时跳过 Mqtt 条目(未配 [mqtt] 不可用)。
+    pub(crate) fn next(self, has_mqtt: bool) -> Self {
+        let mut f = match self {
+            MenuFocus::Mqtt => MenuFocus::Fit,
+            MenuFocus::Fit => MenuFocus::Quit,
+            MenuFocus::Quit => MenuFocus::Mqtt,
+        };
+        if !has_mqtt && f == MenuFocus::Mqtt {
+            f = MenuFocus::Fit;
+        }
+        f
+    }
+
+    /// 上一项(↑):反向循环。
+    pub(crate) fn prev(self, has_mqtt: bool) -> Self {
+        let mut f = match self {
+            MenuFocus::Mqtt => MenuFocus::Quit,
+            MenuFocus::Fit => MenuFocus::Mqtt,
+            MenuFocus::Quit => MenuFocus::Fit,
+        };
+        if !has_mqtt && f == MenuFocus::Mqtt {
+            f = MenuFocus::Quit;
+        }
+        f
+    }
+}
+
+/// 模态对话框的状态(打开时键盘事件路由给它,不进 PTY)。
+/// MqttPanel 三个 tui_input 比其它变体大很多,装箱得不偿失(整体 Copy/移动成本低)。
+#[allow(clippy::large_enum_variant)]
 #[derive(Default)]
 pub(crate) enum ModalState {
     #[default]
     None,
-    PortInput {
-        /// 绑定地址输入(含光标状态),光标/插入/删除由 tui-input 管理。
-        input: tui_input::Input,
+    /// 主菜单弹窗(Ctrl+Shift+P 开关):原顶部按钮行的全部入口收在这里。
+    Menu {
+        focus: MenuFocus,
     },
     /// MQTT 控制面板:上块 broker(端口 + Start)、下块 client(URL + Start/Stop)。
     /// broker/client 是否在跑由 `render_frame` 的 `mqtt` 参数提供,本结构只管表单 + 聚焦。
@@ -136,7 +177,15 @@ pub type TuiTerminal = Terminal<CrosstermBackend<std::io::Stdout>>;
 pub fn init_terminal() -> io::Result<TuiTerminal> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    // 开 kitty 键盘协议(仅 disambiguate 位):Ctrl+Shift+字母 这类没有 legacy 编码的
+    // 组合会按 CSI-u 上报,crossterm 才能解出 CONTROL|SHIFT 修饰键(供 Ctrl+Shift+P
+    // 快捷键)。不支持的终端忽略该序列,只是快捷键不触发,无副作用。
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    )?;
     let backend = CrosstermBackend::new(stdout);
     Terminal::new(backend)
 }
@@ -146,98 +195,46 @@ pub fn cleanup_terminal(terminal: &mut TuiTerminal) -> io::Result<()> {
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableMouseCapture
+        DisableMouseCapture,
+        PopKeyboardEnhancementFlags
     )?;
     terminal.show_cursor()
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn render_frame(
     f: &mut Frame,
     screen: &vt100::Screen,
-    title: &str,
-    http: &HttpBtnState,
     mqtt: Option<&MqttButtonsState>,
     modal: &ModalState,
-    hover: HoveredBtn,
     agent_state: AgentState,
-    title_tail: Option<&str>,
 ) {
     let size = f.area();
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
-        .split(size);
-
-    // chunks[0] = 顶部按钮行(单行);chunks[1] = 终端 pane。header 标题块已移除,
-    // 动态 title 显示在终端 pane 的上边框左上角(见下方 block)。
-
+    // 顶部按钮行和边框都已移除,终端铺满整屏;HTTP/MQTT/Fit/Quit/agent 状态全部
+    // 收进 Ctrl+Shift+P 的菜单弹窗(见下方 Menu 分支)。
     {
         let (term_rows, term_cols) = screen.size();
-        // 终端屏幕有固定的 cols×rows,可能小于 pane(如 ESP32 sync 把 PTY resize 成小屏后,
-        // 本地 TUI pane 仍很大)。按屏幕尺寸在 pane 内居中(高度 +1 给上边框,左右/下无边框);
-        // 屏幕大于 pane 时铺满并裁切。
-        // 先 Clear 整个 pane:居中的终端只重绘自己的 rect,不清的话 pane 其余区域会残留上一帧
+        // 终端屏幕有固定的 cols×rows,可能小于整屏(如 ESP32 sync 把 PTY resize 成小屏后,
+        // 本地窗口仍很大)。按屏幕尺寸居中;屏幕大于窗口时铺满并裁切。
+        // 先 Clear 整屏:居中的终端只重绘自己的 rect,不清的话其余区域会残留上一帧
         // (更宽时的)旧内容,滚动时尤其明显,看着像重复行。
-        f.render_widget(Clear, chunks[1]);
-        let area = centered_rect(chunks[1], term_cols, term_rows.saturating_add(1));
-        // title 在终端 pane 上边框左上角;title_tail(可选)显示在同一行的最右端,右对齐。
-        let mut block = Block::new().borders(Borders::TOP).title(title);
-        if let Some(tail) = title_tail {
-            block = block.title(Line::from(tail).alignment(Alignment::Right));
-        }
-        let pseudo_term = PseudoTerminal::new(screen).block(block);
+        f.render_widget(Clear, size);
+        let area = centered_rect(size, term_cols, term_rows);
+        let pseudo_term = PseudoTerminal::new(screen);
         f.render_widget(pseudo_term, area);
     }
 
-    // 顶部按钮行(第 1 行):左 HTTP(+ MQTT 在其右)+ Fit(重置终端尺寸)+ 右退出按钮。悬停高亮。
-    {
-        let http_label = button_label("HTTP", http);
-        render_button(
-            f,
-            http_button_rect(f.area(), &http_label),
-            &http_label,
-            hover == HoveredBtn::Http,
-        );
-        let mqtt_label = mqtt.map(mqtt_button_label);
-        if let Some(ml) = &mqtt_label {
-            render_button(
-                f,
-                mqtt_button_rect(f.area(), &http_label, ml),
-                ml,
-                hover == HoveredBtn::Mqtt,
-            );
-        }
-        // Fit:把终端尺寸重置成当前窗口(适配本地,撤销 ESP32 sync 改的小屏);紧跟 MQTT/HTTP 右侧。
-        render_button(
-            f,
-            fit_button_rect(f.area(), &http_label, mqtt_label.as_deref()),
-            "Fit",
-            hover == HoveredBtn::Fit,
-        );
-        render_button(
-            f,
-            quit_button_rect(f.area(), "Quit"),
-            "Quit",
-            hover == HoveredBtn::Quit,
-        );
-        // 状态显示块(OSC 7501):Quit 左侧。纯显示——不参与悬停/点击命中
-        // (button_row_at 只认 *_button_rect,悬停划过它不会有高亮)。
-        render_agent_status(f, status_rect(f.area(), agent_state), agent_state);
-    }
-
-    // 模态对话框(输入地址 / 显示错误),覆盖在终端之上。
+    // 模态对话框(菜单 / 输入地址 / MQTT 面板 / 错误),覆盖在终端之上。
     if !matches!(modal, ModalState::None) {
-        let h = if matches!(modal, ModalState::MqttPanel { .. }) {
-            16
-        } else {
-            9
+        let (w, h) = match modal {
+            ModalState::Menu { .. } => (40, 7),
+            ModalState::MqttPanel { .. } => (48, 16),
+            _ => (48, 9),
         };
-        let area = centered_rect(f.area(), 48, h);
+        let area = centered_rect(f.area(), w, h);
         f.render_widget(Clear, area);
         let title = match modal {
-            ModalState::PortInput { .. } => " HTTP Server ",
+            ModalState::Menu { .. } => " Menu ",
             ModalState::MqttPanel { .. } => " MQTT ",
             ModalState::Error(_) => " Error ",
             ModalState::None => unreachable!(),
@@ -251,7 +248,7 @@ pub fn render_frame(
             .constraints([Constraint::Min(0), Constraint::Length(1)])
             .split(inner);
         let hint: String = match modal {
-            ModalState::PortInput { .. } => "Enter to start · Esc to cancel".to_string(),
+            ModalState::Menu { .. } => "↑↓/Tab move · Enter select · Esc close".to_string(),
             // Enter 的提示随当前聚焦项变化(且 Start/Stop 只显示当前会做的那一个动作)。
             ModalState::MqttPanel { focus, .. } => {
                 let st = mqtt.copied().unwrap_or_default();
@@ -269,17 +266,57 @@ pub fn render_frame(
             ModalState::None => unreachable!(),
         };
         match modal {
-            ModalState::PortInput { input } => {
-                // 输入行竖直居中。
+            ModalState::Menu { focus } => {
+                // 4 行:agent 状态(纯显示)+ MQTT / Fit / Quit 三个条目。
+                let has_mqtt = mqtt.is_some();
                 let rows = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
-                        Constraint::Min(0),
                         Constraint::Length(1),
-                        Constraint::Min(0),
+                        Constraint::Length(1),
+                        Constraint::Length(1),
+                        Constraint::Length(1),
                     ])
                     .split(panes[0]);
-                render_input_field(f, rows[1], "Bind:", input, true);
+                // 第一行:OSC 7501 agent 状态(彩色圆点 + 状态名,不可聚焦)。
+                let color = match agent_state {
+                    AgentState::Working => Color::Cyan,
+                    AgentState::Waiting => Color::Yellow,
+                    AgentState::Idle => Color::Gray,
+                    AgentState::Done => Color::Green,
+                    AgentState::Error => Color::Red,
+                };
+                f.render_widget(
+                    Paragraph::new(Line::from(vec![
+                        Span::styled("● ", Style::new().fg(color)),
+                        Span::raw(agent_status_label(agent_state)),
+                    ])),
+                    rows[0],
+                );
+                // 条目行:选中项高亮(LightBlue 底,与 MqttPanel 聚焦行同款)。
+                let items: [(MenuFocus, String); 3] = [
+                    (
+                        MenuFocus::Mqtt,
+                        mqtt.map_or_else(|| "MQTT (not configured)".to_string(), mqtt_button_label),
+                    ),
+                    (MenuFocus::Fit, "Fit".to_string()),
+                    (MenuFocus::Quit, "Quit".to_string()),
+                ];
+                for (i, (item_focus, label)) in items.iter().enumerate() {
+                    let row = rows[i + 1];
+                    let style = if *focus == *item_focus {
+                        Style::default().bg(Color::LightBlue).fg(Color::Black)
+                    } else {
+                        Style::default()
+                    };
+                    // 未配 [mqtt]:MQTT 条目置灰(不可聚焦,Enter 也无动作)。
+                    let span = if *item_focus == MenuFocus::Mqtt && !has_mqtt {
+                        Span::styled(label.as_str(), Style::new().fg(Color::DarkGray))
+                    } else {
+                        Span::raw(label.as_str())
+                    };
+                    f.render_widget(Paragraph::new(Line::from(vec![span])).style(style), row);
+                }
             }
             ModalState::MqttPanel {
                 tcp,
@@ -372,22 +409,6 @@ fn centered_rect(area: Rect, want_w: u16, want_h: u16) -> Rect {
     Rect::new(x, y, w, h)
 }
 
-/// 画一个无边框的按钮:文字居中,默认灰底(DarkGray,填满整个 area),
-/// `hovered` 时换成高亮色(LightBlue 底 / Black 字,与 MqttPanel 聚焦行同款)。
-fn render_button(f: &mut Frame, area: Rect, label: &str, hovered: bool) {
-    let style = if hovered {
-        Style::default().bg(Color::LightBlue).fg(Color::Black)
-    } else {
-        Style::default().bg(Color::DarkGray)
-    };
-    f.render_widget(
-        Paragraph::new(label.to_string())
-            .alignment(Alignment::Center)
-            .style(style),
-        area,
-    );
-}
-
 /// 画一个输入字段:[固定宽度标签][整块背景高亮的输入框]。
 /// `focused` 时显示高亮光标单元格(末尾则高亮一个空格);否则只显示值。
 fn render_input_field(
@@ -428,14 +449,6 @@ fn render_input_field(
     f.render_widget(Paragraph::new(line).style(field), cols[1]);
 }
 
-/// 按钮文字:`{prefix} off` 或 `{prefix} {value}`。
-pub(crate) fn button_label(prefix: &str, state: &HttpBtnState) -> String {
-    match state {
-        HttpBtnState::Off => format!("{prefix} off"),
-        HttpBtnState::On(v) => format!("{prefix} {v}"),
-    }
-}
-
 /// footer MQTT 按钮文字:据 broker/client 两个开关组合出简洁状态(render 与点击命中检测共用)。
 pub(crate) fn mqtt_button_label(mqtt: &MqttButtonsState) -> String {
     match (mqtt.broker_on, mqtt.client_on) {
@@ -444,66 +457,6 @@ pub(crate) fn mqtt_button_label(mqtt: &MqttButtonsState) -> String {
         (false, true) => "MQTT conn".to_string(),
         (true, true) => "MQTT on".to_string(),
     }
-}
-
-/// footer 左侧「HTTP 按钮」的 Rect(宽度随 `label` 内容变化,含两侧边框)。
-/// `render_frame` 画按钮、`run_command` 命中检测共用,保证点击坐标与渲染位置一致;
-/// 内部 Layout 必须与 `render_frame` 完全相同。
-pub(crate) fn http_button_rect(frame_area: Rect, label: &str) -> Rect {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
-        .split(frame_area);
-    let button_row = chunks[0];
-    let want = label.chars().count() as u16 + 2; // +2:左右各留白 1 格(灰底填充,无边框)
-    let width = want.min(button_row.width);
-    // x + 1 左缩 1 格留白,与终端 pane 上边框 title 左沿视觉对齐。
-    Rect::new(button_row.x + 1, button_row.y, width, button_row.height)
-}
-
-/// footer 中「MQTT 按钮」的 Rect,紧跟 HTTP 按钮右侧(间隔 1 格)。
-/// render 画按钮、`run_command` 命中检测共用。
-pub(crate) fn mqtt_button_rect(frame_area: Rect, http_label: &str, mqtt_label: &str) -> Rect {
-    let http = http_button_rect(frame_area, http_label);
-    let width = mqtt_label.chars().count() as u16 + 2; // +2:左右各留白 1 格(灰底填充,无边框)
-    Rect::new(http.x + http.width + 1, http.y, width, http.height)
-}
-
-/// 「Fit 按钮」的 Rect,紧跟 MQTT 右侧(无 MQTT 配置时跟 HTTP 右侧)。点击重置终端尺寸。
-/// render 画按钮、`run_command` 命中检测共用。
-pub(crate) fn fit_button_rect(
-    frame_area: Rect,
-    http_label: &str,
-    mqtt_label: Option<&str>,
-) -> Rect {
-    let prev = match mqtt_label {
-        Some(ml) => mqtt_button_rect(frame_area, http_label, ml),
-        None => http_button_rect(frame_area, http_label),
-    };
-    let label = "Fit";
-    let width = label.chars().count() as u16 + 2; // +2:左右各留白 1 格(灰底填充,无边框)
-    Rect::new(prev.x + prev.width + 1, prev.y, width, prev.height)
-}
-
-/// footer 右侧「退出按钮」的 Rect(右对齐,宽度随 `label` 变化,左右各留白 1 格)。
-/// render 画按钮、`run_command` 命中检测共用;Layout 与 `render_frame` 相同。
-pub(crate) fn quit_button_rect(frame_area: Rect, label: &str) -> Rect {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
-        .split(frame_area);
-    let button_row = chunks[0];
-    let want = label.chars().count() as u16 + 2; // +2:左右各留白 1 格(灰底填充,无边框)
-    let width = want.min(button_row.width);
-    // 右侧也内缩 1 格(-1),与左侧对称(见 http_button_rect)。
-    // saturating:终端还没拿到尺寸时(0×0,如刚 fork 的 pty)width-1 会下溢 panic。
-    let x = (button_row.x + button_row.width).saturating_sub(width + 1);
-    Rect::new(x, button_row.y, width, button_row.height)
-}
-
-/// 点击/悬停坐标是否落在 `r` 内。
-pub(crate) fn hit_test(col: u16, row: u16, r: Rect) -> bool {
-    col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
 }
 
 /// 「agent 状态」显示块的 label(Osc 7501 状态名,与 presence 的 state 字串一致)。
@@ -517,80 +470,16 @@ fn agent_status_label(state: AgentState) -> &'static str {
     }
 }
 
-/// Quit 左侧「agent 状态」显示块的 Rect(宽度随状态名变化,与 Quit 间隔 1 格)。
-/// 纯显示块,**不**参与点击/悬停命中(那套只走 *_button_rect)。
-fn status_rect(frame_area: Rect, state: AgentState) -> Rect {
-    let quit = quit_button_rect(frame_area, "Quit");
-    let width = agent_status_label(state).chars().count() as u16 + 2; // +2:左右留白 1 格
-    Rect::new(quit.x.saturating_sub(width + 1), quit.y, width, quit.height)
-}
-
-/// 渲染 agent 状态显示块:彩色圆点 + 状态名。颜色按状态语义区分
-/// (working=青 / waiting=黄 / idle=灰 / done=绿 / error=红)。
-fn render_agent_status(f: &mut Frame, area: Rect, state: AgentState) {
-    let color = match state {
-        AgentState::Working => Color::Cyan,
-        AgentState::Waiting => Color::Yellow,
-        AgentState::Idle => Color::Gray,
-        AgentState::Done => Color::Green,
-        AgentState::Error => Color::Red,
-    };
-    let line = Line::from(vec![
-        Span::styled("● ", Style::new().fg(color)),
-        Span::raw(agent_status_label(state)),
-    ]);
-    f.render_widget(Paragraph::new(line), area);
-}
-
-/// (col, row) 当前悬停在顶部按钮行的哪个按钮上(`None` = 不在任何按钮上)。与点击同源:
-/// HTTP 按钮只在 Off 态视为可悬停(On 态点击无反应,不该看上去可点),MQTT 按钮在配置存在时才悬停。
-pub(crate) fn button_row_at(
-    col: u16,
-    row: u16,
-    area: Rect,
-    http: &HttpBtnState,
-    mqtt: Option<&MqttButtonsState>,
-) -> HoveredBtn {
-    if hit_test(col, row, quit_button_rect(area, "Quit")) {
-        return HoveredBtn::Quit;
-    }
-    let http_label = button_label("HTTP", http);
-    let mqtt_label = mqtt.map(mqtt_button_label);
-    if matches!(http, HttpBtnState::Off) && hit_test(col, row, http_button_rect(area, &http_label))
-    {
-        return HoveredBtn::Http;
-    }
-    if let Some(ml) = &mqtt_label
-        && hit_test(col, row, mqtt_button_rect(area, &http_label, ml))
-    {
-        return HoveredBtn::Mqtt;
-    }
-    // Fit 总是可悬停(不依赖 HTTP off 态或 MQTT 配置)。
-    if hit_test(
-        col,
-        row,
-        fit_button_rect(area, &http_label, mqtt_label.as_deref()),
-    ) {
-        return HoveredBtn::Fit;
-    }
-    HoveredBtn::None
-}
-
-pub fn spawn_event_loop(ui_tx: UITx) {
+pub fn spawn_event_loop(ui_tx: UITx, menu_key: KeyBinding) {
     let _thread = std::thread::spawn(move || {
-        if let Err(e) = event_loop_thread(ui_tx) {
+        if let Err(e) = event_loop_thread(ui_tx, menu_key) {
             log::error!("Event loop error: {}", e);
         }
     });
 }
 
-fn event_loop_thread(tx_to_pty: UITx) -> anyhow::Result<()> {
+fn event_loop_thread(tx_to_pty: UITx, menu_key: KeyBinding) -> anyhow::Result<()> {
     let timeout = Duration::from_millis(500);
-    // 按钮在屏幕第一行(row 0,Length(1)),悬停高亮只关心鼠标是否落在那一行。
-    // Moved 在此按「是否在第一行」过滤,终端区内的滑动事件直接丢弃不进 channel:
-    // 只放行 ① row==0(进入 / 在按钮行内移动)和 ② 刚离开第一行(发最后一次
-    // 让消费者把高亮清掉)。第一行不随窗口高度变化(恒为 0);主循环侧的「变化才重绘」仍作兜底。
-    let mut was_on_button_row = false;
     loop {
         if event::poll(timeout)? {
             let evt = event::read()?;
@@ -598,12 +487,22 @@ fn event_loop_thread(tx_to_pty: UITx) -> anyhow::Result<()> {
             if let Event::Key(key) = evt {
                 if key.kind == KeyEventKind::Press {
                     match key.code {
+                        // Ctrl+C:原样转发 0x03 给子进程(中断语义与真终端一致),事件循环
+                        // **继续跑**。此前这里 return 杀掉事件循环,子进程不退出时(claude 把
+                        // Ctrl+C 当回合中断)本地键盘会整体失灵。退出统一走 PTY EOF(子进程
+                        // 结束)或菜单 Quit,两条路都会收尾事件循环所在进程。
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             let _ = tx_to_pty.blocking_send(UIEvent::Input(Vec::from(&[0x03][..])));
-                            return Err(anyhow::anyhow!("Received Ctrl+C, exiting event loop"));
                         }
                         KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             let _ = tx_to_pty.blocking_send(UIEvent::Input(Vec::from(&[0x04][..])));
+                        }
+                        // 菜单快捷键(config `[ui] menu_key`)→ 菜单弹窗开关:拦截,不进 PTY。
+                        // 与配置精确比对(修饰键全集一致才算),避免 ctrl+shift+p 误吃
+                        // ctrl+alt+shift+p 这类组合。
+                        _ if key.code == menu_key.code && key.modifiers == menu_key.modifiers => {
+                            log::debug!("[ui] menu key captured, sending ToggleMenu");
+                            let _ = tx_to_pty.blocking_send(UIEvent::ToggleMenu);
                         }
                         _ => {
                             if let Some(bytes) = bytes_from_key(key) {
@@ -616,6 +515,7 @@ fn event_loop_thread(tx_to_pty: UITx) -> anyhow::Result<()> {
                 let bytes = s.into_bytes();
                 let _ = tx_to_pty.blocking_send(UIEvent::Input(bytes));
             } else if let Event::Mouse(mouse) = evt {
+                // 按钮(和它们的点击/悬停)已收进菜单弹窗,鼠标只保留滚轮滚动。
                 match mouse.kind {
                     MouseEventKind::ScrollUp => {
                         let _ = tx_to_pty.blocking_send(UIEvent::ScrollUp {
@@ -627,29 +527,9 @@ fn event_loop_thread(tx_to_pty: UITx) -> anyhow::Result<()> {
                             rows: MOUSE_SCROLL_ROWS,
                         });
                     }
-                    MouseEventKind::Down(MouseButton::Left) => {
-                        let _ = tx_to_pty.blocking_send(UIEvent::Click {
-                            col: mouse.column,
-                            row: mouse.row,
-                        });
-                    }
-                    MouseEventKind::Moved => {
-                        let on_button_row = mouse.row == 0;
-                        // on_button_row:进入或在按钮行内移动 → 放行(消费者命中检测高亮按钮)。
-                        // was_on_button_row:刚从按钮行移出 → 放行最后一次,让消费者清高亮。
-                        if on_button_row || was_on_button_row {
-                            let _ = tx_to_pty.blocking_send(UIEvent::Hover {
-                                col: mouse.column,
-                                row: mouse.row,
-                            });
-                        }
-                        was_on_button_row = on_button_row;
-                    }
                     _ => {}
                 }
             } else if let Event::Resize(cols, rows) = evt {
-                // 重置悬停状态(不假设鼠标还停在新按钮行)。
-                was_on_button_row = false;
                 let _ = tx_to_pty.blocking_send(UIEvent::Resize(cols, rows));
             }
         }

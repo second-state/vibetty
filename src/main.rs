@@ -16,7 +16,6 @@ use config::{Cli, Commands};
 
 mod setup;
 mod skill;
-mod static_page;
 
 /// 空操作 tracing subscriber:吞掉所有 tracing 事件。用于屏蔽 rumqttd 的 tracing 日志
 /// (rumqttd 用 tracing,不是 log)。见 `logger_init`。
@@ -163,13 +162,22 @@ async fn main() {
     // enable / builtin_broker 现在纯粹当 auto-start 标志(不再用来藏按钮或必起 transport)。
     let mqtt_cfg = args.mqtt_config();
 
-    // HTTP server 默认不启动;由 TUI footer 按钮按需开启(见 ws::run_command)。
-    // --bind-addr 整体(如 `0.0.0.0:3000`)作为对话框预填默认值;其端口部分注入 VIBETTY_PORT。
-    let default_bind = args.bind_addr.clone();
-
     // Init TUI
     let mut tui = ui::init_terminal().expect("Failed to initialize terminal");
-    ui::spawn_event_loop(ui_tx);
+    // 菜单弹窗快捷键:`[ui] menu_key`(如 "ctrl+shift+p");未配置/解析失败用默认值。
+    let menu_key = args
+        .menu_key()
+        .and_then(|s| match ui::parse_keybinding(&s) {
+            Some(kb) => Some(kb),
+            None => {
+                log::warn!("[ui] invalid menu_key {s:?} in config, falling back to default");
+                None
+            }
+        })
+        .unwrap_or_else(|| {
+            ui::parse_keybinding(ui::DEFAULT_MENU_KEY).expect("default menu key parses")
+        });
+    ui::spawn_event_loop(ui_tx, menu_key);
 
     let mut ui_title = String::new();
     let mut ui_rx = ui_rx;
@@ -181,7 +189,6 @@ async fn main() {
         &mut ui_rx,
         tx.clone(),
         cli_tx,
-        default_bind,
         mqtt_cfg,
         &mut tui,
         &mut ui_title,

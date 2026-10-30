@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 
 /// 可选的 MQTT 传输配置。`~/.vibetty/config.toml` 里没有 `[mqtt]` 段时为 None,
-/// 表示完全不启用 MQTT(现有 WebSocket/HTTP 行为不变)。
+/// 表示完全不启用 MQTT。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MqttConfig {
     /// Broker URL:`mqtt://[user:pass@]host[:port]`(明文)或 `mqtts://...`(TLS)。
@@ -96,10 +96,6 @@ pub struct Cli {
     #[arg(long, value_name = "PATH", global = true)]
     pub config: Option<std::path::PathBuf>,
 
-    /// HTTP listen address (e.g. 0.0.0.0:3000)
-    #[arg(short, long, default_value = "0.0.0.0:3000")]
-    pub bind_addr: String,
-
     #[arg(short, long, default_value = "true")]
     pub auto_submit: bool,
 
@@ -158,7 +154,6 @@ pub enum SkillAction {
 impl Cli {
     pub fn run_args(&self) -> RunArgs {
         RunArgs {
-            bind_addr: self.bind_addr.clone(),
             auto_submit: self.auto_submit,
             command: self.command_args.clone(),
             config: self.config.clone(),
@@ -168,7 +163,6 @@ impl Cli {
 
 /// Run-mode args.
 pub struct RunArgs {
-    pub bind_addr: String,
     pub auto_submit: bool,
     pub command: Vec<String>,
     pub config: Option<std::path::PathBuf>,
@@ -177,9 +171,15 @@ pub struct RunArgs {
 impl RunArgs {
     /// 读取可选的 `[mqtt]` 配置。
     /// 优先用 `--config` 指定的路径,否则回退 `~/.vibetty/config.toml`。
-    /// 无配置文件 / 无 `[mqtt]` 段 → None(不启用 MQTT,现有 WebSocket/HTTP 路径不变)。
+    /// 无配置文件 / 无 `[mqtt]` 段 → None(不启用 MQTT)。
     pub fn mqtt_config(&self) -> Option<MqttConfig> {
         read_mqtt_config(self.config.as_deref())
+    }
+
+    /// 读取可选的 `[ui] menu_key` 字符串(如 "ctrl+shift+p")。
+    /// 未配置 → None(调用方用默认 `ctrl+shift+p`)。
+    pub fn menu_key(&self) -> Option<String> {
+        read_menu_key(self.config.as_deref())
     }
 }
 
@@ -198,4 +198,25 @@ pub fn read_mqtt_config(config_path: Option<&std::path::Path>) -> Option<MqttCon
     };
     let content = std::fs::read_to_string(&path).ok()?;
     toml::from_str::<MqttSection>(&content).ok()?.mqtt
+}
+
+/// 读取可选的 `[ui] menu_key`(TUI 菜单弹窗快捷键,如 "ctrl+shift+p")。
+/// 未配置 → None(调用方用默认值);解析交给 `ui::parse_keybinding`。
+pub fn read_menu_key(config_path: Option<&std::path::Path>) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct UiSection {
+        #[serde(default)]
+        ui: Option<UiKeys>,
+    }
+    #[derive(serde::Deserialize)]
+    struct UiKeys {
+        #[serde(default)]
+        menu_key: Option<String>,
+    }
+    let path = match config_path {
+        Some(p) => p.to_path_buf(),
+        None => dirs::home_dir()?.join(".vibetty").join("config.toml"),
+    };
+    let content = std::fs::read_to_string(&path).ok()?;
+    toml::from_str::<UiSection>(&content).ok()?.ui?.menu_key
 }

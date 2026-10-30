@@ -2,20 +2,19 @@
 
 把运行在你 PC 上的交互式终端会话（`claude`、`codex`）通过 MQTT **实时**分享给远端设备（ESP32、MCU、另一台机器）。
 
-vibetty 在一个 PTY 里跑程序，把终端画面渲染成图片后发布到 MQTT。远端客户端订阅它来显示实时画面，并把按键发回来。两端都只是连同一个 broker 的 MQTT 客户端，**你的 PC 不需要对外暴露任何端口**。
+vibetty 在一个 PTY 里跑程序，把终端画面作为 ANSI 文本帧发布到 MQTT。远端客户端订阅它来显示实时画面，并把按键发回来。两端都只是连同一个 broker 的 MQTT 客户端，**你的 PC 不需要对外暴露任何端口**。
 
-> 0.4.0 引入 MQTT 作为主要的分享通道，另保留一条可选的 HTTP 通道，两者共用同一个 PTY 会话。MQTT 是可选的：只有配置里存在 `[mqtt]` 段时才启用，否则完全不碰 MQTT。详见[更新日志](../CHANGELOG.md)。
+> MQTT 是主要的分享通道，且是可选的：只有配置里存在 `[mqtt]` 段时才启用，否则完全不碰 MQTT。详见[更新日志](../CHANGELOG.md)。
 >
 > **⚠️ 需要更新固件：** vibetty `0.4.x` 改了 MQTT 协议（新 topic、`screen_text` tag 字节、`Sync.pixels`/`close` 字段、presence `format`）。如果你使用 **vibekeys** 键盘设备，**请将固件更新到 `v0.4.0+`** —— 旧固件无法正常连接或显示。
 
 ## 功能特性
 
-- **MQTT 实时分享终端** —— 把屏幕作为 JPEG 截图发布，远端设备订阅显示、回传按键。
+- **MQTT 实时分享终端** —— 屏幕以 ANSI 文本帧发布（全屏基线 + PTY 原始增量），远端设备订阅显示、回传按键。
 - **内置 broker** —— broker URL 指向 localhost 即自动启动进程内 rumqttd broker（TCP；WS 可选，供调试页用），零外部依赖。
 - **多实例发现** —— 每个实例以 retained presence 自我公告；客户端用一条通配订阅即可发现你的全部实例。
-- **Agent 状态识别** —— 解析终端标题判断 Codex / Claude Code 处于 `working` 还是 `waiting`，并随 presence 一并广播。
-- **TUI 控制** —— ratatui 界面顶部有 `HTTP` / `MQTT` / `Fit` / `Quit` 按钮；`MQTT` 按钮文字反映组合状态（`off` / `brkr` / `conn` / `on`）。
-- **可选 HTTP 通道** —— `/screenshot` 取图端点 + `/mqtt_ws` 调试页，按需启动。
+- **Agent 状态识别** —— 通过 OSC 7501（Program Status Protocol）识别 `working` / `waiting` / `idle` / `done` / `error`，随 presence 广播并透传给宿主终端。
+- **TUI 控制** —— 终端铺满整个窗口；菜单弹窗（agent 状态 / MQTT / Fit / Quit）由快捷键呼出（默认 `ctrl+shift+p`，可配置）。`MQTT` 条目反映组合状态（`off` / `brkr` / `conn` / `on`）。
 - **跨平台** —— Linux、macOS、Windows（ConPTY）。
 
 ## 快速开始
@@ -65,6 +64,14 @@ broker = "mqtt://user:pass@broker.example.com:1883"   # mqtts:// 走 TLS
 
 > 没有 `[mqtt]` 段时，vibetty 不启用 MQTT，也不会连 broker。
 
+可选的 UI 配置:菜单弹窗(MQTT / Fit / Quit + agent 状态)由快捷键呼出,默认
+`ctrl+shift+p`,可在同一配置文件里改：
+
+```toml
+[ui]
+menu_key = "ctrl+g"   # 修饰键 ctrl / shift / alt / super + 单个字符键
+```
+
 ### 3. 运行
 
 ```bash
@@ -72,7 +79,7 @@ vibetty -- claude        # 分享一个 `claude` 会话
 vibetty -- codex         # 分享一个 `codex` 会话
 ```
 
-**必须**带 `-- <命令>`。TUI 顶部的 `MQTT` 按钮显示 `conn` 即表示已连接、正在分享。
+**必须**带 `-- <命令>`。菜单弹窗里的 `MQTT` 条目显示 `conn` 即表示已连接、正在分享。
 
 让它在后台跑、不占用当前终端：
 
@@ -98,16 +105,14 @@ vibetty skill uninstall  --claude [--codex] 移除 run-vibetty skill
 |---|---|---|
 | `-- <命令>` | 在 PTY 里跑的程序（如 `-- claude`） | _(必填)_ |
 | `--config <PATH>` | 覆盖配置文件路径 | `~/.vibetty/config.toml` |
-| `-b, --bind-addr <ADDR>` | HTTP 监听地址（作为对话框预填默认值） | `0.0.0.0:3000` |
 | `-a, --auto-submit` | 收到 `input_text` 时自动追加回车并执行 | `true` |
-| `-q, --quality <档位>` | 屏幕输出格式:`text`(ANSI 文本流,发 `P/screen_text`)或 `high`/`medium`/`low`(JPEG 质量) | `text` |
 
-## HTTP 端点（按需启动）
+## 浏览器调试页（自行托管）
 
-HTTP 服务**默认关闭**，在 TUI 里点 `HTTP` 按钮启动。
-
-- `GET /screenshot` —— 当前终端画面图片（JPEG；质量由 `-q, --quality` 决定）。
-- `GET /mqtt_ws` —— 浏览器 MQTT-over-WebSocket 查看页：连内置 broker 的 WS 端口（config 里的 `builtin_ws_port`，`0` 表示关闭）、发现实例、显示画面、可发输入。没有硬件时用它测很方便。
+`resources/mqtt_ws.html` 是一个自包含的 MQTT-over-WebSocket 查看页：连内置 broker 的 WS 端口
+（config 里的 `builtin_ws_port`，`0` 表示关闭）、自动发现实例、显示画面、可发输入。vibetty 不再
+内置 HTTP server——用任意静态服务器托管这个文件（如 `python3 -m http.server`）后浏览器打开即可。
+没有硬件时用它测试很方便。
 
 ## 当作 Herdr 插件用
 
