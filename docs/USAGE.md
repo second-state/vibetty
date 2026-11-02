@@ -157,7 +157,7 @@ vibetty -- codex         # share a codex session
 
 ⚠️ If you just run `vibetty`, it falls back to your `$SHELL` (or `/bin/sh` / `cmd.exe` when unset). Pass `-- <command>` for anything else.
 
-After launch you enter a ratatui TUI: the terminal fills the whole window — there is no top bar. A **menu popup** (agent status / MQTT / Fit / Quit) is toggled with the menu hotkey (`ctrl+shift+p` by default, configurable via `[ui] menu_key`).
+After launch you enter a ratatui TUI: the terminal fills the whole window — there is no top bar. A **menu popup** (agent status / MQTT / Fit / Quit) is toggled with the menu hotkey (`ctrl+o` by default, configurable via `[ui] menu_key`).
 
 - The `MQTT` entry text reflects the combined state: `off` (neither client nor broker running) / `brkr` (only the broker is running) / `conn` (client connected) / `on` (both broker and client running).
 - `conn` means it has connected to the broker and is sharing the screen.
@@ -179,7 +179,7 @@ tmux capture-pane -t vibetty -p | tail -20         # confirm claude is up (check
 
 ### 4.3 TUI operation (menu popup + MqttPanel)
 
-Press the menu hotkey (`ctrl+shift+p` by default) to toggle the **Menu** popup; `↑↓`/`Tab` move, Enter selects, Esc closes:
+Press the menu hotkey (`ctrl+o` by default) to toggle the **Menu** popup; `↑↓`/`Tab` move, Enter selects, Esc closes:
 
 - **MQTT**: opens the **MqttPanel** popup, split into two blocks:
   - **Broker block**: the `TCP:` / `WS :` ports are editable (Enter writes back to config); `Start broker` launches the built-in rumqttd (⚠️ **start-only, no stop** — rumqttd has no shutdown API; once started it becomes read-only `● broker running :{port}`).

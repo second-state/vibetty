@@ -14,7 +14,7 @@ vibetty 在一个 PTY 里跑程序，把终端画面作为 ANSI 文本帧发布�
 - **内置 broker** —— broker URL 指向 localhost 即自动启动进程内 rumqttd broker（TCP；WS 可选，供调试页用），零外部依赖。
 - **多实例发现** —— 每个实例以 retained presence 自我公告；客户端用一条通配订阅即可发现你的全部实例。
 - **Agent 状态识别** —— 通过 OSC 7501（Program Status Protocol）识别 `working` / `waiting` / `idle` / `done` / `error`，随 presence 广播并透传给宿主终端。
-- **TUI 控制** —— 终端铺满整个窗口；菜单弹窗（agent 状态 / MQTT / Fit / Quit）由快捷键呼出（默认 `ctrl+shift+p`，可配置）。`MQTT` 条目反映组合状态（`off` / `brkr` / `conn` / `on`）。
+- **TUI 控制** —— 终端铺满整个窗口；菜单弹窗（agent 状态 / MQTT / Fit / Quit）由快捷键呼出（默认 `ctrl+o`，可配置）。`MQTT` 条目反映组合状态（`off` / `brkr` / `conn` / `on`）。
 - **跨平台** —— Linux、macOS、Windows（ConPTY）。
 
 ## 快速开始
@@ -65,7 +65,8 @@ broker = "mqtt://user:pass@broker.example.com:1883"   # mqtts:// 走 TLS
 > 没有 `[mqtt]` 段时，vibetty 不启用 MQTT，也不会连 broker。
 
 可选的 UI 配置:菜单弹窗(MQTT / Fit / Quit + agent 状态)由快捷键呼出,默认
-`ctrl+shift+p`,可在同一配置文件里改：
+`ctrl+o`(纯 ctrl+字母在 macOS / Linux / Windows 控制台都可靠;ctrl+shift 组合在
+Windows 传统控制台不可靠),可在同一配置文件里改：
 
 ```toml
 [ui]

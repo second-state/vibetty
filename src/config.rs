@@ -183,8 +183,8 @@ impl RunArgs {
         read_mqtt_config(self.config.as_deref())
     }
 
-    /// 读取可选的 `[ui] menu_key` 字符串(如 "ctrl+shift+p")。
-    /// 未配置 → None(调用方用默认 `ctrl+shift+p`)。
+    /// 读取可选的 `[ui] menu_key` 字符串(如 "ctrl+o")。
+    /// 未配置 → None(调用方用默认 `ctrl+o`)。
     pub fn menu_key(&self) -> Option<String> {
         read_menu_key(self.config.as_deref())
     }
@@ -212,7 +212,7 @@ pub fn read_mqtt_config(config_path: Option<&std::path::Path>) -> Option<MqttCon
     toml::from_str::<MqttSection>(&content).ok()?.mqtt
 }
 
-/// 读取可选的 `[ui] menu_key`(TUI 菜单弹窗快捷键,如 "ctrl+shift+p")。
+/// 读取可选的 `[ui] menu_key`(TUI 菜单弹窗快捷键,如 "ctrl+o")。
 /// 未配置 → None(调用方用默认值);解析交给 `ui::parse_keybinding`。
 pub fn read_menu_key(config_path: Option<&std::path::Path>) -> Option<String> {
     read_ui(config_path).and_then(|ui| ui.menu_key)

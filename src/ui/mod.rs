@@ -27,13 +27,16 @@ use crate::terminal::agent::AgentState;
 pub enum UIEvent {
     Input(Vec<u8>),
     Resize(u16, u16),
-    /// 菜单快捷键(config `[ui] menu_key`,默认 ctrl+shift+p):开关主菜单弹窗。
+    /// 菜单快捷键(config `[ui] menu_key`,默认 ctrl+o):开关主菜单弹窗。
     /// 在事件循环拦截,不转发 PTY。
     ToggleMenu,
 }
 
 /// menu_key 的默认值,写进文档和 config 解析失败时的兜底。
-pub const DEFAULT_MENU_KEY: &str = "ctrl+shift+p";
+/// 选 ctrl+o:纯 ctrl+字母 在所有平台可靠(POSIX 发控制码、Windows 原生带修饰键),
+/// 且 readline 的 operate-and-get-next 极冷门、几乎无冲突。ctrl+shift 系在 Windows
+/// 传统控制台上报不可靠,ctrl+m/ctrl+t/ctrl+k 撞控制码/高频绑定,都不行。
+pub const DEFAULT_MENU_KEY: &str = "ctrl+o";
 
 /// 解析后的菜单快捷键(与 crossterm 的 KeyEvent 精确比对)。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,7 +45,7 @@ pub struct KeyBinding {
     pub code: KeyCode,
 }
 
-/// 解析 `ctrl+shift+p` 这类快捷键描述:`+` 分隔修饰键(ctrl/shift/alt/super)+ 单个字符键。
+/// 解析 `ctrl+o` 这类快捷键描述:`+` 分隔修饰键(ctrl/shift/alt/super)+ 单个字符键。
 /// 解析不了返回 None(调用方回退默认值)。
 pub fn parse_keybinding(s: &str) -> Option<KeyBinding> {
     let mut modifiers = KeyModifiers::empty();
@@ -574,7 +577,7 @@ fn event_loop_thread(
                             let _ = tx_to_pty.blocking_send(UIEvent::Input(Vec::from(&[0x04][..])));
                         }
                         // 菜单快捷键(config `[ui] menu_key`)→ 菜单弹窗开关:拦截,不进 PTY。
-                        // 与配置精确比对(修饰键全集一致才算),避免 ctrl+shift+p 误吃
+                        // 与配置精确比对(修饰键全集一致才算),避免 ctrl+shift+o 误吃
                         // ctrl+alt+shift+p 这类组合。
                         _ if key.code == menu_key.code && key.modifiers == menu_key.modifiers => {
                             log::debug!("[ui] menu key captured, sending ToggleMenu");

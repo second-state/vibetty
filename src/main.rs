@@ -176,7 +176,7 @@ async fn main() {
 
     // Init TUI
     let mut tui = ui::init_terminal().expect("Failed to initialize terminal");
-    // 菜单弹窗快捷键:`[ui] menu_key`(如 "ctrl+shift+p");未配置/解析失败用默认值。
+    // 菜单弹窗快捷键:`[ui] menu_key`(如 "ctrl+o");未配置/解析失败用默认值。
     let menu_key = args
         .menu_key()
         .and_then(|s| match ui::parse_keybinding(&s) {

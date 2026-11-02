@@ -14,7 +14,7 @@ vibetty runs a program in a PTY and publishes the terminal screen as ANSI text f
 - **Built-in broker** — pointing the broker URL at localhost makes vibetty auto-start an in-process rumqttd broker (TCP; optional WS for the debug page), so you need zero external infrastructure.
 - **Multi-instance discovery** — each instance announces itself with a retained presence; a client discovers every one of your instances with a single wildcard subscription.
 - **Agent state detection** — the terminal title is parsed to tell whether Codex / Claude Code is `working` or `waiting`, and that state is broadcast alongside presence.
-- **TUI controls** — the terminal fills the window; a menu popup (agent status / MQTT / Fit / Quit) is toggled with a hotkey (`ctrl+shift+p` by default, configurable). The MQTT entry reflects the combined state (`off` / `brkr` / `conn` / `on`).
+- **TUI controls** — the terminal fills the window; a menu popup (agent status / MQTT / Fit / Quit) is toggled with a hotkey (`ctrl+o` by default, configurable). The MQTT entry reflects the combined state (`off` / `brkr` / `conn` / `on`).
 - **Cross-platform** — Linux, macOS, Windows (via ConPTY).
 
 ## Quick start
@@ -66,7 +66,8 @@ broker = "mqtt://user:pass@broker.example.com:1883"   # mqtts:// for TLS
 > Without a `[mqtt]` section, vibetty does not enable MQTT and never reaches the broker.
 
 Optional UI settings: the menu popup (MQTT / Fit / Quit + agent status) is toggled with a
-hotkey, `ctrl+shift+p` by default. Override it in the same config file:
+hotkey, `ctrl+o` by default (a plain ctrl+letter works on every platform — macOS, Linux and
+Windows consoles; ctrl+shift combos are unreliable on the legacy Windows console). Override it in the same config file:
 
 ```toml
 [ui]
@@ -83,7 +84,7 @@ vibetty -- claude        # share a `claude` session
 vibetty -- codex         # share a `codex` session
 ```
 
-Bare `vibetty` (no `-- <command>`) shares your `$SHELL`. Explicit commands are still recommended for agents (`-- claude`); the MQTT entry in the menu popup (`<menu_key>` / `ctrl+shift+p`) shows `conn` once it has connected and is sharing.
+Bare `vibetty` (no `-- <command>`) shares your `$SHELL`. Explicit commands are still recommended for agents (`-- claude`); the MQTT entry in the menu popup (`<menu_key>` / `ctrl+o`) shows `conn` once it has connected and is sharing.
 
 To keep it running in the background without occupying a terminal:
 
