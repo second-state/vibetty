@@ -118,3 +118,14 @@ pub fn draw_status(
     })?;
     Ok(())
 }
+
+/// 画一行提示信息(黄色)。用于「target 不是 agent」这类占位提示场景:
+/// pane 已经开出来了,显示原因并等待退出,而不是静默消失。
+pub fn draw_message(terminal: &mut HerdrTerminal, message: &str) -> io::Result<()> {
+    terminal.draw(|f| {
+        let area: Rect = f.area();
+        let line = Line::from(Span::styled(message, Style::default().fg(Color::Yellow)));
+        f.render_widget(Paragraph::new(line), area);
+    })?;
+    Ok(())
+}

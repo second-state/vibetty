@@ -307,15 +307,101 @@ pub async fn run_share_herdr(target: Option<String>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 列出当前被 share 的 agent pane:枚举 herdr pane list,过滤出 title 为
+/// `vibetty-share:<target>` 的 pane(即我们开的 share pane),以 JSON 数组打到 stdout:
+/// `[{"pane_id":"w8:p2X","target":"w8:p2"}]`。
+pub async fn list_shared() -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    #[derive(serde::Deserialize)]
+    struct Envelope {
+        result: ListBody,
+    }
+    #[derive(serde::Deserialize)]
+    struct ListBody {
+        panes: Vec<ListPane>,
+    }
+    #[derive(serde::Deserialize)]
+    struct ListPane {
+        pane_id: String,
+        #[serde(default)]
+        terminal_title_stripped: Option<String>,
+    }
+
+    let output = tokio::process::Command::new(herdr_bin())
+        .args(["pane", "list"])
+        .output()
+        .await
+        .context("failed to spawn `herdr pane list`")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "`herdr pane list` failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let env: Envelope =
+        serde_json::from_slice(&output.stdout).context("parse `herdr pane list` output")?;
+    const PREFIX: &str = "vibetty-share:";
+    let shared: Vec<_> = env
+        .result
+        .panes
+        .iter()
+        .filter_map(|p| {
+            let title = p.terminal_title_stripped.as_deref()?;
+            title
+                .strip_prefix(PREFIX)
+                .map(|target| serde_json::json!({ "pane_id": p.pane_id, "target": target }))
+        })
+        .collect();
+    println!("{}", serde_json::to_string_pretty(&shared)?);
+    Ok(())
+}
+
+/// 非 agent target 的提示模式:占住 share 开出来的 pane,显示一行原因,等 q/Ctrl+C。
+/// (pane 静默消失比显示「不支持」更让人摸不着头脑。)
+async fn run_notice(message: &str) -> anyhow::Result<()> {
+    let mut tui = ui::init_terminal()?;
+    let (ui_tx, mut ui_rx) = mpsc::channel(16);
+    ui::spawn_event_loop(ui_tx);
+    ui::draw_message(&mut tui, message)?;
+    while let Some(evt) = ui_rx.recv().await {
+        match evt {
+            ui::HerdrUiEvent::Quit => break,
+            ui::HerdrUiEvent::Resize => ui::draw_message(&mut tui, message)?,
+        }
+    }
+    ui::cleanup_terminal(&mut tui)?;
+    Ok(())
+}
+
 /// `vibetty herdr <target>`:自包含 —— 自己 init TUI、起事件循环、建 channel、跑主循环。
 pub async fn run_herdr(
     target: String,
     mqtt_cfg: Option<MqttConfig>,
     auto_submit: bool,
 ) -> anyhow::Result<()> {
+    // 把本 pane 的终端 title 设成 `vibetty-share:<target>`:herdr 的 pane list 会暴露
+    // terminal_title,「哪些 pane 被 share 了」据此查询(见 list_shared),无需状态文件,
+    // pane 关掉/进程死了 title 自然消失,不会留脏数据。
+    {
+        use std::io::Write;
+        let mut out = std::io::stdout().lock();
+        let _ = write!(out, "\x1b]0;vibetty-share:{target}\x07");
+        let _ = out.flush();
+    }
     // 进 herdr 模式第一件事:查一下 target 的 agent 状态 + terminal title + agent 名
     // (直接 shell 出 `herdr agent get`),记录到日志。
-    let (agent_status, terminal_title, agent_name) = get_agent_status(&target).await?;
+    // target 不是 agent pane(agent_not_found)时**不退出**:share-herdr 已经把这个
+    // pane 开出来了,静默消失只会让人莫名其妙。进入提示模式占住 pane,显示原因,
+    // q / Ctrl+C 退出。其它错误(herdr 不在、socket 挂了)仍照常返回 Err。
+    let (agent_status, terminal_title, agent_name) = match get_agent_status(&target).await {
+        Ok(v) => v,
+        Err(e) if e.to_string().contains("agent_not_found") => {
+            log::info!("[herdr] {target} is not an agent pane; showing notice");
+            return run_notice("Non-agent sessions are not supported").await;
+        }
+        Err(e) => return Err(e),
+    };
 
     // 后台每 1s 轮询 target 的 agent 状态;变化时经 watch 通道通知主循环。
     // (agent 名基本恒定,只在 init 取一次;title 跟着 status 一起走 watch 给 presence 用。)

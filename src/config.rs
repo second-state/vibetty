@@ -125,6 +125,9 @@ pub enum Commands {
         /// herdr agent target id (or HERDR_PANE_ID env)
         #[arg(long)]
         target: Option<String>,
+        /// List currently shared panes as JSON instead of sharing
+        #[arg(long)]
+        list: bool,
     },
     /// Update vibetty to the latest release (or a specific tag)
     Update {

@@ -125,9 +125,15 @@ async fn main() {
         }) => {
             return run_herdr_mode(cli.config.clone(), target, auto_submit).await;
         }
-        Some(Commands::ShareHerdr { target }) => {
-            if let Err(e) = herdr_runner::run_share_herdr(target).await {
-                log::error!("herdr share-herdr failed: {e}");
+        Some(Commands::ShareHerdr { target, list }) => {
+            let result = if list {
+                herdr_runner::list_shared().await
+            } else {
+                herdr_runner::run_share_herdr(target).await
+            };
+            if let Err(e) = result {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
             }
             return;
         }
