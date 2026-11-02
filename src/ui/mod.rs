@@ -191,11 +191,9 @@ pub fn cleanup_terminal(terminal: &mut TuiTerminal) -> io::Result<()> {
     // 鼠标上报若因子进程请求而开着,退出前必须关掉——否则宿主终端继续上报鼠标,
     // 退出后的 shell 一点击就是一串转义乱码。关序列重复发无害。
     set_mouse_capture(false);
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        PopKeyboardEnhancementFlags
-    )?;
+    // Pop 同样尽力而为(对应 push 失败的终端这里也会失败)。
+    let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()
 }
 
