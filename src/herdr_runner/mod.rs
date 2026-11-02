@@ -299,6 +299,9 @@ pub async fn run_share_herdr(target: Option<String>) -> anyhow::Result<()> {
                 let new_pane = resp.plugin_pane.pane.pane_id;
                 // 把新开的 vibetty pane 缩到 ~1 行(直接缩它自己,不碰 agent pane)。
                 shrink_pane_to_one_row(client, &new_pane).await?;
+                // 成功路径把新 share pane id 以 JSON 打到 stdout(与 --list、失败走
+                // stderr+exit 1 的约定对称),供脚本 jq 解析。
+                println!("{}", serde_json::json!({ "pane_id": new_pane }));
                 Ok(())
             }
         })
