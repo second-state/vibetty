@@ -173,15 +173,16 @@ pub fn init_terminal() -> io::Result<TuiTerminal> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     // 开 kitty 键盘协议(仅 disambiguate 位):Ctrl+Shift+字母 这类没有 legacy 编码的
-    // 组合会按 CSI-u 上报,crossterm 才能解出 CONTROL|SHIFT 修饰键(供 Ctrl+Shift+P
-    // 快捷键)。不支持的终端忽略该序列,只是快捷键不触发,无副作用。
-    // 不开鼠标捕捉:点击/滚轮不再上报,vibetty 不支持鼠标交互;滚轮交给宿主终端
-    // 自己滚本地 scrollback。快捷键修饰键仍靠 kitty 协议(disambiguate 位)。
-    execute!(
+    // 组合会按 CSI-u 上报,crossterm 才能解出 CONTROL|SHIFT 修饰键(供菜单快捷键)。
+    // **尽力而为**:不支持的终端要么忽略该序列,要么像 Windows 传统控制台那样直接
+    // 返回 Unsupported——绝不能让它带崩启动,代价只是菜单快捷键收不到修饰键。
+    execute!(stdout, EnterAlternateScreen)?;
+    if let Err(e) = execute!(
         stdout,
-        EnterAlternateScreen,
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-    )?;
+    ) {
+        log::warn!("[ui] keyboard enhancement not available ({e}); menu hotkey may be limited");
+    }
     let backend = CrosstermBackend::new(stdout);
     Terminal::new(backend)
 }
