@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.5.0] - 2026-11-03
+
+OSC 7501 agent status end to end, hotkey menu popup, mouse passthrough, herdr tooling. (中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md).)
+
+### Added
+
+- **Agent status via OSC 7501** — replaces window-title sniffing. All five states (`working` / `waiting` / `idle` / `done` / `error`) are parsed from the Program Status Protocol emitted by Claude Code / Codex / pi / opencode, and re-emitted to the host terminal so iTerm2 3.7.5+ / Ghostty / herdr tabs track the status too.
+- **Hotkey menu popup** — the top button row is gone and the terminal fills the window. `ctrl+o` (configurable via `[ui] menu_key`) toggles a popup with agent status / MQTT panel / Fit / Quit. Plain ctrl+letter was chosen because ctrl+shift combos are unreliably reported on the legacy Windows console.
+- **Optional state-colored border** — `[ui] border` (default on; also toggleable from the menu) draws a ratatui border whose color follows the agent state, with `● <status>` in the top-right corner; the PTY is resized accordingly.
+- **Mouse passthrough** — when the child program requests mouse mode (DECSET 1000/1002/1003), mouse events are forwarded into the PTY as SGR sequences; children that don't request it get no capture and no escape garbage.
+- **`$SHELL` fallback** — bare `vibetty` shares your shell instead of erroring out.
+- **herdr tooling** — `share-herdr --target <id>` (or the herdr-injected `HERDR_PANE_ID` env), JSON result `{"pane_id":...}` on success, `share-herdr --list` to enumerate currently shared panes (sourced from pane titles — no state files), and non-agent targets now open the pane showing a notice instead of dying silently.
+
+### Changed
+
+- **Device scrollback depth is configurable** — `--scrollback-lines <N>` (default 8096).
+- **Kitty keyboard protocol is best-effort** — the legacy Windows console no longer crashes at startup (a 0.5.0-rc.1/rc.2 regression); the only cost there is that modifier-key hotkeys may not be reported.
+
+### Fixed
+
+- **Device scroll on the alternate screen** — `scroll_up`/`scroll_down` inside full-screen TUIs (e.g. Claude Code) used to be a silent no-op; they are now forwarded to the app as PageUp/PageDown. Includes vt100 scrollback-semantics tests.
+- **Graceful shutdown** — SIGTERM now restores the terminal (alt screen / raw mode / mouse mode) and kills the child process; previously the process could hang forever waiting on the PTY reader and leave the host terminal trashed.
+- No more panic on non-UTF-8 window titles (lossy conversion instead of `unwrap`).
+
 ## [0.4.3] - 2026-10-16
 
 ANSI-only transport, self-update, aarch64 Linux builds, dialoguer setup. (中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md).)

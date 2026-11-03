@@ -1,5 +1,29 @@
 # 变更日志 (CHANGELOG)
 
+## [0.5.0] - 2026-11-03
+
+OSC 7501 agent 状态全链路、快捷键菜单弹窗、鼠标透传、herdr 工具集。(English changelog: [`CHANGELOG.md`](../CHANGELOG.md)。)
+
+### 新增
+
+- **OSC 7501 识别 agent 状态** —— 取代窗口标题嗅探。完整解析 Claude Code / Codex / pi / opencode 上报的 Program Status Protocol 五态(`working` / `waiting` / `idle` / `done` / `error`),并透传给宿主终端——iTerm2 3.7.5+ / Ghostty / herdr 的 tab 会同步显示。
+- **快捷键菜单弹窗** —— 顶部按钮行移除,终端铺满整窗。`ctrl+o`(config `[ui] menu_key` 可改)呼出菜单:agent 状态 / MQTT 面板 / Fit / Quit。选纯 ctrl+字母是因为 ctrl+shift 组合在 Windows 传统控制台上报不可靠。
+- **可选的状态色边框** —— `[ui] border`(默认开;菜单里也可切换)在终端四周画 ratatui 边框,颜色跟随 agent 状态,右上角显示 `● <状态>`;PTY 尺寸随之调整。
+- **鼠标透传** —— 子程序自己请求鼠标模式(DECSET 1000/1002/1003)时,鼠标事件以 SGR 编码转发进 PTY;没请求的不捕获、不会灌进转义乱码。
+- **`$SHELL` 兜底** —— 裸跑 `vibetty` 不再报错,默认分享当前 shell。
+- **herdr 工具集** —— `share-herdr --target <id>`(或 herdr 注入的 `HERDR_PANE_ID` env)、成功后输出 JSON `{"pane_id":...}`、`share-herdr --list` 枚举当前被 share 的 pane(以 pane title 为真相源,无状态文件);非 agent target 会开 pane 显示提示,不再静默死亡。
+
+### 变更
+
+- **设备滚动缓冲可配置** —— `--scrollback-lines <N>`(默认 8096)。
+- **kitty 键盘协议改为尽力而为** —— Windows 传统控制台不再启动即崩(0.5.0-rc.1/rc.2 的回归);代价仅是该平台上修饰键热键可能收不到。
+
+### 修复
+
+- **alt screen 下的设备滚动** —— 全屏 TUI(如 Claude Code)里的 `scroll_up`/`scroll_down` 以前是静默 no-op,现在转成 PageUp/PageDown 转发给应用。附 vt100 滚动语义测试。
+- **优雅退出** —— SIGTERM 现在会恢复终端(备用屏 / raw mode / 鼠标模式)并杀掉子进程;此前进程可能永远挂在 PTY reader 上退不出去,宿主终端被留花。
+- 非 UTF-8 窗口标题不再 panic(lossy 兜底替代 `unwrap`)。
+
 ## [0.4.3] - 2026-10-16
 
 纯 ANSI 传输、自更新子命令、aarch64 Linux 包、dialoguer 版 setup。(English changelog: [`CHANGELOG.md`](../CHANGELOG.md)。)
