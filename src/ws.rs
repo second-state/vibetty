@@ -120,7 +120,9 @@ impl WindowCallbacks {
 
 impl Callbacks for WindowCallbacks {
     fn set_window_title(&mut self, _: &mut vt100::Screen, title: &[u8]) {
-        self.title = std::str::from_utf8(title).unwrap().to_string();
+        // lossy 兜底:程序往 OSC 0 title 里塞非法 UTF-8 时,坏字节替换成 �,
+        // 不让一个 unwrap 把整个 vibetty 炸掉。
+        self.title = String::from_utf8_lossy(title).into_owned();
         self.update_title = true;
     }
 
