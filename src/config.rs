@@ -139,6 +139,8 @@ pub enum Commands {
         /// Release tag to install (default: latest stable, prereleases excluded)
         tag: Option<String>,
     },
+    /// Start only the built-in MQTT broker and stay in the foreground
+    Broker,
 }
 
 #[derive(Subcommand, Debug)]

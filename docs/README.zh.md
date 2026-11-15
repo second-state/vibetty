@@ -98,6 +98,7 @@ tmux capture-pane -t vibetty -p | tail -20   # 确认已起来
 ```
 vibetty -- <命令>                          运行模式：在 TUI 里分享给定命令（默认）
 vibetty setup                               用 TUI 配置 [mqtt]
+vibetty broker                              只启动内置 MQTT broker（Ctrl-C 退出；重复启动只警告）
 vibetty skill install    --claude [--codex] 安装 run-vibetty skill
 vibetty skill uninstall  --claude [--codex] 移除 run-vibetty skill
 ```

@@ -146,6 +146,9 @@ async fn main() {
             }
             return;
         }
+        Some(Commands::Broker) => {
+            return run_broker_only(cli.config.as_deref()).await;
+        }
         None => {}
     }
 
@@ -220,6 +223,32 @@ async fn main() {
     }
 
     ui::cleanup_terminal(&mut tui).ok();
+}
+
+/// `vibetty broker`:只启动内置 MQTT broker 然后驻留(Ctrl-C 退出)。
+/// 端口已被占(已有实例在跑)→ log warn 后干净退出,不报错——目标状态已达成。
+async fn run_broker_only(config: Option<&std::path::Path>) {
+    let Some(cfg) = config::read_mqtt_config(config) else {
+        eprintln!("Error: no [mqtt] section in the config — nothing to serve");
+        std::process::exit(1);
+    };
+    let port = cfg.builtin_port();
+    // 预检端口:bind 失败 = 已有 broker 在跑(别的 vibetty 实例或本命令的上次启动)。
+    if std::net::TcpListener::bind(("0.0.0.0", port)).is_err() {
+        log::warn!("[broker] port {port} already in use — broker appears to be running");
+        println!("broker already running on port {port} — nothing to do");
+        return;
+    }
+    let alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    if let Err(e) = broker::spawn_builtin(&cfg, alive) {
+        eprintln!("Error: {e:#}");
+        std::process::exit(1);
+    }
+    log::info!("[broker] rumqttd serving on 0.0.0.0:{port} (Ctrl-C to stop)");
+    println!("broker listening on 0.0.0.0:{port} — Ctrl-C to stop");
+    // broker 跑在独立 OS 线程上,进程退出它就死——所以这里驻留到 Ctrl-C。
+    tokio::signal::ctrl_c().await.ok();
+    log::info!("[broker] Ctrl-C, exiting");
 }
 
 /// `vibetty herdr <target>` 模式:attach 到 herdr agent 终端,经 MQTT 分享。

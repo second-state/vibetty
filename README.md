@@ -100,6 +100,8 @@ Tip: `vibetty skill install --claude` installs a `run-vibetty` skill that hands 
 ```
 vibetty -- <command>                        Run mode: share the given command in a TUI (default)
 vibetty setup                               Configure [mqtt] via TUI
+vibetty broker                              Start only the built-in MQTT broker (Ctrl-C to stop;
+                                            a second start just warns)
 vibetty skill install    --claude [--codex] Install the run-vibetty skill
 vibetty skill uninstall  --claude [--codex] Remove the run-vibetty skill
 ```
