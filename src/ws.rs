@@ -1058,6 +1058,36 @@ pub async fn run_command(
                         agent_state,
                         border,
                     );
+                } else if matches!(modal, ModalState::None)
+                    && (bytes == b"\x1b[5~" || bytes == b"\x1b[6~")
+                    && !vt_parser.screen().alternate_screen()
+                {
+                    // PageUp/PageDown 键在主屏(非 alt screen)时不进 PTY,直接调整
+                    // 本地历史 offset,**半页**(设备 scroll 消息仍是整页语义,互不影响);
+                    // 全屏 app 自己处理翻页,alt screen 时落到下面的原样转发。
+                    let up = bytes == b"\x1b[5~";
+                    let delta = (page_rows as usize / 2).max(1);
+                    let before = vt_parser.screen().scrollback();
+                    let after = if up {
+                        before.saturating_add(delta)
+                    } else {
+                        before.saturating_sub(delta)
+                    };
+                    vt_parser.screen_mut().set_scrollback(after);
+                    log::debug!("PageUp/Down key on main screen: scrollback {before} -> {after}");
+                    let screen = Arc::new(vt_parser.screen().clone());
+                    redraw(
+                        &screen,
+                        mqtt_broker_on,
+                        mqtt_client.is_some(),
+                        &modal,
+                        agent_state,
+                        border,
+                    );
+                    // 滚动没到边界、内容确实变了才重发全屏。
+                    if after != before {
+                        send_screen(&tx, screen);
+                    }
                 } else if matches!(modal, ModalState::None) {
                     log::debug!("UI Input: {:?}", String::from_utf8_lossy(&bytes));
                     terminal.send_bytes(&bytes).await?;
