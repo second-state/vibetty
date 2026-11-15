@@ -212,6 +212,7 @@ async fn main() {
         args.scrollback_lines,
         border,
         mouse_gate,
+        menu_key,
     )
     .await
     {

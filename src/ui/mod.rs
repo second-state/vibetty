@@ -247,6 +247,29 @@ fn encode_mouse_sgr(m: &crossterm::event::MouseEvent) -> Option<Vec<u8>> {
     Some(format!("\x1b[<{};{};{}{}", code, m.column + 1, m.row + 1, final_ch).into_bytes())
 }
 
+/// 把快捷键格式化成人读的标签:`ctrl+o` → "Ctrl+O"。
+pub fn format_menu_key(kb: KeyBinding) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    if kb.modifiers.contains(KeyModifiers::CONTROL) {
+        parts.push("Ctrl");
+    }
+    if kb.modifiers.contains(KeyModifiers::SHIFT) {
+        parts.push("Shift");
+    }
+    if kb.modifiers.contains(KeyModifiers::ALT) {
+        parts.push("Alt");
+    }
+    if kb.modifiers.contains(KeyModifiers::SUPER) {
+        parts.push("Super");
+    }
+    let key = match kb.code {
+        KeyCode::Char(c) => c.to_ascii_uppercase().to_string(),
+        other => format!("{other:?}"),
+    };
+    parts.push(&key);
+    parts.join("+")
+}
+
 pub fn render_frame(
     f: &mut Frame,
     screen: &vt100::Screen,
@@ -254,6 +277,7 @@ pub fn render_frame(
     modal: &ModalState,
     agent_state: AgentState,
     border: bool,
+    menu_key: &KeyBinding,
 ) {
     let size = f.area();
 
@@ -277,6 +301,14 @@ pub fn render_frame(
                         Span::raw(agent_status_label(agent_state)),
                     ])
                     .alignment(Alignment::Right),
+                )
+                // 下边框右端提示菜单快捷键(以 config `[ui] menu_key` 的实际配置为准)。
+                .title_bottom(
+                    Line::from(Span::styled(
+                        format!("[ Menu {} ]", format_menu_key(*menu_key)),
+                        Style::new().fg(Color::DarkGray),
+                    ))
+                    .alignment(Alignment::Right),
                 );
             content = block.inner(size);
             f.render_widget(block, size);
@@ -291,7 +323,7 @@ pub fn render_frame(
     // 模态对话框(菜单 / 输入地址 / MQTT 面板 / 错误),覆盖在终端之上。
     if !matches!(modal, ModalState::None) {
         let (w, h) = match modal {
-            ModalState::Menu { .. } => (40, 8),
+            ModalState::Menu { .. } => (40, 7),
             ModalState::MqttPanel { .. } => (48, 16),
             _ => (48, 9),
         };
@@ -331,7 +363,8 @@ pub fn render_frame(
         };
         match modal {
             ModalState::Menu { focus } => {
-                // 5 行:agent 状态(纯显示)+ MQTT / Border / Fit / Quit 四个条目。
+                // 4 行:MQTT / Border / Fit / Quit 四个条目。
+                // (agent 状态不再放这里:开边框时它常驻上边框右上角,菜单保持干净。)
                 let has_mqtt = mqtt.is_some();
                 let rows = Layout::default()
                     .direction(Direction::Vertical)
@@ -340,18 +373,8 @@ pub fn render_frame(
                         Constraint::Length(1),
                         Constraint::Length(1),
                         Constraint::Length(1),
-                        Constraint::Length(1),
                     ])
                     .split(panes[0]);
-                // 第一行:OSC 7501 agent 状态(彩色圆点 + 状态名,不可聚焦)。
-                let color = agent_status_color(agent_state);
-                f.render_widget(
-                    Paragraph::new(Line::from(vec![
-                        Span::styled("● ", Style::new().fg(color)),
-                        Span::raw(agent_status_label(agent_state)),
-                    ])),
-                    rows[0],
-                );
                 // 条目行:选中项高亮(LightBlue 底,与 MqttPanel 聚焦行同款)。
                 let items: [(MenuFocus, String); 4] = [
                     (
@@ -366,7 +389,7 @@ pub fn render_frame(
                     (MenuFocus::Quit, "Quit".to_string()),
                 ];
                 for (i, (item_focus, label)) in items.iter().enumerate() {
-                    let row = rows[i + 1];
+                    let row = rows[i];
                     let style = if *focus == *item_focus {
                         Style::default().bg(Color::LightBlue).fg(Color::Black)
                     } else {

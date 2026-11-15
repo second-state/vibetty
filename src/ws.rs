@@ -543,6 +543,7 @@ pub async fn run_command(
     scrollback_lines: usize,
     mut border: bool,
     mouse_gate: Arc<AtomicBool>,
+    menu_key: crate::ui::KeyBinding,
 ) -> anyhow::Result<()> {
     // headless(无 TTY,例如纯 MQTT、无 WS 客户端)时 crossterm 返回 0×0 而非 Err,
     // unwrap_or 兜不住;尺寸为 0 会让 vt80 渲染时 overflow panic。拿不到有效尺寸时默认 80×24。
@@ -601,8 +602,9 @@ pub async fn run_command(
             client_on: mqtt_client_on,
         };
         let mqtt_opt = mqtt_cfg_present.then_some(&mqtt);
-        let _ =
-            tui.draw(|f| crate::ui::render_frame(f, screen, mqtt_opt, modal, agent_state, border));
+        let _ = tui.draw(|f| {
+            crate::ui::render_frame(f, screen, mqtt_opt, modal, agent_state, border, &menu_key)
+        });
     };
 
     // presence 心跳由 ws 主循环驱动:每 PRESENCE_INTERVAL_SECS 发一次 Presence(含 title+state)。
