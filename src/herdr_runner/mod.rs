@@ -388,14 +388,9 @@ pub async fn list_shared() -> anyhow::Result<()> {
 /// (pane 静默消失比显示「不支持」更让人摸不着头脑。)
 async fn run_notice(message: &str) -> anyhow::Result<()> {
     let mut tui = ui::init_terminal()?;
-    let (ui_tx, mut ui_rx) = mpsc::channel(16);
-    ui::spawn_event_loop(ui_tx);
-    ui::draw_message(&mut tui, message)?;
-    while let Some(evt) = ui_rx.recv().await {
-        match evt {
-            ui::HerdrUiEvent::Quit => break,
-            ui::HerdrUiEvent::Resize => ui::draw_message(&mut tui, message)?,
-        }
+    for left in (1..=5).rev() {
+        ui::draw_message(&mut tui, &format!("{message} — exiting in {left}s"))?;
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
     ui::cleanup_terminal(&mut tui)?;
     Ok(())
