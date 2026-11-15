@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use ratatui::layout::Rect;
 use tokio::sync::{broadcast, mpsc};
 use tui_input::InputRequest;
 use vt100::Callbacks;
@@ -959,6 +960,34 @@ pub async fn run_command(
                 }
             }
 
+            TerminalEvent::UIEvent(crate::ui::UIEvent::Mouse(mut m)) => {
+                // 鼠标坐标换算:SGR 序列里的行列是【宿主全窗坐标】,而子进程的格子
+                // 从内容区(边框内、居中后)开始——边框开着时内容区左上角在 (1,1),
+                // 原样转发会整体偏移一行一列。这里平移到 PTY 格坐标;落在边框上或
+                // 内容区外的事件直接丢弃。
+                let (t_rows, t_cols) = vt_parser.screen().size();
+                let content = if border {
+                    Rect::new(
+                        1,
+                        1,
+                        term_size.0.saturating_sub(2),
+                        term_size.1.saturating_sub(2),
+                    )
+                } else {
+                    Rect::new(0, 0, term_size.0, term_size.1)
+                };
+                let area = crate::ui::centered_rect(content, t_cols, t_rows);
+                let col = m.column as i32 - area.x as i32;
+                let row = m.row as i32 - area.y as i32;
+                if col < 0 || row < 0 || col >= t_cols as i32 || row >= t_rows as i32 {
+                    continue;
+                }
+                m.column = col as u16;
+                m.row = row as u16;
+                if let Some(bytes) = crate::ui::encode_mouse_sgr(&m) {
+                    terminal.send_bytes(&bytes).await?;
+                }
+            }
             TerminalEvent::UIEvent(crate::ui::UIEvent::ToggleMenu) => {
                 // 菜单快捷键:开关主菜单弹窗。其它模态(MqttPanel/Error)打开时不响应。
                 log::debug!(

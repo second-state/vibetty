@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crossterm::{
     event::{
         self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
-        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        MouseEvent, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -26,6 +26,9 @@ use crate::terminal::agent::AgentState;
 
 pub enum UIEvent {
     Input(Vec<u8>),
+    /// 鼠标事件(结构化,未编码):坐标换算需要 ws 侧的内容区几何信息,
+    /// 所以这里只上报原始事件,由 ws 换算平移后再编码成 SGR 转发。
+    Mouse(MouseEvent),
     Resize(u16, u16),
     /// 菜单快捷键(config `[ui] menu_key`,默认 ctrl+o):开关主菜单弹窗。
     /// 在事件循环拦截,不转发 PTY。
@@ -217,7 +220,8 @@ pub fn set_mouse_capture(on: bool) {
 }
 
 /// 把 crossterm 鼠标事件编码成 SGR (1006) 字节序列,原样转发进 PTY。
-fn encode_mouse_sgr(m: &crossterm::event::MouseEvent) -> Option<Vec<u8>> {
+/// 坐标换算(边框/居中偏移)由调用方先完成。
+pub(crate) fn encode_mouse_sgr(m: &MouseEvent) -> Option<Vec<u8>> {
     use crossterm::event::{MouseButton, MouseEventKind};
     let mut code = match m.kind {
         MouseEventKind::ScrollUp => 64,
@@ -487,7 +491,7 @@ pub fn render_frame(
 }
 
 /// 在 `area` 内居中放置一个 `want_w` × `want_h` 的矩形;超出 `area` 时裁到 `area` 大小。
-fn centered_rect(area: Rect, want_w: u16, want_h: u16) -> Rect {
+pub(crate) fn centered_rect(area: Rect, want_w: u16, want_h: u16) -> Rect {
     let w = want_w.min(area.width);
     let h = want_h.min(area.height);
     let x = area.x + (area.width - w) / 2;
@@ -617,12 +621,10 @@ fn event_loop_thread(
                 let bytes = s.into_bytes();
                 let _ = tx_to_pty.blocking_send(UIEvent::Input(bytes));
             } else if let Event::Mouse(mouse) = evt {
-                // 鼠标透传:只有子进程自己请求了鼠标模式(gate)才编码成 SGR 转发,
-                // 否则事件直接丢弃(终端侧的上报也已被 ws 侧关掉,这里只是兜底)。
-                if mouse_gate.load(Ordering::Relaxed)
-                    && let Some(bytes) = encode_mouse_sgr(&mouse)
-                {
-                    let _ = tx_to_pty.blocking_send(UIEvent::Input(bytes));
+                // 鼠标透传:只有子进程自己请求了鼠标模式(gate)才上报;编码/坐标换算
+                // 在 ws 侧(需要内容区几何),这里只递原始事件。
+                if mouse_gate.load(Ordering::Relaxed) {
+                    let _ = tx_to_pty.blocking_send(UIEvent::Mouse(mouse));
                 }
             } else if let Event::Resize(cols, rows) = evt {
                 let _ = tx_to_pty.blocking_send(UIEvent::Resize(cols, rows));
