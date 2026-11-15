@@ -433,6 +433,11 @@ pub async fn run_herdr(
     // 后台每 1s 轮询 target 的 agent 状态;变化时经 watch 通道通知主循环。
     // (agent 名基本恒定,只在 init 取一次;title 跟着 status 一起走 watch 给 presence 用。)
     let (tx, mut agent_status_rx) = tokio::sync::watch::channel((agent_status, terminal_title));
+    // watch 的 sender 随轮询任务退出而 drop 后,changed() 会永远立即返回 Err;
+    // 这个标志把状态分支从 select 里禁用,避免 biased 下空转饿死其它事件源。
+    let mut status_watch_open = true;
+    // 轮询发现 agent pane 没了(agent_not_found)时通知主循环:显示原因 + 倒计时退出。
+    let (gone_tx, mut agent_gone_rx) = tokio::sync::mpsc::channel::<()>(1);
     let status_target = target.clone();
     tokio::spawn(async move {
         let mut current = agent_status;
@@ -447,7 +452,14 @@ pub async fn run_herdr(
                 }
                 Ok(_) => {}
                 Err(e) => {
-                    log::warn!("[herdr] status poll for {status_target} failed: {e}");
+                    if e.to_string().contains("agent_not_found") {
+                        // agent pane 没了:确定性事件,通知主循环走「提示 + 倒计时退出」,
+                        // 而不是让状态永久冻结。
+                        log::warn!("[herdr] {status_target} agent gone: {e}");
+                        let _ = gone_tx.send(()).await;
+                    } else {
+                        log::warn!("[herdr] status poll for {status_target} failed: {e}");
+                    }
                     return;
                 }
             }
@@ -587,9 +599,26 @@ pub async fn run_herdr(
                 Some(evt) => TerminalEvent::Ui(evt),
                 None => TerminalEvent::Error,
             },
+            // 轮询发现 agent pane 没了:状态区显示原因 + 5s 倒计时,然后优雅退出
+            // (kill 内层 attach 子进程、share pane 随之关闭)。放在 biased 最前——
+            // 轮询任务退出时 watch 的 sender 也会 drop,状态分支会立刻就绪,不把
+            // gone 提到前面它会被饿死。
+            _ = agent_gone_rx.recv() => {
+                for left in (1..=5).rev() {
+                    ui::draw_message(
+                        &mut tui,
+                        &format!("agent target {target} not found — exiting in {left}s"),
+                    )?;
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+                log::info!("[herdr] {target} agent gone, exiting");
+                break;
+            },
             // 后台轮询发现 herdr agent 状态变化 → 更新 current_state 并立即重发 presence
-            // (取代旧的 title 翻转检测)。
-            res = agent_status_rx.changed() => {
+            // (取代旧的 title 翻转检测)。轮询任务退出后 sender 全部 drop,changed() 会
+            // 永远立即返回 Err——用 status_watch_open 把这个分支禁掉,否则 biased 下它会
+            // 空转饿死后面的 PTY/MQTT 分支。
+            res = agent_status_rx.changed(), if status_watch_open => {
                 if res.is_ok() {
                     let (s, title) = agent_status_rx.borrow().clone();
                     current_state = agent_status_to_state(s);
@@ -609,8 +638,9 @@ pub async fn run_herdr(
                         &ui_title,
                     );
                 } else {
-                    // 轮询任务退出(sender 没了);状态保持最后一次。
-                    log::debug!("[herdr] agent_status_rx closed");
+                    // 轮询任务退出(sender 没了);状态保持最后一次,分支停用。
+                    status_watch_open = false;
+                    log::debug!("[herdr] agent_status_rx closed; status frozen");
                 }
                 continue;
             },
