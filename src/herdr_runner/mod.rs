@@ -236,6 +236,20 @@ async fn shrink_pane_to_one_row(
 /// `vibetty share-herdr`:herdr `share` action 入口(OneShotRuntime)。拿当前 focused 的 agent
 /// pane,在它下面开一个 plugin pane 跑 `vibetty herdr`(target 走 env),再把新 pane 缩到 ~1 行。
 /// 由 herdr 触发(快捷键 / 命令面板),不手动跑。
+/// 沿 `std::error::Error::source()` 把整条错误链拼成一个字符串("a: b: c")。
+/// herdr-plugin SDK 的错误 Display 是通用文案(如 "setup callback failed"),
+/// 真实原因在 source 链里,日志里要带全。
+fn error_chain(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut s = e.to_string();
+    let mut src = e.source();
+    while let Some(cur) = src {
+        s.push_str(": ");
+        s.push_str(&cur.to_string());
+        src = cur.source();
+    }
+    s
+}
+
 pub async fn run_share_herdr(target: Option<String>) -> anyhow::Result<()> {
     use herdr_plugin::{
         App, Context, OneShotRuntime, PluginPaneDirection, PluginPaneOpenOptions,
@@ -250,59 +264,69 @@ pub async fn run_share_herdr(target: Option<String>) -> anyhow::Result<()> {
             // 先在闭包体里 clone 一份再 move 进去。
             let target_arg = target_arg.clone();
             async move {
-                let client = ctx.client();
-                // target 解析优先级:`--target` 参数 > `HERDR_PANE_ID` env(herdr 注入到
-                // pane 的调用方 pane id)> 触发 action 时 focused 的 pane > current。
-                // 注意 plugin action 场景 herdr 注入的 HERDR_PANE_ID 是临时 pane,不是
-                // 用户那个,所以它排在 focused_pane_id 之前只在手动调用时有意义。
-                let target = target_arg
-                    .or_else(|| {
-                        let v = std::env::var("HERDR_PANE_ID").ok();
-                        v.filter(|s| !s.trim().is_empty())
-                    })
-                    .or_else(|| {
-                        ctx.env()
-                            .plugin_context
-                            .as_ref()
-                            .and_then(|c| c.focused_pane_id.clone())
-                    })
-                    .unwrap_or_else(|| {
-                        // 没有任何线索:同步兜底不行(socket 调用是 async),这里留空交给
-                        // 下面的 fallback 分支处理。
-                        String::new()
-                    });
-                let target = if target.is_empty() {
-                    client
+                // SDK 的错误包装(SetupError)只保留 source() 链,Display 是通用的
+                // "setup callback failed" 且 SDK 自己不打日志——在闭包里把整条错误链
+                // 落到日志文件,否则真实失败原因哪儿都查不到。
+                let res: Result<(), herdr_plugin::SetupError> = async {
+                    let client = ctx.client();
+                    // target 解析优先级:`--target` 参数 > `HERDR_PANE_ID` env(herdr 注入到
+                    // pane 的调用方 pane id)> 触发 action 时 focused 的 pane > current。
+                    // 注意 plugin action 场景 herdr 注入的 HERDR_PANE_ID 是临时 pane,不是
+                    // 用户那个,所以它排在 focused_pane_id 之前只在手动调用时有意义。
+                    let target = target_arg
+                        .or_else(|| {
+                            let v = std::env::var("HERDR_PANE_ID").ok();
+                            v.filter(|s| !s.trim().is_empty())
+                        })
+                        .or_else(|| {
+                            ctx.env()
+                                .plugin_context
+                                .as_ref()
+                                .and_then(|c| c.focused_pane_id.clone())
+                        })
+                        .unwrap_or_else(|| {
+                            // 没有任何线索:同步兜底不行(socket 调用是 async),这里留空交给
+                            // 下面的 fallback 分支处理。
+                            String::new()
+                        });
+                    let target = if target.is_empty() {
+                        client
+                            .pane()
+                            .current(herdr_plugin::PaneSelector::Current)
+                            .await?
+                            .pane
+                            .pane_id
+                    } else {
+                        target
+                    };
+                    // 在 target 下面开 plugin pane(跑 vibetty herdr),target 经 env 传进去。
+                    let resp = client
                         .pane()
-                        .current(herdr_plugin::PaneSelector::Current)
-                        .await?
-                        .pane
-                        .pane_id
-                } else {
-                    target
-                };
-                // 在 target 下面开 plugin pane(跑 vibetty herdr),target 经 env 传进去。
-                let resp = client
-                    .pane()
-                    .open_plugin_pane(PluginPaneOpenOptions {
-                        plugin_id: HERDR_PLUGIN_ID.to_owned(),
-                        entrypoint: HERDR_ENTRYPOINT.to_owned(),
-                        placement: Some(PluginPanePlacement::Split),
-                        workspace_id: None,
-                        target_pane_id: Some(target.clone()),
-                        direction: Some(PluginPaneDirection::Down),
-                        cwd: None,
-                        focus: false,
-                        env: vec![(HERDR_TARGET_ENV.to_owned(), target.clone())],
-                    })
-                    .await?;
-                let new_pane = resp.plugin_pane.pane.pane_id;
-                // 把新开的 vibetty pane 缩到 ~1 行(直接缩它自己,不碰 agent pane)。
-                shrink_pane_to_one_row(client, &new_pane).await?;
-                // 成功路径把新 share pane id 以 JSON 打到 stdout(与 --list、失败走
-                // stderr+exit 1 的约定对称),供脚本 jq 解析。
-                println!("{}", serde_json::json!({ "pane_id": new_pane }));
-                Ok(())
+                        .open_plugin_pane(PluginPaneOpenOptions {
+                            plugin_id: HERDR_PLUGIN_ID.to_owned(),
+                            entrypoint: HERDR_ENTRYPOINT.to_owned(),
+                            placement: Some(PluginPanePlacement::Split),
+                            workspace_id: None,
+                            target_pane_id: Some(target.clone()),
+                            direction: Some(PluginPaneDirection::Down),
+                            cwd: None,
+                            focus: false,
+                            env: vec![(HERDR_TARGET_ENV.to_owned(), target.clone())],
+                        })
+                        .await?;
+                    let new_pane = resp.plugin_pane.pane.pane_id;
+                    // 把新开的 vibetty pane 缩到 ~1 行(直接缩它自己,不碰 agent pane)。
+                    shrink_pane_to_one_row(client, &new_pane).await?;
+                    // 成功路径把新 share pane id 以 JSON 打到 stdout(与 --list、失败走
+                    // stderr+exit 1 的约定对称),供脚本 jq 解析。
+                    println!("{}", serde_json::json!({ "pane_id": new_pane }));
+                    Ok(())
+                }
+                .await;
+                if let Err(e) = &res {
+                    log::error!("share-herdr setup failed: {}", error_chain(e.as_ref()));
+                }
+                res
             }
         })
         .run()

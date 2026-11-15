@@ -132,7 +132,9 @@ async fn main() {
                 herdr_runner::run_share_herdr(target).await
             };
             if let Err(e) = result {
-                eprintln!("Error: {e}");
+                // {e:#}:anyhow 沿 source 链打印(SDK 包装错误如 "setup callback failed"
+                // 的真实原因在链里),否则只看得到通用文案。
+                eprintln!("Error: {e:#}");
                 std::process::exit(1);
             }
             return;
