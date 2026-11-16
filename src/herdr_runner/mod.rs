@@ -462,7 +462,10 @@ pub async fn run_herdr(
         }
     });
 
-    // herdr attach:PTY 里跑 `herdr agent attach <target>`(初始 80×40,等远端 sync 再调)。
+    // herdr attach:PTY 里跑 `herdr agent attach <target>`。PTY **不随 share 启动**:
+    // 先等第一个 Sync(拿到远端尺寸)再创建 PTY,app 一出生就是正确尺寸——
+    // 不会先按 80×40 渲染、再等 SIGWINCH 重绘闪一帧。设备一直不来则超时兜底
+    // 按 80×40 启动(与旧行为一致)。
     let command = [
         "herdr".to_string(),
         "agent".to_string(),
@@ -470,19 +473,6 @@ pub async fn run_herdr(
         target.clone(),
     ];
     let process_command = command.first().unwrap().as_str();
-
-    let vt_cols = 80;
-    let vt_rows = 40;
-    let env: [(String, String); 0] = [];
-    let mut terminal = crate::terminal::pty::new_with_command(
-        process_command,
-        &command[1..],
-        &env,
-        (vt_rows, vt_cols),
-    )
-    .await?;
-
-    let mut vt_parser = vt100::Parser::new(vt_rows, vt_cols, 1024);
 
     // 本地 1 行 TUI + 事件循环(只 Ctrl+C/q 退出 + Resize)。
     let mut tui = ui::init_terminal().expect("Failed to initialize terminal");
@@ -511,6 +501,112 @@ pub async fn run_herdr(
     // presence 心跳:interval 首次 tick 立即返回 → 充当上线公告。
     let mut presence_interval =
         tokio::time::interval(std::time::Duration::from_secs(mqtt::PRESENCE_INTERVAL_SECS));
+
+    // 上线公告**立刻**发:设备靠 presence 发现实例才会发 Sync,而 PTY 要等 Sync,
+    // 不先公告会死锁(设备永远看不到实例)。
+    {
+        let (s, title) = agent_status_rx.borrow().clone();
+        let _ = tx.send(ServerMessage::Presence {
+            title,
+            state: agent_status_to_state(s),
+        });
+    }
+
+    // ── Phase-1:PTY 未启动,只等第一个 Sync 来决定 PTY 尺寸。**没有 Sync 就一直等**,
+    //    不做超时兜底——设备什么时候来,attach 就什么时候按正确尺寸启动。
+    //    其它 MQTT 输入(键盘/文本/滚动)此时没有子进程可投,丢弃。
+    //    MQTT 入口关闭(无 [mqtt] 配置)时同样一直等(永远等不到 Sync,等于不启动)。
+    let mut screen_closed;
+    let mut mqtt_open = true;
+    let (vt_cols, vt_rows) = 'wait: loop {
+        tokio::select! {
+            biased;
+            _ = agent_gone_rx.recv() => {
+                // agent pane 在启动阶段就没了:提示 + 5s 倒计时退出(此时无 PTY 可杀)。
+                for left in (1..=5).rev() {
+                    ui::draw_message(
+                        &mut tui,
+                        &format!("agent target {target} not found — exiting in {left}s"),
+                    )?;
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+                log::info!("[herdr] {target} agent gone before first sync, exiting");
+                let _ = ui::cleanup_terminal(&mut tui);
+                return Ok(());
+            }
+            _ = presence_interval.tick() => {
+                let (s, title) = agent_status_rx.borrow().clone();
+                let _ = tx.send(ServerMessage::Presence {
+                    title,
+                    state: agent_status_to_state(s),
+                });
+            }
+            res = agent_status_rx.changed(), if status_watch_open => {
+                if res.is_ok() {
+                    let (s, title) = agent_status_rx.borrow().clone();
+                    let _ = tx.send(ServerMessage::Presence {
+                        title: title.clone(),
+                        state: agent_status_to_state(s),
+                    });
+                    let _ = ui::draw_status(
+                        &mut tui,
+                        &agent_name,
+                        &target,
+                        mqtt_client.is_some(),
+                        screen_bytes.load(Ordering::Relaxed),
+                        &title,
+                    );
+                } else {
+                    status_watch_open = false;
+                }
+            }
+            ui_evt = ui_rx.recv() => match ui_evt {
+                Some(ui::HerdrUiEvent::Quit) | None => {
+                    log::info!("[herdr] quit requested before first sync");
+                    let _ = ui::cleanup_terminal(&mut tui);
+                    return Ok(());
+                }
+                _ => {}
+            },
+            msg = rx.recv(), if mqtt_open => match msg {
+                Some(ClientMessage::Sync { width, height, pixels, close }) => {
+                    screen_closed = close;
+                    let (cols, rows) = if pixels {
+                        let avail_w = (width as u32).saturating_sub(2 * SCREEN_PADDING);
+                        let avail_h = (height as u32).saturating_sub(2 * SCREEN_PADDING);
+                        (
+                            (avail_w / SCREEN_CHAR_WIDTH).max(8) as u16,
+                            (avail_h / SCREEN_CHAR_HEIGHT).max(2) as u16,
+                        )
+                    } else {
+                        (width.max(8), height.max(2))
+                    };
+                    log::info!(
+                        "[herdr] first sync received, starting PTY at {cols}×{rows} (close={close})"
+                    );
+                    break 'wait (cols, rows);
+                }
+                Some(_) => {}
+                None => {
+                    // MQTT 入口关闭(无 [mqtt] 配置):禁用本分支,永远等不到 Sync
+                    // = attach 永不启动。
+                    mqtt_open = false;
+                    log::warn!("[herdr] mqtt channel closed; attach will not start until a sync arrives");
+                }
+            },
+        }
+    };
+
+    let env: [(String, String); 0] = [];
+    let mut terminal = crate::terminal::pty::new_with_command(
+        process_command,
+        &command[1..],
+        &env,
+        (vt_rows, vt_cols),
+    )
+    .await?;
+
+    let mut vt_parser = vt100::Parser::new(vt_rows, vt_cols, 1024);
 
     // ── 启动初始化去抖:等 PTY 输出静默满 500ms(上限 5s),稳定后发首帧 + presence。
     //   (本地无屏幕可看,期间只吃 PTY 输出进 vt_parser,不 redraw。)
@@ -555,9 +651,9 @@ pub async fn run_herdr(
     );
 
     // screen 去抖(无条件尾部去抖 100ms)。close=true 时暂停自主推屏。
+    // (screen_closed 在 Phase-1 已声明:首个 Sync 的 close 也会被遵守。)
     let mut pending_screen: Option<Arc<vt100::Screen>> = None;
     let mut send_deadline: Option<tokio::time::Instant> = None;
-    let mut screen_closed = false;
 
     // resize 后 PTY 重绘 burst 吸收:停顿满 500ms 再发一帧全屏。
     const RESIZE_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
