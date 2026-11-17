@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.5.1] - 2026-11-18
+
+Mouse fixes, standalone broker, herdr share lifecycle improvements. (中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md).)
+
+### Added
+
+- **`vibetty broker`** — start only the built-in MQTT broker and stay in the foreground; a second start just warns. Doubles as a lightweight standalone broker that every vibetty instance reuses (instances skip their own broker when the port is taken).
+- **Menu hotkey hint** — with the border on, the bottom-right corner shows `[ Menu Ctrl+O ]`, formatted from the actual `[ui] menu_key` config.
+- **herdr: agent-gone detection** — when the agent pane disappears mid-share, the status bar shows `agent target <id> not found — exiting in Ns` and the share exits after 5s instead of freezing the status forever.
+
+### Changed
+
+- **herdr: the share pane starts without a PTY** — it announces presence immediately and only spawns the PTY (and `herdr agent attach`) at the first Sync's size, so the attached app is born at the viewer's geometry; no more 80×40 flash-then-redraw. Without a viewer the attach simply never starts.
+- **PageUp/PageDown on the main screen** scrolls vibetty's local history (half a page) instead of reaching the PTY; full-screen apps on the alternate screen still receive the keys verbatim.
+- **Menu popup slimmed** — the agent status row moved out (it lives on the border's top-right corner).
+
+### Fixed
+
+- **Mouse events were offset by one row/column when the border was on** — SGR sequences carried raw host-window coordinates while the child grid starts inside the border. Events are now translated to PTY coordinates (and dropped on the border/outside the content).
+- **herdr main loop could starve** — a dead status poll closed the status watch, whose `changed()` arm then became permanently ready under `biased` selection, busy-looping the loop. The arm is now disabled once the watch closes.
+
 ## [0.5.0] - 2026-11-03
 
 OSC 7501 agent status end to end, hotkey menu popup, mouse passthrough, herdr tooling. (中文版见 [`docs/CHANGELOG.zh-CN.md`](docs/CHANGELOG.zh-CN.md).)

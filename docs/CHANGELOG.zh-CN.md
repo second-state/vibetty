@@ -1,5 +1,26 @@
 # 变更日志 (CHANGELOG)
 
+## [0.5.1] - 2026-11-18
+
+鼠标修复、独立 broker 子命令、herdr 分享生命周期改进。(English changelog: [`CHANGELOG.md`](../CHANGELOG.md)。)
+
+### 新增
+
+- **`vibetty broker`** —— 只启动内置 MQTT broker 并驻留前台;重复启动仅警告。可当轻量独立 broker 用,其它 vibetty 实例检测到端口被占会自动让位、复用它。
+- **菜单快捷键提示** —— 边框开启时,下边框右端显示 `[ Menu Ctrl+O ]`,按 `[ui] menu_key` 的实际配置生成。
+- **herdr:agent 消失检测** —— 分享过程中 agent pane 没了,状态条显示 `agent target <id> not found — exiting in Ns`,5 秒后退出,不再永久冻结状态。
+
+### 变更
+
+- **herdr:分享 pane 不再随启动开 PTY** —— 先立即公告 presence,收到第一个 Sync 才按其尺寸启动 PTY(和 attach),app 一出生就是观看端几何,没有 80×40 闪帧;没有观看端则 attach 不启动。
+- **主屏的 PageUp/PageDown** 改为滚动 vibetty 本地历史(半页),不再进 PTY;alt screen 的全屏 app 仍原样收到按键。
+- **菜单弹窗瘦身** —— agent 状态行移除(它在边框右上角常驻)。
+
+### 修复
+
+- **边框开启时鼠标事件偏移一行一列** —— SGR 序列携带的是宿主全窗坐标,而子进程格子从边框内开始。现在事件先换算成 PTY 坐标再转发,落在边框上/内容区外的事件丢弃。
+- **herdr 主循环可能饿死** —— 状态轮询死亡会关闭 watch,`biased` select 下其 `changed()` 分支永久就绪导致空转。现在 watch 关闭后该分支从 select 中禁用。
+
 ## [0.5.0] - 2026-11-03
 
 OSC 7501 agent 状态全链路、快捷键菜单弹窗、鼠标透传、herdr 工具集。(English changelog: [`CHANGELOG.md`](../CHANGELOG.md)。)
